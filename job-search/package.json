@@ -1,0 +1,14 @@
+{
+  "name": "local-job-search-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Human-in-the-loop ATS job search automation with email self-notifications.",
+  "scripts": {
+    "gmail:notify": "node scripts/gmail_notify.js",
+    "outlook:notify": "node scripts/outlook_notify.js",
+    "fill:form": "node scripts/fill_form.js"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0"
+  }
+}

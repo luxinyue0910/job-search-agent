@@ -1,0 +1,15 @@
+node_modules/
+__pycache__/
+.browser-profile/
+output/
+tmp/
+
+# Personal/private job-search data. This repository may be public, so keep
+# real identities, resumes, trackers, company lists, and browser sessions out.
+profile.json
+profiles/
+resume/*.pdf
+resume/master_resume.md
+data/applications.json
+data/applications.csv
+data/sources.json

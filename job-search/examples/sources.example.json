@@ -1,0 +1,19 @@
+{
+  "sources": [
+    {
+      "company": "Example Greenhouse Company",
+      "platform": "greenhouse",
+      "url": "https://boards.greenhouse.io/example"
+    },
+    {
+      "company": "Example Lever Company",
+      "platform": "lever",
+      "url": "https://jobs.lever.co/example"
+    },
+    {
+      "company": "Example Ashby Company",
+      "platform": "ashby",
+      "url": "https://jobs.ashbyhq.com/example"
+    }
+  ]
+}

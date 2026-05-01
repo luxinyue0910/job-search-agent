@@ -1,0 +1,113 @@
+{
+  "personal": {
+    "legal_name": "Your Legal Name",
+    "name": "Your Preferred Name",
+    "email": "you@example.com",
+    "phone": "555-555-5555",
+    "location": "City, State",
+    "city": "City",
+    "state": "State",
+    "country": "United States"
+  },
+  "links": {
+    "website": "https://example.com",
+    "linkedin": "https://www.linkedin.com/in/example",
+    "github": "https://github.com/example"
+  },
+  "work_authorization": {
+    "authorized_in_us": true,
+    "requires_sponsorship": false,
+    "status": "Authorized to work in the United States"
+  },
+  "targets": {
+    "roles": [
+      "Software Engineer",
+      "Backend Engineer",
+      "Full-Stack Engineer",
+      "AI Engineer",
+      "Machine Learning Engineer"
+    ],
+    "levels": [
+      "New Grad",
+      "Entry Level",
+      "Software Engineer I"
+    ],
+    "keywords": [
+      "Python",
+      "Java",
+      "TypeScript",
+      "React",
+      "Node.js",
+      "SQL",
+      "LLM",
+      "RAG",
+      "AWS"
+    ]
+  },
+  "preferences": {
+    "locations": [
+      "Remote",
+      "Seattle",
+      "San Francisco Bay Area",
+      "United States"
+    ],
+    "willing_to_relocate": true,
+    "relocation_note": "Open to relocation for selected locations.",
+    "job_types": [
+      "Full-time"
+    ],
+    "salary_expectation": "Negotiable",
+    "start_date": "Immediately",
+    "earliest_start_date": "Immediately",
+    "referral_source": "Company Website"
+  },
+  "application_defaults": {
+    "years_experience": "0-2",
+    "education_level": "Master's",
+    "authorized_to_work": "Yes",
+    "requires_sponsorship": "No",
+    "willing_to_relocate": "Yes",
+    "earliest_start_date": "Immediately",
+    "salary_expectation": "Negotiable",
+    "referral_source": "Company Website",
+    "gender": "Prefer not to say",
+    "race_ethnicity": "Prefer not to say",
+    "veteran_status": "No",
+    "disability_status": "Prefer not to say",
+    "qualification_experience_questions": "Yes"
+  },
+  "education": {
+    "school": "University Name",
+    "degree": "Master of Science",
+    "major": "Computer Science",
+    "gpa": "4.00/4.00",
+    "start_date": "2023-09",
+    "graduation_date": "2025-12",
+    "location": "City, State"
+  },
+  "experience_years": {
+    "total_professional": "0-2",
+    "python": "1-3",
+    "java": "1-3",
+    "typescript": "1-3",
+    "react": "1-3",
+    "node_js": "1-3",
+    "aws": "1-3",
+    "llm": "1-3",
+    "sql": "1-3"
+  },
+  "dealbreakers": {
+    "security_clearance_required": true,
+    "senior_staff_principal_roles": true,
+    "minimum_years_over": 5,
+    "remote_only_if_outside_preferences": false
+  },
+  "notifications": {
+    "email_enabled": true,
+    "provider": "outlook",
+    "gmail_enabled": false,
+    "mode": "self_summary_only",
+    "send_after_run": true
+  },
+  "resume_file": "job-search/resume/resume.pdf"
+}
