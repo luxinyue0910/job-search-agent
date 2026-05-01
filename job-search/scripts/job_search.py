@@ -27,13 +27,14 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_BASE_ROOT = Path(os.environ["JOB_SEARCH_PRIVATE_DIR"]).expanduser() if os.environ.get("JOB_SEARCH_PRIVATE_DIR") else ROOT
 PERSON = os.environ.get("JOB_SEARCH_PERSON", "default")
-PERSON_ROOT = ROOT
-PROFILE_PATH = ROOT / "profile.json"
-APPLICATIONS_JSON = ROOT / "data" / "applications.json"
-APPLICATIONS_CSV = ROOT / "data" / "applications.csv"
-SOURCES_PATH = ROOT / "data" / "sources.json"
-OUTPUT_DIR = ROOT / "output"
+PERSON_ROOT = PRIVATE_BASE_ROOT
+PROFILE_PATH = PRIVATE_BASE_ROOT / "profile.json"
+APPLICATIONS_JSON = PRIVATE_BASE_ROOT / "data" / "applications.json"
+APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
+SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
+OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 
 CSV_FIELDS = [
@@ -108,11 +109,11 @@ def configure_person(person: str) -> None:
     global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
 
     PERSON = slugify(person or "default")
-    default_profile_dir = ROOT / "profiles" / "default"
+    default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
     if PERSON == "default" and not default_profile_dir.exists():
-        PERSON_ROOT = ROOT
+        PERSON_ROOT = PRIVATE_BASE_ROOT
     else:
-        PERSON_ROOT = ROOT / "profiles" / PERSON
+        PERSON_ROOT = PRIVATE_BASE_ROOT / "profiles" / PERSON
     PROFILE_PATH = PERSON_ROOT / "profile.json"
     APPLICATIONS_JSON = PERSON_ROOT / "data" / "applications.json"
     APPLICATIONS_CSV = PERSON_ROOT / "data" / "applications.csv"
@@ -127,7 +128,9 @@ def require_person_files() -> None:
         paths = "\n".join(f"- {path}" for path in missing)
         raise SystemExit(
             f"Missing person workspace files for '{PERSON}'. Run:\n"
-            f"python3 job-search/scripts/job_search.py --person {PERSON} init-person\n\nMissing:\n{paths}"
+            f"python3 job-search/scripts/job_search.py --person {PERSON} init-person\n\n"
+            f"If your private data lives outside this repo, set JOB_SEARCH_PRIVATE_DIR first.\n\n"
+            f"Missing:\n{paths}"
         )
 
 
@@ -421,7 +424,7 @@ def master_resume_path() -> Path:
     person_resume = PERSON_ROOT / "resume" / "master_resume.md"
     if person_resume.exists():
         return person_resume
-    return ROOT / "resume" / "master_resume.md"
+    return ROOT / "examples" / "master_resume.example.md"
 
 
 def template_path(name: str) -> Path:
@@ -742,14 +745,11 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_init_person(_args: argparse.Namespace) -> None:
-    if PERSON_ROOT == ROOT:
-        print("Default root workspace already exists.")
-        return
-    create_from_template(ROOT / "profile.json", PROFILE_PATH)
-    create_from_template(ROOT / "data" / "sources.json", SOURCES_PATH)
-    create_from_template(ROOT / "data" / "applications.json", APPLICATIONS_JSON)
-    create_from_template(ROOT / "data" / "applications.csv", APPLICATIONS_CSV)
-    create_from_template(ROOT / "resume" / "master_resume.md", PERSON_ROOT / "resume" / "master_resume.md")
+    create_from_template(ROOT / "examples" / "profile.example.json", PROFILE_PATH)
+    create_from_template(ROOT / "examples" / "sources.example.json", SOURCES_PATH)
+    create_from_template(ROOT / "examples" / "applications.example.json", APPLICATIONS_JSON)
+    create_from_template(ROOT / "examples" / "applications.example.csv", APPLICATIONS_CSV)
+    create_from_template(ROOT / "examples" / "master_resume.example.md", PERSON_ROOT / "resume" / "master_resume.md")
     for template in ["cover_letter.md", "screening_answers.md", "notification_email.md"]:
         create_from_template(ROOT / "templates" / template, PERSON_ROOT / "templates" / template)
     profile = load_json(PROFILE_PATH)

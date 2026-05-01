@@ -4,21 +4,29 @@ This workspace is designed for human-in-the-loop job applications. It can find j
 
 ## Setup
 
-1. Copy the example private files:
+1. Keep private data outside the public code repo. Pick a private directory:
 
 ```bash
-cp examples/profile.example.json profile.json
-cp examples/master_resume.example.md resume/master_resume.md
-cp examples/sources.example.json data/sources.json
-cp examples/applications.example.json data/applications.json
-cp examples/applications.example.csv data/applications.csv
+export JOB_SEARCH_PRIVATE_DIR="$HOME/Documents/job-search-private"
 ```
 
-2. Edit `profile.json`.
-3. Replace `resume/master_resume.md` with your full truthful resume.
-4. Add your PDF resume under `resume/` and set `profile.json` `resume_file`.
-5. Edit `data/sources.json` with target company career pages.
-6. Optional browser setup:
+Add that line to `~/.zshrc` on each computer if you want it to persist.
+
+2. Initialize private files from examples:
+
+```bash
+python3 job-search/scripts/job_search.py init-person
+```
+
+3. Edit private files under `$JOB_SEARCH_PRIVATE_DIR`:
+
+- `$JOB_SEARCH_PRIVATE_DIR/profile.json`
+- `$JOB_SEARCH_PRIVATE_DIR/resume/master_resume.md`
+- `$JOB_SEARCH_PRIVATE_DIR/data/sources.json`
+- `$JOB_SEARCH_PRIVATE_DIR/data/applications.json`
+
+4. Add your PDF resume under `$JOB_SEARCH_PRIVATE_DIR/resume/` and set `profile.json` `resume_file`.
+5. Optional browser setup:
 
 ```bash
 cd job-search
@@ -30,14 +38,15 @@ npm install
 The root workspace is the backward-compatible default person. For another person, create an isolated partition:
 
 ```bash
+export JOB_SEARCH_PRIVATE_DIR="$HOME/Documents/job-search-private"
 python3 job-search/scripts/job_search.py --person alice init-person
 ```
 
 Then edit:
 
-- `job-search/profiles/alice/profile.json`
-- `job-search/profiles/alice/resume/master_resume.md`
-- `job-search/profiles/alice/data/sources.json`
+- `$JOB_SEARCH_PRIVATE_DIR/profiles/alice/profile.json`
+- `$JOB_SEARCH_PRIVATE_DIR/profiles/alice/resume/master_resume.md`
+- `$JOB_SEARCH_PRIVATE_DIR/profiles/alice/data/sources.json`
 
 Run commands with `--person alice`:
 
@@ -48,6 +57,15 @@ node job-search/scripts/fill_form.js --person alice --id <application-id>
 ```
 
 Each person gets separate profile data, resume, tracker, output, email browser session, and ATS browser session.
+
+## Two-Repo Sync Model
+
+Use two repositories when this code is public:
+
+- Public code repo: scripts, templates, examples, and docs.
+- Private data repo: real `profile.json`, resumes, trackers, sources, outputs, and local browser sessions.
+
+Clone both on every computer, then set `JOB_SEARCH_PRIVATE_DIR` to the private data repo path.
 
 ## Core Commands
 

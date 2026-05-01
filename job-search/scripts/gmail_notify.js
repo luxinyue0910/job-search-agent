@@ -29,12 +29,15 @@ function slug(value) {
 }
 
 function personRoot(root, person) {
+  const privateBase = process.env.JOB_SEARCH_PRIVATE_DIR
+    ? path.resolve(process.env.JOB_SEARCH_PRIVATE_DIR)
+    : root;
   const selected = slug(person || process.env.JOB_SEARCH_PERSON || "default");
-  const defaultProfile = path.join(root, "profiles", "default");
+  const defaultProfile = path.join(privateBase, "profiles", "default");
   if (selected === "default" && !fs.existsSync(defaultProfile)) {
-    return { person: selected, dir: root };
+    return { person: selected, dir: privateBase };
   }
-  return { person: selected, dir: path.join(root, "profiles", selected) };
+  return { person: selected, dir: path.join(privateBase, "profiles", selected) };
 }
 
 function parseSummary(markdown) {
@@ -65,7 +68,7 @@ async function main() {
   const markdown = fs.readFileSync(summaryPath, "utf8");
   const { subject, body } = parseSummary(markdown);
   const { chromium } = require("playwright");
-  const userDataDir = path.join(root, ".browser-profile", selected.person, "gmail");
+  const userDataDir = path.join(selected.dir, ".browser-profile", selected.person, "gmail");
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     viewport: { width: 1280, height: 900 }

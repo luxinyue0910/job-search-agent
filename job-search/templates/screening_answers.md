@@ -22,6 +22,10 @@ Immediately.
 
 Company Website.
 
+## Compensation
+
+If a job posting provides a compensation range and the form requires a number, use the lower band of the provided range. If no range is provided or the answer is free-form, use Negotiable.
+
 ## Qualification Experience Questions
 
 For yes/no qualification questions asking whether I have 1-3 years of experience with technologies reflected in my resume, answer Yes.

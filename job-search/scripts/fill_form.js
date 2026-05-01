@@ -25,12 +25,15 @@ function readJson(filePath) {
 }
 
 function personRoot(root, person) {
+  const privateBase = process.env.JOB_SEARCH_PRIVATE_DIR
+    ? path.resolve(process.env.JOB_SEARCH_PRIVATE_DIR)
+    : root;
   const selected = slug(person || process.env.JOB_SEARCH_PERSON || "default");
-  const defaultProfile = path.join(root, "profiles", "default");
+  const defaultProfile = path.join(privateBase, "profiles", "default");
   if (selected === "default" && !fs.existsSync(defaultProfile)) {
-    return { person: selected, dir: root };
+    return { person: selected, dir: privateBase };
   }
-  return { person: selected, dir: path.join(root, "profiles", selected) };
+  return { person: selected, dir: path.join(privateBase, "profiles", selected) };
 }
 
 function writeJson(filePath, data) {
@@ -116,7 +119,7 @@ async function main() {
   if (!app) throw new Error(`No application found for ${args.id}`);
 
   const { chromium } = require("playwright");
-  const userDataDir = path.join(root, ".browser-profile", selected.person, "ats");
+  const userDataDir = path.join(selected.dir, ".browser-profile", selected.person, "ats");
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     viewport: { width: 1400, height: 950 }
