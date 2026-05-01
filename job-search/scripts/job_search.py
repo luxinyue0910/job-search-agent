@@ -231,12 +231,71 @@ def fetch_url(url: str, timeout: int = 20) -> str:
         return response.read().decode(charset, errors="replace")
 
 
+def fetch_json(url: str, timeout: int = 20) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "Accept": "application/json,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
 def html_to_text(raw: str) -> str:
     raw = re.sub(r"(?is)<script.*?</script>", " ", raw)
     raw = re.sub(r"(?is)<style.*?</style>", " ", raw)
     raw = re.sub(r"(?s)<[^>]+>", " ", raw)
     raw = html.unescape(raw)
     return re.sub(r"\s+", " ", raw).strip()
+
+
+def fetch_ashby_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "ashbyhq.com" not in parsed.netloc.lower() or len(parts) < 2:
+        return None
+    board, job_id = parts[0], parts[1]
+    api_url = f"https://api.ashbyhq.com/posting-api/job-board/{urllib.parse.quote(board)}?includeCompensation=true"
+    data = fetch_json(api_url)
+    for job in data.get("jobs", []):
+        if job.get("id") != job_id and job_id not in str(job.get("jobUrl", "")):
+            continue
+        blocks = [
+            job.get("title", ""),
+            job.get("location", ""),
+            job.get("employmentType", ""),
+            job.get("workplaceType", ""),
+            job.get("department", ""),
+            job.get("team", ""),
+            job.get("descriptionPlain", "") or html_to_text(job.get("descriptionHtml", "")),
+        ]
+        compensation = job.get("compensation")
+        if compensation:
+            blocks.append(json.dumps(compensation, ensure_ascii=False))
+        return "\n\n".join(str(block) for block in blocks if block)
+    return None
+
+
+def fetch_greenhouse_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "greenhouse.io" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3 or parts[-2] != "jobs":
+        return None
+    board, job_id = parts[0], parts[-1]
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{urllib.parse.quote(board)}/jobs/{urllib.parse.quote(job_id)}"
+    data = fetch_json(api_url)
+    blocks = [
+        data.get("title", ""),
+        data.get("company_name", ""),
+        data.get("location", {}).get("name", "") if isinstance(data.get("location"), dict) else data.get("location", ""),
+        html_to_text(data.get("content", "")),
+    ]
+    return "\n\n".join(str(block) for block in blocks if block)
 
 
 def infer_role_from_url(url: str) -> str:
@@ -437,8 +496,22 @@ def template_path(name: str) -> Path:
 def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
     if jd_file:
         return Path(jd_file).read_text(encoding="utf-8", errors="replace")
+    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text]:
+        try:
+            text = fetcher(app["url"])
+            if text:
+                return text
+        except Exception:
+            pass
     try:
         return html_to_text(fetch_url(app["url"]))
+    except urllib.error.HTTPError as error:
+        if detect_platform(app["url"]) == "lever" and error.code == 404 and not app["url"].rstrip("/").endswith("/apply"):
+            try:
+                return html_to_text(fetch_url(app["url"].rstrip("/") + "/apply"))
+            except Exception:
+                pass
+        return f"Unable to fetch job description from {app['url']}. Error: {error}"
     except Exception as error:  # noqa: BLE001 - preserve the message for review.
         return f"Unable to fetch job description from {app['url']}. Error: {error}"
 
