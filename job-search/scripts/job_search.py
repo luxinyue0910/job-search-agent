@@ -742,32 +742,21 @@ def render_notification(tracker: dict[str, Any], profile: dict[str, Any]) -> str
     action_items = collect_action_items(apps)
     action_text = "\n".join(f"- {item}" for item in action_items) or "- No action items."
     name = profile.get("personal", {}).get("name", "there")
-    return textwrap.dedent(
-        f"""\
-        Subject: Job Search Summary - {today()}
-
-        Hi {name},
-
-        Here is your job search summary for {today()}.
-
-        - New jobs found today: {len(today_apps)}
-        - Skipped/review jobs: {len(skipped)}
-        - Recommended applications: {len(recommended)}
-
-        ## Top Jobs
-
-        {top_jobs}
-
-        ## Needs Your Attention
-
-        {action_text}
-
-        ## Local Files
-
-        - Tracker JSON: {APPLICATIONS_JSON}
-        - Tracker CSV: {APPLICATIONS_CSV}
-        - Output directory: {OUTPUT_DIR}
-        """
+    return (
+        f"Subject: Job Search Summary - {today()}\n\n"
+        f"Hi {name},\n\n"
+        f"Here is your job search summary for {today()}.\n\n"
+        f"- New jobs found today: {len(today_apps)}\n"
+        f"- Skipped/review jobs: {len(skipped)}\n"
+        f"- Recommended applications: {len(recommended)}\n\n"
+        "## Top Jobs\n\n"
+        f"{top_jobs}\n\n"
+        "## Needs Your Attention\n\n"
+        f"{action_text}\n\n"
+        "## Local Files\n\n"
+        f"- Tracker JSON: {APPLICATIONS_JSON}\n"
+        f"- Tracker CSV: {APPLICATIONS_CSV}\n"
+        f"- Output directory: {OUTPUT_DIR}\n"
     )
 
 
@@ -776,11 +765,12 @@ def collect_action_items(apps: list[dict[str, Any]]) -> list[str]:
     for app in apps:
         for item in app.get("action_items", []):
             items.append(f"{app.get('company')} - {app.get('role')}: {item}")
-        if app.get("status") == "prepared":
+        if app.get("status") == "prepared" and not app.get("action_items"):
             items.append(f"{app.get('company')} - {app.get('role')}: Review materials and run fill-form.")
         if app.get("status") == "needs_review":
             items.append(f"{app.get('company')} - {app.get('role')}: Needs manual review before preparing.")
-    return items[:12]
+    deduped = list(dict.fromkeys(items))
+    return deduped[:12]
 
 
 def run_email_notify(summary_path: Path, args: argparse.Namespace | None = None) -> None:
