@@ -3,16 +3,19 @@
     {
       "company": "Example Greenhouse Company",
       "platform": "greenhouse",
+      "board": "example",
       "url": "https://boards.greenhouse.io/example"
     },
     {
       "company": "Example Lever Company",
       "platform": "lever",
+      "site": "example",
       "url": "https://jobs.lever.co/example"
     },
     {
       "company": "Example Ashby Company",
       "platform": "ashby",
+      "board": "example",
       "url": "https://jobs.ashbyhq.com/example"
     }
   ]

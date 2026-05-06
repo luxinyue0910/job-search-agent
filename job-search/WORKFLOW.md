@@ -74,9 +74,48 @@ Run commands from the repository root.
 ```bash
 python3 job-search/scripts/job_search.py sync-csv
 python3 job-search/scripts/job_search.py find-jobs
+python3 job-search/scripts/job_search.py discover-jobs --since-hours 24
 python3 job-search/scripts/job_search.py score-job --id <application-id>
 python3 job-search/scripts/job_search.py prepare-application --id <application-id>
 python3 job-search/scripts/job_search.py notify
+```
+
+Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, and related roles; pass `--no-role-filter` to review every fresh posting.
+
+Examples:
+
+```bash
+python3 job-search/scripts/job_search.py discover-jobs --since-hours 24
+python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
+python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter
+```
+
+`data/sources.json` can include ATS identifiers to avoid brittle HTML scraping:
+
+```json
+{
+  "sources": [
+    {
+      "company": "Example",
+      "platform": "greenhouse",
+      "board": "example",
+      "url": "https://job-boards.greenhouse.io/example"
+    },
+    {
+      "company": "Example",
+      "platform": "lever",
+      "site": "example",
+      "url": "https://jobs.lever.co/example"
+    },
+    {
+      "company": "Example",
+      "platform": "ashby",
+      "board": "example",
+      "url": "https://jobs.ashbyhq.com/example"
+    }
+  ]
+}
 ```
 
 End-to-end local run:

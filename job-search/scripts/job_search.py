@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -34,6 +35,7 @@ PROFILE_PATH = PRIVATE_BASE_ROOT / "profile.json"
 APPLICATIONS_JSON = PRIVATE_BASE_ROOT / "data" / "applications.json"
 APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
 SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
+SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 
@@ -48,6 +50,11 @@ CSV_FIELDS = [
     "fit_score",
     "ats_score",
     "date_found",
+    "posted_at",
+    "updated_at",
+    "first_seen",
+    "last_seen",
+    "source",
     "date_applied",
     "resume_path",
     "cover_letter_path",
@@ -91,6 +98,28 @@ SUBMIT_WORDS = [
     "complete application",
 ]
 
+DEFAULT_DISCOVERY_TITLE_KEYWORDS = [
+    "software",
+    "backend",
+    "back end",
+    "full stack",
+    "full-stack",
+    "frontend",
+    "front end",
+    "ai",
+    "machine learning",
+    "ml",
+    "platform",
+    "devops",
+    "infrastructure",
+    "cloud",
+    "new grad",
+    "junior",
+    "entry level",
+    "swe",
+    "developer",
+]
+
 
 def today() -> str:
     return dt.date.today().isoformat()
@@ -100,13 +129,17 @@ def now_iso() -> str:
     return dt.datetime.now().replace(microsecond=0).isoformat()
 
 
+def now_utc_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
 def configure_person(person: str) -> None:
     """Select a person's partition.
 
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, SEEN_JOBS_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -118,6 +151,7 @@ def configure_person(person: str) -> None:
     APPLICATIONS_JSON = PERSON_ROOT / "data" / "applications.json"
     APPLICATIONS_CSV = PERSON_ROOT / "data" / "applications.csv"
     SOURCES_PATH = PERSON_ROOT / "data" / "sources.json"
+    SEEN_JOBS_PATH = PERSON_ROOT / "data" / "seen_jobs.json"
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 
@@ -144,6 +178,19 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=2, ensure_ascii=False)
         file.write("\n")
+
+
+def load_seen_jobs() -> dict[str, Any]:
+    if not SEEN_JOBS_PATH.exists():
+        return {"jobs": {}}
+    data = load_json(SEEN_JOBS_PATH)
+    data.setdefault("jobs", {})
+    return data
+
+
+def save_seen_jobs(seen: dict[str, Any]) -> None:
+    seen["last_updated"] = now_utc_iso()
+    write_json(SEEN_JOBS_PATH, seen)
 
 
 def load_profile() -> dict[str, Any]:
@@ -214,7 +261,7 @@ def detect_platform(url: str) -> str:
 
 
 def make_id(company: str, role: str, url: str) -> str:
-    digest = abs(hash(url)) % 100000
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
     return f"{slugify(company)}-{slugify(role)}-{digest}"
 
 
@@ -231,7 +278,7 @@ def fetch_url(url: str, timeout: int = 20) -> str:
         return response.read().decode(charset, errors="replace")
 
 
-def fetch_json(url: str, timeout: int = 20) -> dict[str, Any]:
+def fetch_json(url: str, timeout: int = 20) -> Any:
     request = urllib.request.Request(
         url,
         headers={
@@ -250,6 +297,224 @@ def html_to_text(raw: str) -> str:
     raw = re.sub(r"(?s)<[^>]+>", " ", raw)
     raw = html.unescape(raw)
     return re.sub(r"\s+", " ", raw).strip()
+
+
+def parse_datetime(value: Any) -> dt.datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def normalize_datetime(value: Any) -> str:
+    parsed = parse_datetime(value)
+    return parsed.replace(microsecond=0).isoformat() if parsed else ""
+
+
+def normalize_job_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url.strip())
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query = [(key, value) for key, value in query if not key.lower().startswith("utm_")]
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query), fragment="")).rstrip("/")
+
+
+def discovery_cutoff(args: argparse.Namespace) -> dt.datetime:
+    if args.since_hours is not None and args.since_days is not None:
+        raise SystemExit("Use either --since-hours or --since-days, not both.")
+    if args.since_days is not None:
+        delta = dt.timedelta(days=args.since_days)
+    else:
+        delta = dt.timedelta(hours=args.since_hours if args.since_hours is not None else 24)
+    return dt.datetime.now(dt.timezone.utc) - delta
+
+
+def source_platform(source: dict[str, Any]) -> str:
+    return str(source.get("platform") or source.get("type") or detect_platform(source.get("url", ""))).lower()
+
+
+def greenhouse_board_from_source(source: dict[str, Any]) -> str | None:
+    if source.get("board"):
+        return str(source["board"])
+    parsed = urllib.parse.urlparse(source.get("url", ""))
+    if "greenhouse.io" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else None
+
+
+def lever_site_from_source(source: dict[str, Any]) -> str | None:
+    if source.get("site"):
+        return str(source["site"])
+    parsed = urllib.parse.urlparse(source.get("url", ""))
+    if "lever.co" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else None
+
+
+def ashby_board_from_source(source: dict[str, Any]) -> str | None:
+    if source.get("board"):
+        return str(source["board"])
+    parsed = urllib.parse.urlparse(source.get("url", ""))
+    if "ashbyhq.com" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else None
+
+
+def parse_greenhouse_published_at(url: str) -> str:
+    try:
+        raw = fetch_url(url)
+    except Exception:
+        return ""
+    match = re.search(r'"published_at"\s*:\s*"([^"]+)"', raw)
+    if match:
+        return normalize_datetime(match.group(1))
+    return ""
+
+
+def discover_greenhouse_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    board = greenhouse_board_from_source(source)
+    if not board:
+        return find_links_for_source(source)
+    company = source.get("company", "Unknown Company")
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{urllib.parse.quote(board)}/jobs?content=true"
+    try:
+        data = fetch_json(api_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Greenhouse API for {company}: {error}", file=sys.stderr)
+        return find_links_for_source(source)
+
+    candidates: list[dict[str, Any]] = []
+    for job in data.get("jobs", []):
+        url = normalize_job_url(str(job.get("absolute_url") or ""))
+        if not url:
+            continue
+        posted_at = normalize_datetime(job.get("first_published") or job.get("published_at"))
+        if not posted_at:
+            posted_at = parse_greenhouse_published_at(url)
+        updated_at = normalize_datetime(job.get("updated_at"))
+        location = job.get("location", {}).get("name", "") if isinstance(job.get("location"), dict) else job.get("location", "")
+        candidates.append(
+            {
+                "company": company,
+                "role": job.get("title") or infer_role_from_url(url),
+                "url": url,
+                "platform": "greenhouse",
+                "location": location or "",
+                "posted_at": posted_at,
+                "updated_at": updated_at,
+                "source": source.get("url", ""),
+                "notes": "",
+            }
+        )
+    return candidates
+
+
+def discover_lever_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    site = lever_site_from_source(source)
+    if not site:
+        return find_links_for_source(source)
+    company = source.get("company", "Unknown Company")
+    api_url = f"https://api.lever.co/v0/postings/{urllib.parse.quote(site)}?mode=json"
+    try:
+        data = fetch_json(api_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Lever API for {company}: {error}", file=sys.stderr)
+        return find_links_for_source(source)
+
+    candidates: list[dict[str, Any]] = []
+    for job in data:
+        categories = job.get("categories") if isinstance(job.get("categories"), dict) else {}
+        url = normalize_job_url(str(job.get("hostedUrl") or job.get("applyUrl") or ""))
+        if not url:
+            continue
+        candidates.append(
+            {
+                "company": company,
+                "role": job.get("text") or infer_role_from_url(url),
+                "url": url,
+                "platform": "lever",
+                "location": categories.get("location", "") or "",
+                "posted_at": normalize_datetime(job.get("createdAt")),
+                "updated_at": normalize_datetime(job.get("updatedAt")),
+                "source": source.get("url", ""),
+                "notes": "",
+            }
+        )
+    return candidates
+
+
+def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    board = ashby_board_from_source(source)
+    if not board:
+        return find_links_for_source(source)
+    company = source.get("company", "Unknown Company")
+    api_url = f"https://api.ashbyhq.com/posting-api/job-board/{urllib.parse.quote(board)}?includeCompensation=true"
+    try:
+        data = fetch_json(api_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Ashby API for {company}: {error}", file=sys.stderr)
+        return find_links_for_source(source)
+
+    candidates: list[dict[str, Any]] = []
+    for job in data.get("jobs", []):
+        url = normalize_job_url(str(job.get("jobUrl") or ""))
+        if not url:
+            continue
+        candidates.append(
+            {
+                "company": company,
+                "role": job.get("title") or infer_role_from_url(url),
+                "url": url,
+                "platform": "ashby",
+                "location": job.get("location", "") or "",
+                "posted_at": normalize_datetime(job.get("publishedDate") or job.get("publishedAt") or job.get("createdAt")),
+                "updated_at": normalize_datetime(job.get("updatedAt")),
+                "source": source.get("url", ""),
+                "notes": "",
+            }
+        )
+    return candidates
+
+
+def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    platform = source_platform(source)
+    if platform == "greenhouse":
+        return discover_greenhouse_jobs(source)
+    if platform == "lever":
+        return discover_lever_jobs(source)
+    if platform == "ashby":
+        return discover_ashby_jobs(source)
+    return find_links_for_source(source)
+
+
+def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) -> bool:
+    role = str(candidate.get("role", "")).lower()
+    if not role:
+        return False
+    profile_terms = [
+        str(item).lower()
+        for item in profile.get("targets", {}).get("roles", []) + profile.get("targets", {}).get("levels", [])
+        if str(item).strip()
+    ]
+    terms = profile_terms + DEFAULT_DISCOVERY_TITLE_KEYWORDS
+    return any(re.search(rf"\b{re.escape(term)}\b", role) for term in terms)
 
 
 def fetch_ashby_job_text(url: str) -> str | None:
@@ -356,12 +621,19 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, str]]:
     return list(unique.values())
 
 
-def upsert_application(candidate: dict[str, str]) -> tuple[dict[str, Any], bool]:
+def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     tracker = load_tracker()
     apps = tracker.setdefault("applications", [])
-    normalized_url = candidate["url"].rstrip("/")
+    normalized_url = normalize_job_url(candidate["url"])
     for app in apps:
-        if app.get("url", "").rstrip("/") == normalized_url:
+        if normalize_job_url(app.get("url", "")) == normalized_url:
+            changed = False
+            for field in ["posted_at", "updated_at", "first_seen", "last_seen", "source"]:
+                if candidate.get(field) and app.get(field) != candidate[field]:
+                    app[field] = candidate[field]
+                    changed = True
+            if changed:
+                save_tracker(tracker)
             return app, False
 
     company = candidate.get("company") or "Unknown Company"
@@ -377,6 +649,11 @@ def upsert_application(candidate: dict[str, str]) -> tuple[dict[str, Any], bool]
         "fit_score": "",
         "ats_score": "",
         "date_found": today(),
+        "posted_at": candidate.get("posted_at", ""),
+        "updated_at": candidate.get("updated_at", ""),
+        "first_seen": candidate.get("first_seen", ""),
+        "last_seen": candidate.get("last_seen", ""),
+        "source": candidate.get("source", ""),
         "date_applied": "",
         "resume_path": "",
         "cover_letter_path": "",
@@ -529,6 +806,92 @@ def command_find_jobs(_args: argparse.Namespace) -> None:
             if app.get("status") == "found":
                 review_count += 1
     print(f"Found {new_count} new jobs. {review_count} jobs are ready for scoring.")
+
+
+def command_discover_jobs(args: argparse.Namespace) -> None:
+    require_person_files()
+    profile = load_profile()
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    seen = load_seen_jobs()
+    seen_jobs = seen.setdefault("jobs", {})
+    cutoff = discovery_cutoff(args)
+    discovered = 0
+    added = 0
+    existing = 0
+    skipped_old = 0
+    skipped_unknown_date = 0
+    skipped_title = 0
+    failed_sources = 0
+    current_seen_at = now_utc_iso()
+
+    for source in sources:
+        try:
+            candidates = discover_source_jobs(source)
+        except Exception as error:  # noqa: BLE001 - one source should not stop the run.
+            failed_sources += 1
+            print(f"Could not discover {source.get('company', source.get('url', 'source'))}: {error}", file=sys.stderr)
+            continue
+
+        for candidate in candidates:
+            discovered += 1
+            candidate["url"] = normalize_job_url(candidate["url"])
+            key = candidate["url"]
+            seen_record = seen_jobs.setdefault(
+                key,
+                {
+                    "company": candidate.get("company", ""),
+                    "role": candidate.get("role", ""),
+                    "url": key,
+                    "first_seen": current_seen_at,
+                },
+            )
+            seen_record.update(
+                {
+                    "company": candidate.get("company", seen_record.get("company", "")),
+                    "role": candidate.get("role", seen_record.get("role", "")),
+                    "platform": candidate.get("platform", seen_record.get("platform", "")),
+                    "location": candidate.get("location", seen_record.get("location", "")),
+                    "posted_at": candidate.get("posted_at", seen_record.get("posted_at", "")),
+                    "updated_at": candidate.get("updated_at", seen_record.get("updated_at", "")),
+                    "last_seen": current_seen_at,
+                    "source": candidate.get("source", seen_record.get("source", "")),
+                }
+            )
+            candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
+            candidate["last_seen"] = current_seen_at
+
+            posted_at = parse_datetime(candidate.get("posted_at"))
+            if not posted_at:
+                if not args.include_unknown_posted_date:
+                    skipped_unknown_date += 1
+                    continue
+            elif posted_at < cutoff:
+                skipped_old += 1
+                continue
+            if not args.no_role_filter and not discovery_title_matches(candidate, profile):
+                skipped_title += 1
+                continue
+
+            app, created = upsert_application(candidate)
+            if created:
+                added += 1
+            else:
+                existing += 1
+            if args.score and app.get("status") == "found":
+                try:
+                    command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
+                except Exception as error:  # noqa: BLE001
+                    update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+
+    save_seen_jobs(seen)
+    print(
+        "Discovery complete. "
+        f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Discovered: {discovered}. Added: {added}. Existing: {existing}. "
+        f"Skipped old: {skipped_old}. Skipped unknown posted_at: {skipped_unknown_date}. "
+        f"Skipped title: {skipped_title}. "
+        f"Failed sources: {failed_sources}."
+    )
 
 
 def command_add_url(args: argparse.Namespace) -> None:
@@ -812,6 +1175,7 @@ def command_init_person(_args: argparse.Namespace) -> None:
     create_from_template(ROOT / "examples" / "sources.example.json", SOURCES_PATH)
     create_from_template(ROOT / "examples" / "applications.example.json", APPLICATIONS_JSON)
     create_from_template(ROOT / "examples" / "applications.example.csv", APPLICATIONS_CSV)
+    create_from_template(ROOT / "examples" / "seen_jobs.example.json", SEEN_JOBS_PATH)
     create_from_template(ROOT / "examples" / "master_resume.example.md", PERSON_ROOT / "resume" / "master_resume.md")
     for template in ["cover_letter.md", "screening_answers.md", "notification_email.md"]:
         create_from_template(ROOT / "templates" / template, PERSON_ROOT / "templates" / template)
@@ -835,6 +1199,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("init-person", help="Create an isolated profile/resume/tracker partition.")
     subcommands.add_parser("find-jobs", help="Fetch ATS source pages and add job links to the tracker.")
+
+    discover = subcommands.add_parser("discover-jobs", help="Discover jobs with ATS APIs and filter by posted date.")
+    discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours. Defaults to 24.")
+    discover.add_argument("--since-days", type=float, help="Only add jobs posted within this many days.")
+    discover.add_argument(
+        "--include-unknown-posted-date",
+        action="store_true",
+        help="Add jobs even when the source does not expose a posted date.",
+    )
+    discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
+    discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
 
     add = subcommands.add_parser("add-url", help="Manually add one job URL.")
     add.add_argument("url")
@@ -874,6 +1249,8 @@ def main() -> None:
         command_init_person(args)
     elif args.command == "find-jobs":
         command_find_jobs(args)
+    elif args.command == "discover-jobs":
+        command_discover_jobs(args)
     elif args.command == "add-url":
         command_add_url(args)
     elif args.command == "score-job":
