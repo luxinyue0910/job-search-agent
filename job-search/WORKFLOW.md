@@ -74,7 +74,7 @@ Run commands from the repository root.
 ```bash
 python3 job-search/scripts/job_search.py sync-csv
 python3 job-search/scripts/job_search.py find-jobs
-python3 job-search/scripts/job_search.py discover-jobs --since-hours 24
+python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
 python3 job-search/scripts/job_search.py score-job --id <application-id>
 python3 job-search/scripts/job_search.py prepare-application --id <application-id>
 python3 job-search/scripts/job_search.py notify
@@ -85,8 +85,8 @@ Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lev
 Examples:
 
 ```bash
-python3 job-search/scripts/job_search.py discover-jobs --since-hours 24
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter
 ```
