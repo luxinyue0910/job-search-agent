@@ -78,6 +78,126 @@ async function fillFirst(page, selectors, value) {
   return false;
 }
 
+async function fillByLabel(page, labelPattern, value) {
+  if (!value) return false;
+  try {
+    const locator = page.getByLabel(labelPattern).first();
+    if (await locator.count()) {
+      await locator.fill(String(value), { timeout: 3000 });
+      return true;
+    }
+  } catch (_error) {
+    // Try label containers below.
+  }
+
+  const field = fieldByLabel(page, labelPattern);
+  try {
+    if (await field.count()) {
+      const input = field.locator('input:not([type="hidden"]), textarea').first();
+      if (await input.count()) {
+        await input.fill(String(value), { timeout: 3000 });
+        return true;
+      }
+    }
+  } catch (_error) {
+    // Leave for manual review.
+  }
+  return false;
+}
+
+async function selectByLabel(page, labelPattern, preferredLabels) {
+  const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
+  if (!labels.length) return false;
+
+  const direct = page.getByLabel(labelPattern).first();
+  try {
+    if (await direct.count()) {
+      const tagName = await direct.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
+      if (tagName === "select") {
+        for (const label of labels) {
+          try {
+            await direct.selectOption({ label }, { timeout: 3000 });
+            return true;
+          } catch (_error) {
+            // Try next label.
+          }
+        }
+      }
+    }
+  } catch (_error) {
+    // Try custom controls below.
+  }
+
+  const field = fieldByLabel(page, labelPattern);
+  for (const label of labels) {
+    try {
+      if (!(await field.count())) continue;
+      await field.locator('input[role="combobox"], input, [role="combobox"], button').first().click({ timeout: 3000 });
+      const input = field.locator('input[role="combobox"], input:not([type="hidden"])').first();
+      if (await input.count()) {
+        await input.fill(String(label), { timeout: 3000 });
+      }
+      await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: 3000 });
+      return true;
+    } catch (_error) {
+      try {
+        await page.keyboard.press("Escape");
+      } catch (_keyboardError) {
+        // Ignore.
+      }
+    }
+  }
+
+  for (const label of labels) {
+    try {
+      if (!(await field.count())) continue;
+      await field.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: 3000 });
+      return true;
+    } catch (_error) {
+      // Try next label.
+    }
+  }
+  return false;
+}
+
+async function clickChoiceByLabel(page, labelPattern, preferredLabels) {
+  const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
+  if (!labels.length) return false;
+  const field = fieldByLabel(page, labelPattern);
+  for (const label of labels) {
+    try {
+      if (!(await field.count())) continue;
+      const exact = new RegExp(`^${escapeRegExp(label)}$`, "i");
+      await field.getByText(exact).first().click({ timeout: 3000 });
+      return true;
+    } catch (_error) {
+      // Try role-based control.
+    }
+    try {
+      if (!(await field.count())) continue;
+      await field.getByRole("radio", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: 3000 });
+      return true;
+    } catch (_error) {
+      // Try checkbox.
+    }
+    try {
+      if (!(await field.count())) continue;
+      await field.getByRole("checkbox", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: 3000 });
+      return true;
+    } catch (_error) {
+      // Try next label.
+    }
+  }
+  return false;
+}
+
+function fieldByLabel(page, labelPattern) {
+  const flags = labelPattern instanceof RegExp ? labelPattern.flags.replace("g", "") : "i";
+  const source = labelPattern instanceof RegExp ? labelPattern.source : escapeRegExp(String(labelPattern));
+  const regex = new RegExp(source, flags.includes("i") ? flags : `${flags}i`);
+  return page.locator(".field-wrapper, .select, fieldset, .education--form").filter({ hasText: regex }).first();
+}
+
 async function chooseCountry(page, country) {
   const nativeSelect = page.locator('select[name*="phone" i], select[aria-label*="country" i], select[name*="country" i]').first();
   try {
@@ -102,6 +222,169 @@ async function chooseCountry(page, country) {
     }
   }
   return false;
+}
+
+async function fillStructuredApplicationFields(page, profile, app, actionItems) {
+  const personal = profile.personal || {};
+  const education = profile.education || {};
+  const defaults = profile.application_defaults || {};
+  const workAuth = profile.work_authorization || {};
+  const preferences = profile.preferences || {};
+
+  await selectByLabel(page, /country/i, [personal.country || "United States", "United States"]);
+  await selectByLabel(page, /location|candidate location|city/i, [
+    personal.location,
+    `${personal.city || ""}, ${personal.state || ""}`.trim().replace(/,\s*$/, ""),
+    personal.city,
+  ]);
+  await fillByLabel(page, /location|candidate location|city/i, personal.location);
+  await fillGreenhouseQuestionByLabel(page, /candidate location|location/i, personal.location);
+
+  await selectByLabel(page, /^school/i, [education.school, "University of Colorado Boulder", "Other"]);
+  await selectByLabel(page, /^degree/i, [education.degree, "Master of Science", "Master's Degree", "Masters"]);
+  await selectByLabel(page, /discipline|major/i, [education.major, "Computer Science"]);
+
+  await clickChoiceByLabel(page, /personal pronouns|pronouns/i, ["She /Her", "She/Her", "She / Her"]);
+  await fillByLabel(page, /current company/i, "Youmigo Tech");
+  await fillByLabel(page, /current title/i, "Full-stack Software Engineer");
+  await fillByLabel(page, /current visa status|visa status/i, defaults.current_visa_status || workAuth.status || "Green Card");
+  await fillGreenhouseQuestionByLabel(page, /current visa status|basis of your current employment authorization/i, defaults.current_visa_status || workAuth.status || "Green Card");
+
+  await clickChoiceByLabel(page, /authorized|legally authorized/i, ["Yes"]);
+  await clickChoiceByLabel(page, /h-?1b|sponsorship|sponsor/i, ["No"]);
+  await selectGreenhouseQuestionByLabel(page, /sponsorship|sponsor/i, ["No"]);
+
+  await answerRelocationQuestions(page, app, preferences, defaults, actionItems);
+  await clickChoiceByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
+  await selectGreenhouseQuestionByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
+
+  await clickChoiceByLabel(page, /^gender/i, [defaults.gender, "Decline To Self Identify"]);
+  await selectGreenhouseQuestionByLabel(page, /^gender/i, [defaults.gender, "Female", "Decline to self-identify", "Decline To Self Identify"]);
+  await clickChoiceByLabel(page, /^race/i, [defaults.race_ethnicity, "Decline To Self Identify"]);
+  await selectGreenhouseQuestionByLabel(page, /^race/i, [defaults.race_ethnicity, "Asian (Not Hispanic or Latino)", "Asian", "Decline to self-identify"]);
+  await clickChoiceByLabel(page, /veteran/i, ["I am not a protected veteran", defaults.veteran_status]);
+  await selectGreenhouseQuestionByLabel(page, /veteran/i, ["I am not a veteran", "I am not a protected veteran", defaults.veteran_status]);
+  await clickChoiceByLabel(page, /disability/i, ["No, I do not have a disability and have not had one in the past", defaults.disability_status]);
+  await selectGreenhouseQuestionByLabel(page, /disability/i, ["No, I do not have a disability and have not had one in the past", defaults.disability_status]);
+}
+
+async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabels) {
+  const questions = await greenhouseQuestions(page);
+  const question = questions.find((item) => labelPattern.test(item.label || item.name || ""));
+  if (!question) return false;
+  const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
+  for (const field of question.fields || []) {
+    const selector = field.name ? `[name="${cssEscape(field.name)}"], [id="${cssEscape(field.name)}"]` : "";
+    if (!selector) continue;
+    const target = page.locator(selector).first();
+    for (const label of labels) {
+      try {
+        if (!(await target.count())) continue;
+        const tagName = await target.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
+        if (tagName === "select") {
+          await target.selectOption({ label }, { timeout: 2500 });
+          return true;
+        }
+        await target.click({ timeout: 2500 });
+        await target.fill(String(label), { timeout: 2500 }).catch(() => {});
+        try {
+          await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: 2500 });
+          return true;
+        } catch (_optionError) {
+          await page.keyboard.press("Enter");
+          return true;
+        }
+      } catch (_error) {
+        try {
+          const fieldContainer = page.locator(".field-wrapper").filter({ has: target }).first();
+          await fieldContainer.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: 2500 });
+          return true;
+        } catch (_fallbackError) {
+          // Try next label.
+        }
+      }
+    }
+  }
+  return false;
+}
+
+async function fillGreenhouseQuestionByLabel(page, labelPattern, value) {
+  if (!value) return false;
+  const questions = await greenhouseQuestions(page);
+  const question = questions.find((item) => labelPattern.test(item.label || item.name || ""));
+  if (!question) return false;
+  for (const field of question.fields || []) {
+    if (!field.name || !["input_text", "textarea"].includes(field.type)) continue;
+    const target = page.locator(`[name="${cssEscape(field.name)}"], [id="${cssEscape(field.name)}"]`).first();
+    try {
+      if (await target.count()) {
+        await target.fill(String(value), { timeout: 2500 });
+        return true;
+      }
+    } catch (_error) {
+      // Try next field.
+    }
+  }
+  return false;
+}
+
+async function greenhouseQuestions(page) {
+  if (page.__greenhouseQuestions) return page.__greenhouseQuestions;
+  page.__greenhouseQuestions = await page.evaluate(() => {
+    const remix = window.__remixContext;
+    const loaderData = remix && remix.state && remix.state.loaderData;
+    if (!loaderData) return [];
+    const route = Object.values(loaderData).find((value) => value && value.jobPost);
+    const jobPost = route && route.jobPost;
+    const questions = Array.isArray(jobPost && jobPost.questions) ? jobPost.questions : [];
+    const demographic = jobPost && jobPost.demographic_questions && Array.isArray(jobPost.demographic_questions.questions)
+      ? jobPost.demographic_questions.questions.map((question) => ({
+          label: question.name,
+          fields: [
+            {
+              name: String(question.id),
+              type: "multi_value_single_select",
+              values: (question.answer_options || []).map((option) => ({ label: option.name, value: option.id })),
+            },
+          ],
+        }))
+      : [];
+    return [...questions, ...demographic];
+  }).catch(() => []);
+  return page.__greenhouseQuestions;
+}
+
+async function answerRelocationQuestions(page, app, preferences, defaults, actionItems) {
+  const allowedStates = new Set((preferences.relocation_allowed_states || []).map((item) => String(item).toUpperCase()));
+  const jobText = `${app.location || ""} ${app.role || ""} ${app.url || ""}`;
+  const jobMentionsAllowedState = [...allowedStates].some((state) => new RegExp(`\\b${escapeRegExp(state)}\\b`, "i").test(jobText));
+  const jobMentionsAllowedName = /(california|san francisco|san jose|palo alto|mountain view|sunnyvale|los angeles|washington|seattle|bellevue)/i.test(jobText);
+  const jobMentionsOtherState = /\b(NY|New York|Texas|TX|Colorado|CO|Massachusetts|MA|Illinois|IL|Florida|FL|London|United Kingdom|Singapore|France|Japan|Korea|Australia|Qatar|Dubai|Abu Dhabi)\b/i.test(jobText);
+  const canRelocate = Boolean(jobMentionsAllowedState || jobMentionsAllowedName || (!jobMentionsOtherState && preferences.willing_to_relocate));
+
+  await clickChoiceByLabel(page, /open to working.*onsite|central offices|office/i, [
+    ...(defaults.office_preference_order || []),
+    ...(preferences.preferred_locations_order || []),
+    defaults.office_preference,
+  ]);
+  await clickChoiceByLabel(page, /willing to relocate|relocat/i, [canRelocate ? "Yes" : "No"]);
+  await selectGreenhouseQuestionByLabel(page, /open to working.*onsite|central offices|office/i, [
+    ...(defaults.office_preference_order || []),
+    ...(preferences.preferred_locations_order || []),
+    defaults.office_preference,
+  ]);
+  await selectGreenhouseQuestionByLabel(page, /willing to relocate|relocat/i, [canRelocate ? "Yes" : "No"]);
+  if (!canRelocate) {
+    actionItems.add("Relocation question answered conservatively as No because the role did not appear to be in CA or WA.");
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cssEscape(value) {
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 async function main() {
@@ -149,7 +432,7 @@ async function main() {
     const personal = profile.personal || {};
     const links = profile.links || {};
     const defaults = profile.application_defaults || {};
-    await fillFirst(page, ['input[name*="first" i]', 'input[aria-label*="first" i]', 'input[id*="first" i]'], firstName(personal.name));
+    await fillFirst(page, ['input[name="first_name"]', 'input[id="first_name"]'], firstName(personal.legal_name || personal.name));
     await fillFirst(page, ['input[name*="last" i]', 'input[aria-label*="last" i]', 'input[id*="last" i]'], lastName(personal.name));
     await fillFirst(page, ['input[name*="preferred" i]', 'input[aria-label*="preferred" i]', 'input[id*="preferred" i]'], firstName(personal.name));
     await fillFirst(page, ['input[type="email"]', 'input[name*="email" i]', 'input[aria-label*="email" i]'], personal.email);
@@ -169,9 +452,11 @@ async function main() {
       actionItems.add("Resume upload skipped because resume_path did not point to an existing file.");
     }
 
+    await uploadCoverLetter(page, app.cover_letter_path, root);
     await fillFirst(page, ['textarea[name*="cover" i]', 'textarea[aria-label*="cover" i]'], coverLetterText(app.cover_letter_path, root));
     await fillFirst(page, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
     await fillFirst(page, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
+    await fillStructuredApplicationFields(page, profile, app, actionItems);
 
     actionItems.add("Review all fields manually. Final application submit must be clicked by you, not automation.");
     await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -216,6 +501,32 @@ function coverLetterText(relativePath, root) {
   const fullPath = path.isAbsolute(relativePath) ? relativePath : path.resolve(root, "..", relativePath);
   if (!fs.existsSync(fullPath)) return "";
   return fs.readFileSync(fullPath, "utf8");
+}
+
+async function uploadCoverLetter(page, relativePath, root) {
+  if (!relativePath) return false;
+  const fullPath = path.isAbsolute(relativePath) ? relativePath : path.resolve(root, "..", relativePath);
+  if (!fs.existsSync(fullPath)) return false;
+  const uploadPath = textUploadPath(fullPath);
+  try {
+    const input = page.locator('input[type="file"][id*="cover" i], input[type="file"][name*="cover" i]').first();
+    if (await input.count()) {
+      await input.setInputFiles(uploadPath);
+      return true;
+    }
+  } catch (_error) {
+    // Fall back to manual review.
+  }
+  return false;
+}
+
+function textUploadPath(markdownPath) {
+  const parsed = path.parse(markdownPath);
+  const uploadPath = path.join(parsed.dir, `${parsed.name}.txt`);
+  if (!fs.existsSync(uploadPath) || fs.statSync(uploadPath).mtimeMs < fs.statSync(markdownPath).mtimeMs) {
+    fs.writeFileSync(uploadPath, fs.readFileSync(markdownPath, "utf8"), "utf8");
+  }
+  return uploadPath;
 }
 
 function resolveWorkspacePath(root, selectedDir, value) {
