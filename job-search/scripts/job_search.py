@@ -517,6 +517,32 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
     return any(re.search(rf"\b{re.escape(term)}\b", role) for term in terms)
 
 
+def location_allowed(location: str, profile: dict[str, Any]) -> bool:
+    value = str(location or "").strip().lower()
+    if not value:
+        return True
+    if re.search(r"\b(remote|united states|usa|u\.s\.|us based|us-based)\b", value):
+        return True
+
+    preferences = profile.get("preferences", {})
+    allowed_locations = [
+        str(item).lower()
+        for item in preferences.get("relocation_allowed_locations", []) + preferences.get("preferred_locations_order", [])
+    ]
+    if any(item and item in value for item in allowed_locations):
+        return True
+
+    allowed_states = {str(item).lower() for item in preferences.get("relocation_allowed_states", [])}
+    if "wa" in allowed_states and re.search(r"\b(wa|washington|seattle|bellevue)\b", value):
+        return True
+    if "ca" in allowed_states and re.search(
+        r"\b(ca|california|san francisco|sf|san jose|palo alto|mountain view|sunnyvale|los angeles)\b",
+        value,
+    ):
+        return True
+    return False
+
+
 def fetch_ashby_job_text(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -720,6 +746,8 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     if re.search(r"we do not sponsor|no sponsorship|unable to sponsor", jd_text, re.I):
         if profile.get("work_authorization", {}).get("requires_sponsorship"):
             dealbreakers.append("JD says sponsorship is unavailable.")
+    if not location_allowed(app.get("location", ""), profile):
+        dealbreakers.append(f"Location is outside allowed WA/CA/Remote preferences: {app.get('location')}.")
 
     fit_score = 0.0 if dealbreakers else round(min(10.0, role_score + tech_score + location_score + level_score), 1)
     status = "skipped" if dealbreakers else ("needs_review" if fit_score < 6.0 or ats_score < 60 else "scored")
@@ -743,13 +771,12 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
 
 
 def location_matches(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> bool:
+    if not location_allowed(app.get("location", ""), profile):
+        return False
     combined = f"{app.get('location', '')} {jd_text}".lower()
     if "remote" in combined or "united states" in combined or "usa" in combined:
         return True
-    for location in profile.get("preferences", {}).get("locations", []):
-        if str(location).lower() in combined:
-            return True
-    return bool(profile.get("preferences", {}).get("willing_to_relocate", False))
+    return location_allowed(app.get("location", ""), profile)
 
 
 def app_output_dir(app: dict[str, Any]) -> Path:
@@ -821,6 +848,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     skipped_old = 0
     skipped_unknown_date = 0
     skipped_title = 0
+    skipped_location = 0
     failed_sources = 0
     current_seen_at = now_utc_iso()
 
@@ -871,6 +899,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             if not args.no_role_filter and not discovery_title_matches(candidate, profile):
                 skipped_title += 1
                 continue
+            if not location_allowed(candidate.get("location", ""), profile):
+                skipped_location += 1
+                continue
 
             app, created = upsert_application(candidate)
             if created:
@@ -889,7 +920,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {discovered}. Added: {added}. Existing: {existing}. "
         f"Skipped old: {skipped_old}. Skipped unknown posted_at: {skipped_unknown_date}. "
-        f"Skipped title: {skipped_title}. "
+        f"Skipped title: {skipped_title}. Skipped location: {skipped_location}. "
         f"Failed sources: {failed_sources}."
     )
 
