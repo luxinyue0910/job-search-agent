@@ -82,10 +82,21 @@ python3 job-search/scripts/job_search.py notify
 
 Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, and related roles; pass `--no-role-filter` to review every fresh posting.
 
+Use `discover-web-jobs` to expand beyond known company boards. It calls a search API, looks for public Greenhouse, Lever, and Ashby job URLs, parses the original ATS posting, then applies the same posted-date, title, location, seen-job, and tracker de-dupe rules. This avoids logging into LinkedIn, Indeed, Jobright, or Wellfound and treats those sites as discovery hints rather than scrape targets.
+
+Configure one provider:
+
+```bash
+export SERPAPI_API_KEY="..."
+export BING_SEARCH_API_KEY="..."
+```
+
 Examples:
 
 ```bash
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --score --update-sources
+python3 job-search/scripts/job_search.py discover-web-jobs --provider bing --since-days 7 --score --update-sources
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter

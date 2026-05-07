@@ -120,6 +120,33 @@ DEFAULT_DISCOVERY_TITLE_KEYWORDS = [
     "developer",
 ]
 
+DEFAULT_WEB_DISCOVERY_ROLES = [
+    "Software Engineer",
+    "Backend Engineer",
+    "AI Engineer",
+    "Machine Learning Engineer",
+    "New Grad Software Engineer",
+    "Software Engineer I",
+    "Platform Engineer",
+    "DevOps Engineer",
+]
+
+DEFAULT_WEB_DISCOVERY_LOCATIONS = [
+    "Seattle",
+    "Bellevue",
+    "Washington",
+    "Remote",
+    "San Francisco",
+    "California",
+]
+
+ATS_SEARCH_SITES = [
+    "job-boards.greenhouse.io",
+    "boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+]
+
 
 def today() -> str:
     return dt.date.today().isoformat()
@@ -504,6 +531,107 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return find_links_for_source(source)
 
 
+def greenhouse_candidate_from_url(url: str) -> dict[str, Any] | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "greenhouse.io" not in parsed.netloc.lower() or len(parts) < 3 or parts[-2] != "jobs":
+        return None
+    board, job_id = parts[0], parts[-1]
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{urllib.parse.quote(board)}/jobs/{urllib.parse.quote(job_id)}"
+    try:
+        data = fetch_json(api_url)
+    except Exception:
+        return None
+    normalized_url = normalize_job_url(str(data.get("absolute_url") or url))
+    company = data.get("company_name") or board
+    location = data.get("location", {}).get("name", "") if isinstance(data.get("location"), dict) else data.get("location", "")
+    posted_at = normalize_datetime(data.get("first_published") or data.get("published_at"))
+    if not posted_at:
+        posted_at = parse_greenhouse_published_at(normalized_url)
+    return {
+        "company": company,
+        "role": data.get("title") or infer_role_from_url(normalized_url),
+        "url": normalized_url,
+        "platform": "greenhouse",
+        "location": location or "",
+        "posted_at": posted_at,
+        "updated_at": normalize_datetime(data.get("updated_at")),
+        "source": f"https://job-boards.greenhouse.io/{board}",
+        "notes": "",
+    }
+
+
+def lever_candidate_from_url(url: str) -> dict[str, Any] | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "lever.co" not in parsed.netloc.lower() or len(parts) < 2:
+        return None
+    site, posting_id = parts[0], parts[1]
+    api_url = f"https://api.lever.co/v0/postings/{urllib.parse.quote(site)}?mode=json"
+    try:
+        data = fetch_json(api_url)
+    except Exception:
+        return None
+    for job in data:
+        hosted_url = normalize_job_url(str(job.get("hostedUrl") or ""))
+        apply_url = normalize_job_url(str(job.get("applyUrl") or ""))
+        if posting_id not in hosted_url and posting_id not in apply_url:
+            continue
+        categories = job.get("categories") if isinstance(job.get("categories"), dict) else {}
+        return {
+            "company": site,
+            "role": job.get("text") or infer_role_from_url(hosted_url or url),
+            "url": hosted_url or apply_url or normalize_job_url(url),
+            "platform": "lever",
+            "location": categories.get("location", "") or "",
+            "posted_at": normalize_datetime(job.get("createdAt")),
+            "updated_at": normalize_datetime(job.get("updatedAt")),
+            "source": f"https://jobs.lever.co/{site}",
+            "notes": "",
+        }
+    return None
+
+
+def ashby_candidate_from_url(url: str) -> dict[str, Any] | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "ashbyhq.com" not in parsed.netloc.lower() or len(parts) < 2:
+        return None
+    board, job_id = parts[0], parts[1]
+    api_url = f"https://api.ashbyhq.com/posting-api/job-board/{urllib.parse.quote(board)}?includeCompensation=true"
+    try:
+        data = fetch_json(api_url)
+    except Exception:
+        return None
+    for job in data.get("jobs", []):
+        job_url = normalize_job_url(str(job.get("jobUrl") or ""))
+        if job.get("id") != job_id and job_id not in job_url:
+            continue
+        return {
+            "company": board,
+            "role": job.get("title") or infer_role_from_url(job_url or url),
+            "url": job_url or normalize_job_url(url),
+            "platform": "ashby",
+            "location": job.get("location", "") or "",
+            "posted_at": normalize_datetime(job.get("publishedDate") or job.get("publishedAt") or job.get("createdAt")),
+            "updated_at": normalize_datetime(job.get("updatedAt")),
+            "source": f"https://jobs.ashbyhq.com/{board}",
+            "notes": "",
+        }
+    return None
+
+
+def ats_candidate_from_url(url: str) -> dict[str, Any] | None:
+    platform = detect_platform(url)
+    if platform == "greenhouse":
+        return greenhouse_candidate_from_url(url)
+    if platform == "lever":
+        return lever_candidate_from_url(url)
+    if platform == "ashby":
+        return ashby_candidate_from_url(url)
+    return None
+
+
 def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) -> bool:
     role = str(candidate.get("role", "")).lower()
     if not role:
@@ -541,6 +669,91 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
     ):
         return True
     return False
+
+
+def empty_discovery_stats() -> dict[str, int]:
+    return {
+        "discovered": 0,
+        "added": 0,
+        "existing": 0,
+        "skipped_old": 0,
+        "skipped_unknown_date": 0,
+        "skipped_title": 0,
+        "skipped_location": 0,
+        "scoring_failed": 0,
+    }
+
+
+def process_discovered_candidates(
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    profile: dict[str, Any],
+    seen: dict[str, Any],
+    cutoff: dt.datetime,
+    current_seen_at: str,
+) -> dict[str, int]:
+    stats = empty_discovery_stats()
+    seen_jobs = seen.setdefault("jobs", {})
+    for candidate in candidates:
+        stats["discovered"] += 1
+        candidate["url"] = normalize_job_url(candidate["url"])
+        key = candidate["url"]
+        seen_record = seen_jobs.setdefault(
+            key,
+            {
+                "company": candidate.get("company", ""),
+                "role": candidate.get("role", ""),
+                "url": key,
+                "first_seen": current_seen_at,
+            },
+        )
+        seen_record.update(
+            {
+                "company": candidate.get("company", seen_record.get("company", "")),
+                "role": candidate.get("role", seen_record.get("role", "")),
+                "platform": candidate.get("platform", seen_record.get("platform", "")),
+                "location": candidate.get("location", seen_record.get("location", "")),
+                "posted_at": candidate.get("posted_at", seen_record.get("posted_at", "")),
+                "updated_at": candidate.get("updated_at", seen_record.get("updated_at", "")),
+                "last_seen": current_seen_at,
+                "source": candidate.get("source", seen_record.get("source", "")),
+            }
+        )
+        candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
+        candidate["last_seen"] = current_seen_at
+
+        posted_at = parse_datetime(candidate.get("posted_at"))
+        if not posted_at:
+            if not args.include_unknown_posted_date:
+                stats["skipped_unknown_date"] += 1
+                continue
+        elif posted_at < cutoff:
+            stats["skipped_old"] += 1
+            continue
+        if not args.no_role_filter and not discovery_title_matches(candidate, profile):
+            stats["skipped_title"] += 1
+            continue
+        if not location_allowed(candidate.get("location", ""), profile):
+            stats["skipped_location"] += 1
+            continue
+
+        app, created = upsert_application(candidate)
+        if created:
+            stats["added"] += 1
+        else:
+            stats["existing"] += 1
+        if args.score and app.get("status") == "found":
+            try:
+                command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
+            except Exception as error:  # noqa: BLE001
+                stats["scoring_failed"] += 1
+                update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+    return stats
+
+
+def add_stats(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, 0) + value
 
 
 def fetch_ashby_job_text(url: str) -> str | None:
@@ -820,6 +1033,118 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         return f"Unable to fetch job description from {app['url']}. Error: {error}"
 
 
+def search_serpapi(query: str, since_days: float | None, limit: int) -> list[str]:
+    api_key = os.environ.get("SERPAPI_API_KEY")
+    if not api_key:
+        raise SystemExit("Set SERPAPI_API_KEY or use --provider bing with BING_SEARCH_API_KEY.")
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": api_key,
+        "num": str(min(limit, 100)),
+    }
+    if since_days is not None:
+        params["tbs"] = "qdr:w" if since_days <= 7 else "qdr:m"
+    data = fetch_json(f"https://serpapi.com/search.json?{urllib.parse.urlencode(params)}")
+    return [item.get("link", "") for item in data.get("organic_results", []) if item.get("link")]
+
+
+def search_bing(query: str, since_days: float | None, limit: int) -> list[str]:
+    api_key = os.environ.get("BING_SEARCH_API_KEY")
+    if not api_key:
+        raise SystemExit("Set BING_SEARCH_API_KEY or use --provider serpapi with SERPAPI_API_KEY.")
+    params = {
+        "q": query,
+        "count": str(min(limit, 50)),
+        "responseFilter": "Webpages",
+    }
+    if since_days is not None:
+        params["freshness"] = "Week" if since_days <= 7 else "Month"
+    request = urllib.request.Request(
+        f"https://api.bing.microsoft.com/v7.0/search?{urllib.parse.urlencode(params)}",
+        headers={"Ocp-Apim-Subscription-Key": api_key, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
+    return [item.get("url", "") for item in data.get("webPages", {}).get("value", []) if item.get("url")]
+
+
+def web_search_urls(query: str, args: argparse.Namespace) -> list[str]:
+    if args.provider == "serpapi":
+        return search_serpapi(query, args.since_days, args.results_per_query)
+    if args.provider == "bing":
+        return search_bing(query, args.since_days, args.results_per_query)
+    raise SystemExit(f"Unsupported search provider: {args.provider}")
+
+
+def build_web_discovery_queries(args: argparse.Namespace) -> list[str]:
+    roles = args.role or DEFAULT_WEB_DISCOVERY_ROLES
+    locations = args.location or DEFAULT_WEB_DISCOVERY_LOCATIONS
+    queries = []
+    for site in ATS_SEARCH_SITES:
+        for role in roles:
+            for location in locations:
+                queries.append(f'site:{site} "{role}" "{location}"')
+    return queries
+
+
+def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    source_url = candidate.get("source") or candidate.get("url")
+    platform = detect_platform(source_url)
+    if platform == "greenhouse":
+        board = greenhouse_board_from_source({"url": source_url})
+        if not board:
+            return None
+        return {
+            "company": candidate.get("company") or board,
+            "platform": "greenhouse",
+            "board": board,
+            "url": f"https://job-boards.greenhouse.io/{board}",
+        }
+    if platform == "lever":
+        site = lever_site_from_source({"url": source_url})
+        if not site:
+            return None
+        return {
+            "company": candidate.get("company") or site,
+            "platform": "lever",
+            "site": site,
+            "url": f"https://jobs.lever.co/{site}",
+        }
+    if platform == "ashby":
+        board = ashby_board_from_source({"url": source_url})
+        if not board:
+            return None
+        return {
+            "company": candidate.get("company") or board,
+            "platform": "ashby",
+            "board": board,
+            "url": f"https://jobs.ashbyhq.com/{board}",
+        }
+    return None
+
+
+def update_sources_from_candidates(candidates: list[dict[str, Any]]) -> int:
+    data = load_json(SOURCES_PATH)
+    sources = data.setdefault("sources", [])
+    existing_urls = {normalize_job_url(source.get("url", "")) for source in sources}
+    added = 0
+    for candidate in candidates:
+        source = source_from_candidate(candidate)
+        if not source:
+            continue
+        source_url = normalize_job_url(source["url"])
+        if source_url in existing_urls:
+            continue
+        sources.append(source)
+        existing_urls.add(source_url)
+        added += 1
+    if added:
+        sources.sort(key=lambda item: (str(item.get("company", "")).lower(), str(item.get("platform", "")).lower()))
+        write_json(SOURCES_PATH, data)
+    return added
+
+
 def command_find_jobs(_args: argparse.Namespace) -> None:
     require_person_files()
     sources = load_json(SOURCES_PATH).get("sources", [])
@@ -840,15 +1165,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     profile = load_profile()
     sources = load_json(SOURCES_PATH).get("sources", [])
     seen = load_seen_jobs()
-    seen_jobs = seen.setdefault("jobs", {})
     cutoff = discovery_cutoff(args)
-    discovered = 0
-    added = 0
-    existing = 0
-    skipped_old = 0
-    skipped_unknown_date = 0
-    skipped_title = 0
-    skipped_location = 0
+    stats = empty_discovery_stats()
     failed_sources = 0
     current_seen_at = now_utc_iso()
 
@@ -860,68 +1178,60 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             print(f"Could not discover {source.get('company', source.get('url', 'source'))}: {error}", file=sys.stderr)
             continue
 
-        for candidate in candidates:
-            discovered += 1
-            candidate["url"] = normalize_job_url(candidate["url"])
-            key = candidate["url"]
-            seen_record = seen_jobs.setdefault(
-                key,
-                {
-                    "company": candidate.get("company", ""),
-                    "role": candidate.get("role", ""),
-                    "url": key,
-                    "first_seen": current_seen_at,
-                },
-            )
-            seen_record.update(
-                {
-                    "company": candidate.get("company", seen_record.get("company", "")),
-                    "role": candidate.get("role", seen_record.get("role", "")),
-                    "platform": candidate.get("platform", seen_record.get("platform", "")),
-                    "location": candidate.get("location", seen_record.get("location", "")),
-                    "posted_at": candidate.get("posted_at", seen_record.get("posted_at", "")),
-                    "updated_at": candidate.get("updated_at", seen_record.get("updated_at", "")),
-                    "last_seen": current_seen_at,
-                    "source": candidate.get("source", seen_record.get("source", "")),
-                }
-            )
-            candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
-            candidate["last_seen"] = current_seen_at
-
-            posted_at = parse_datetime(candidate.get("posted_at"))
-            if not posted_at:
-                if not args.include_unknown_posted_date:
-                    skipped_unknown_date += 1
-                    continue
-            elif posted_at < cutoff:
-                skipped_old += 1
-                continue
-            if not args.no_role_filter and not discovery_title_matches(candidate, profile):
-                skipped_title += 1
-                continue
-            if not location_allowed(candidate.get("location", ""), profile):
-                skipped_location += 1
-                continue
-
-            app, created = upsert_application(candidate)
-            if created:
-                added += 1
-            else:
-                existing += 1
-            if args.score and app.get("status") == "found":
-                try:
-                    command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
-                except Exception as error:  # noqa: BLE001
-                    update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+        add_stats(stats, process_discovered_candidates(candidates, args, profile, seen, cutoff, current_seen_at))
 
     save_seen_jobs(seen)
     print(
         "Discovery complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
-        f"Discovered: {discovered}. Added: {added}. Existing: {existing}. "
-        f"Skipped old: {skipped_old}. Skipped unknown posted_at: {skipped_unknown_date}. "
-        f"Skipped title: {skipped_title}. Skipped location: {skipped_location}. "
-        f"Failed sources: {failed_sources}."
+        f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
+        f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
+        f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
+        f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}."
+    )
+
+
+def command_discover_web_jobs(args: argparse.Namespace) -> None:
+    require_person_files()
+    profile = load_profile()
+    seen = load_seen_jobs()
+    cutoff = discovery_cutoff(args)
+    current_seen_at = now_utc_iso()
+    queries = build_web_discovery_queries(args)[: args.max_queries]
+    urls: dict[str, str] = {}
+    failed_queries = 0
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for query in queries:
+        try:
+            for url in web_search_urls(query, args):
+                normalized = normalize_job_url(url)
+                if detect_platform(normalized) in {"greenhouse", "lever", "ashby"}:
+                    urls.setdefault(normalized, query)
+        except Exception as error:  # noqa: BLE001
+            failed_queries += 1
+            print(f"Search query failed: {query}: {error}", file=sys.stderr)
+
+    for url, query in urls.items():
+        candidate = ats_candidate_from_url(url)
+        if not candidate:
+            continue
+        candidate["source_query"] = query
+        candidate["notes"] = candidate.get("notes", "")
+        candidates[candidate["url"]] = candidate
+
+    added_sources = update_sources_from_candidates(list(candidates.values())) if args.update_sources else 0
+    stats = process_discovered_candidates(list(candidates.values()), args, profile, seen, cutoff, current_seen_at)
+    save_seen_jobs(seen)
+    print(
+        "Web discovery complete. "
+        f"Provider: {args.provider}. Queries: {len(queries)}. Failed queries: {failed_queries}. "
+        f"Search URLs: {len(urls)}. ATS jobs parsed: {len(candidates)}. Added sources: {added_sources}. "
+        f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Added: {stats['added']}. Existing: {stats['existing']}. "
+        f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
+        f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
+        f"Scoring failed: {stats['scoring_failed']}."
     )
 
 
@@ -1242,6 +1552,26 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
 
+    web_discover = subcommands.add_parser(
+        "discover-web-jobs",
+        help="Use a search API to find fresh public ATS job URLs, then parse and filter them.",
+    )
+    web_discover.add_argument("--provider", choices=["serpapi", "bing"], default="serpapi")
+    web_discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours.")
+    web_discover.add_argument("--since-days", type=float, default=7, help="Only add jobs posted within this many days.")
+    web_discover.add_argument("--results-per-query", type=int, default=10)
+    web_discover.add_argument("--max-queries", type=int, default=48)
+    web_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
+    web_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
+    web_discover.add_argument(
+        "--include-unknown-posted-date",
+        action="store_true",
+        help="Add jobs even when the source does not expose a posted date.",
+    )
+    web_discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
+    web_discover.add_argument("--update-sources", action="store_true", help="Add newly discovered ATS boards to sources.json.")
+    web_discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
+
     add = subcommands.add_parser("add-url", help="Manually add one job URL.")
     add.add_argument("url")
     add.add_argument("--company")
@@ -1282,6 +1612,8 @@ def main() -> None:
         command_find_jobs(args)
     elif args.command == "discover-jobs":
         command_discover_jobs(args)
+    elif args.command == "discover-web-jobs":
+        command_discover_web_jobs(args)
     elif args.command == "add-url":
         command_add_url(args)
     elif args.command == "score-job":
