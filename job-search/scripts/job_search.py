@@ -1385,6 +1385,7 @@ def render_cover_letter(template: str, app: dict[str, Any], profile: dict[str, A
         "[Your Location]": personal.get("location", ""),
         "[Your LinkedIn]": links.get("linkedin", ""),
         "[Your Website]": links.get("website", ""),
+        "[Your GitHub]": links.get("github", ""),
         "[Date]": today(),
         "[Company]": app.get("company", ""),
         "[Role]": app.get("role", ""),

@@ -1,6 +1,6 @@
 [Your Name]
 [Your Email] | [Your Phone] | [Your Location]
-[Your LinkedIn] | [Your Website]
+[Your LinkedIn] | [Your Website] | [Your GitHub]
 
 [Date]
 
