@@ -2,6 +2,9 @@
 const fs = require("fs");
 const path = require("path");
 
+const FILL_TIMEOUT = 900;
+const NAVIGATION_TIMEOUT = 5000;
+
 function parseArgs(argv) {
   const args = {};
   for (let index = 2; index < argv.length; index += 1) {
@@ -68,7 +71,7 @@ async function fillFirst(page, selectors, value) {
     const locator = page.locator(selector).first();
     try {
       if (await locator.count()) {
-        await locator.fill(String(value), { timeout: 3000 });
+        await locator.fill(String(value), { timeout: FILL_TIMEOUT });
         return true;
       }
     } catch (_error) {
@@ -83,7 +86,7 @@ async function fillByLabel(page, labelPattern, value) {
   try {
     const locator = page.getByLabel(labelPattern).first();
     if (await locator.count()) {
-      await locator.fill(String(value), { timeout: 3000 });
+      await locator.fill(String(value), { timeout: FILL_TIMEOUT });
       return true;
     }
   } catch (_error) {
@@ -95,7 +98,7 @@ async function fillByLabel(page, labelPattern, value) {
     if (await field.count()) {
       const input = field.locator('input:not([type="hidden"]), textarea').first();
       if (await input.count()) {
-        await input.fill(String(value), { timeout: 3000 });
+        await input.fill(String(value), { timeout: FILL_TIMEOUT });
         return true;
       }
     }
@@ -116,7 +119,7 @@ async function selectByLabel(page, labelPattern, preferredLabels) {
       if (tagName === "select") {
         for (const label of labels) {
           try {
-            await direct.selectOption({ label }, { timeout: 3000 });
+            await direct.selectOption({ label }, { timeout: FILL_TIMEOUT });
             return true;
           } catch (_error) {
             // Try next label.
@@ -132,16 +135,16 @@ async function selectByLabel(page, labelPattern, preferredLabels) {
   for (const label of labels) {
     try {
       if (!(await field.count())) continue;
-      await field.locator('input[role="combobox"], input, [role="combobox"], button').first().click({ timeout: 3000 });
+      await field.locator('input[role="combobox"], input, [role="combobox"], button').first().click({ timeout: FILL_TIMEOUT });
       const input = field.locator('input[role="combobox"], input:not([type="hidden"])').first();
       if (await input.count()) {
-        await input.fill(String(label), { timeout: 3000 });
+        await input.fill(String(label), { timeout: FILL_TIMEOUT });
       }
-      await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: 3000 });
+      await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       try {
-        await page.keyboard.press("Escape");
+        await keyboardFor(page).press("Escape");
       } catch (_keyboardError) {
         // Ignore.
       }
@@ -151,7 +154,7 @@ async function selectByLabel(page, labelPattern, preferredLabels) {
   for (const label of labels) {
     try {
       if (!(await field.count())) continue;
-      await field.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: 3000 });
+      await field.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try next label.
@@ -168,21 +171,21 @@ async function clickChoiceByLabel(page, labelPattern, preferredLabels) {
     try {
       if (!(await field.count())) continue;
       const exact = new RegExp(`^${escapeRegExp(label)}$`, "i");
-      await field.getByText(exact).first().click({ timeout: 3000 });
+      await field.getByText(exact).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try role-based control.
     }
     try {
       if (!(await field.count())) continue;
-      await field.getByRole("radio", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: 3000 });
+      await field.getByRole("radio", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try checkbox.
     }
     try {
       if (!(await field.count())) continue;
-      await field.getByRole("checkbox", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: 3000 });
+      await field.getByRole("checkbox", { name: new RegExp(escapeRegExp(label), "i") }).first().check({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try next label.
@@ -202,7 +205,7 @@ async function chooseCountry(page, country) {
   const nativeSelect = page.locator('select[name*="phone" i], select[aria-label*="country" i], select[name*="country" i]').first();
   try {
     if (await nativeSelect.count()) {
-      await nativeSelect.selectOption({ label: country }, { timeout: 3000 });
+      await nativeSelect.selectOption({ label: country }, { timeout: FILL_TIMEOUT });
       return true;
     }
   } catch (_error) {
@@ -213,8 +216,8 @@ async function chooseCountry(page, country) {
     const locator = page.locator(selector).first();
     try {
       if (await locator.count()) {
-        await locator.click({ timeout: 3000 });
-        await page.getByText(country, { exact: true }).first().click({ timeout: 3000 });
+        await locator.click({ timeout: FILL_TIMEOUT });
+        await page.getByText(country, { exact: true }).first().click({ timeout: FILL_TIMEOUT });
         return true;
       }
     } catch (_error) {
@@ -304,22 +307,22 @@ async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabe
         if (!(await target.count())) continue;
         const tagName = await target.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
         if (tagName === "select") {
-          await target.selectOption({ label }, { timeout: 2500 });
+          await target.selectOption({ label }, { timeout: FILL_TIMEOUT });
           return true;
         }
-        await target.click({ timeout: 2500 });
-        await target.fill(String(label), { timeout: 2500 }).catch(() => {});
+        await target.click({ timeout: FILL_TIMEOUT });
+        await target.fill(String(label), { timeout: FILL_TIMEOUT }).catch(() => {});
         try {
-          await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: 2500 });
+          await page.getByRole("option", { name: new RegExp(escapeRegExp(label), "i") }).first().click({ timeout: FILL_TIMEOUT });
           return true;
         } catch (_optionError) {
-          await page.keyboard.press("Enter");
+          await keyboardFor(page).press("Enter");
           return true;
         }
       } catch (_error) {
         try {
           const fieldContainer = page.locator(".field-wrapper").filter({ has: target }).first();
-          await fieldContainer.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: 2500 });
+          await fieldContainer.getByText(new RegExp(`^${escapeRegExp(label)}$`, "i")).first().click({ timeout: FILL_TIMEOUT });
           return true;
         } catch (_fallbackError) {
           // Try next label.
@@ -346,22 +349,22 @@ async function clickChoiceNearLabel(page, labelPattern, preferredLabels) {
     const labelRegex = new RegExp(escapeRegExp(label), "i");
     try {
       if (!(await field.count())) continue;
-      await field.getByText(labelRegex).first().click({ timeout: 2500 });
+      await field.getByText(labelRegex).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try next control type.
     }
     try {
       if (!(await field.count())) continue;
-      await field.locator("label").filter({ hasText: labelRegex }).first().click({ timeout: 2500 });
+      await field.locator("label").filter({ hasText: labelRegex }).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try next control type.
     }
     try {
       if (!(await field.count())) continue;
-      await field.getByRole("combobox").first().click({ timeout: 2500 });
-      await page.getByRole("option", { name: labelRegex }).first().click({ timeout: 2500 });
+      await field.getByRole("combobox").first().click({ timeout: FILL_TIMEOUT });
+      await page.getByRole("option", { name: labelRegex }).first().click({ timeout: FILL_TIMEOUT });
       return true;
     } catch (_error) {
       // Try next label.
@@ -380,7 +383,7 @@ async function fillGreenhouseQuestionByLabel(page, labelPattern, value) {
     const target = page.locator(`[name="${cssEscape(field.name)}"], [id="${cssEscape(field.name)}"]`).first();
     try {
       if (await target.count()) {
-        await target.fill(String(value), { timeout: 2500 });
+        await target.fill(String(value), { timeout: FILL_TIMEOUT });
         return true;
       }
     } catch (_error) {
@@ -449,6 +452,10 @@ function cssEscape(value) {
   return String(value).replace(/["\\]/g, "\\$&");
 }
 
+function keyboardFor(surface) {
+  return surface.keyboard || surface.page().keyboard;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (!args.id) {
@@ -479,7 +486,9 @@ async function main() {
   try {
     await page.goto(app.url, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForTimeout(2500);
-    const visibleText = (await page.locator("body").innerText({ timeout: 10000 })).toLowerCase();
+    const applicationSurface = await openApplicationSurface(page);
+    console.log(`Using ${applicationSurface === page ? "main page" : "embedded application frame"} for form filling.`);
+    const visibleText = await combinedVisibleText(page, applicationSurface);
 
     if (/captcha|verify you are human|sign in|log in|create account|e-signature|signature/.test(visibleText)) {
       actionItems.add("Browser stopped for login/CAPTCHA/account/signature step.");
@@ -494,19 +503,21 @@ async function main() {
     const personal = profile.personal || {};
     const links = profile.links || {};
     const defaults = profile.application_defaults || {};
-    await fillFirst(page, ['input[name="first_name"]', 'input[id="first_name"]'], firstName(personal.legal_name || personal.name));
-    await fillFirst(page, ['input[name*="last" i]', 'input[aria-label*="last" i]', 'input[id*="last" i]'], lastName(personal.name));
-    await fillFirst(page, ['input[name*="preferred" i]', 'input[aria-label*="preferred" i]', 'input[id*="preferred" i]'], firstName(personal.name));
-    await fillFirst(page, ['input[type="email"]', 'input[name*="email" i]', 'input[aria-label*="email" i]'], personal.email);
-    await fillFirst(page, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
-    await fillFirst(page, ['input[name*="location" i]', 'input[aria-label*="location" i]', 'input[id*="location" i]'], personal.location);
-    await fillFirst(page, ['input[name*="linkedin" i]', 'input[aria-label*="linkedin" i]', 'input[id*="linkedin" i]'], links.linkedin);
-    await fillFirst(page, ['input[name*="website" i]', 'input[aria-label*="website" i]', 'input[id*="website" i]', 'input[name*="portfolio" i]', 'input[aria-label*="portfolio" i]'], links.website);
-    await chooseCountry(page, personal.country || "United States");
+    console.log("Filling contact fields...");
+    await fillFirst(applicationSurface, ['input[name="first_name"]', 'input[id="first_name"]'], firstName(personal.legal_name || personal.name));
+    await fillFirst(applicationSurface, ['input[name*="last" i]', 'input[aria-label*="last" i]', 'input[id*="last" i]'], lastName(personal.name));
+    await fillFirst(applicationSurface, ['input[name*="preferred" i]', 'input[aria-label*="preferred" i]', 'input[id*="preferred" i]'], firstName(personal.name));
+    await fillFirst(applicationSurface, ['input[type="email"]', 'input[name*="email" i]', 'input[aria-label*="email" i]'], personal.email);
+    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
+    await fillFirst(applicationSurface, ['input[name*="location" i]', 'input[aria-label*="location" i]', 'input[id*="location" i]'], personal.location);
+    await fillFirst(applicationSurface, ['input[name*="linkedin" i]', 'input[aria-label*="linkedin" i]', 'input[id*="linkedin" i]'], links.linkedin);
+    await fillFirst(applicationSurface, ['input[name*="website" i]', 'input[aria-label*="website" i]', 'input[id*="website" i]', 'input[name*="portfolio" i]', 'input[aria-label*="portfolio" i]'], links.website);
+    await chooseCountry(applicationSurface, personal.country || "United States");
 
+    console.log("Uploading resume...");
     const resumePath = resolveWorkspacePath(root, selected.dir, profile.resume_file || app.resume_path || "");
     if (resumePath && fs.existsSync(resumePath)) {
-      const fileInputs = await page.locator('input[type="file"]').all();
+      const fileInputs = await applicationSurface.locator('input[type="file"]').all();
       if (fileInputs.length > 0) {
         await fileInputs[0].setInputFiles(resumePath);
       }
@@ -514,12 +525,18 @@ async function main() {
       actionItems.add("Resume upload skipped because resume_path did not point to an existing file.");
     }
 
-    await uploadCoverLetter(page, app.cover_letter_path, root);
-    await fillFirst(page, ['textarea[name*="cover" i]', 'textarea[aria-label*="cover" i]'], coverLetterText(app.cover_letter_path, root));
-    await fillFirst(page, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
-    await fillFirst(page, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
-    await fillStructuredApplicationFields(page, profile, app, actionItems);
+    console.log("Uploading cover letter and filling structured questions...");
+    await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
+    await fillFirst(applicationSurface, ['textarea[name*="cover" i]', 'textarea[aria-label*="cover" i]'], coverLetterText(app.cover_letter_path, root));
+    await fillFirst(applicationSurface, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
+    await fillFirst(applicationSurface, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
+    if (applicationSurface === page) {
+      await fillStructuredApplicationFields(applicationSurface, profile, app, actionItems);
+    } else {
+      actionItems.add("Embedded application form detected; review EEO, authorization, sponsorship, and screening fields manually.");
+    }
 
+    console.log("Capturing pre-submit screenshot...");
     actionItems.add("Review all fields manually. Final application submit must be clicked by you, not automation.");
     await page.screenshot({ path: screenshotPath, fullPage: true });
     updateApp(tracker, app.id, { status: "needs_review", screenshot_path: screenshotPath, action_items: [...actionItems] });
@@ -580,6 +597,44 @@ async function uploadCoverLetter(page, relativePath, root) {
     // Fall back to manual review.
   }
   return false;
+}
+
+async function openApplicationSurface(page) {
+  for (const locator of [
+    page.getByRole("button", { name: /apply now|application form/i }).first(),
+    page.getByRole("link", { name: /apply now|apply/i }).first(),
+    page.locator('button[aria-label*="application" i], button:has-text("Apply Now"), a:has-text("Apply Now")').first(),
+  ]) {
+    try {
+      if (await locator.count()) {
+        await locator.click({ timeout: NAVIGATION_TIMEOUT });
+        await page.waitForTimeout(4000);
+        break;
+      }
+    } catch (_error) {
+      // Try the next apply control.
+    }
+  }
+
+  const greenhouseFrame = page.frames().find((frame) => /greenhouse\.io\/embed|greenhouse\.io\/.*job_app/i.test(frame.url()));
+  return greenhouseFrame || page;
+}
+
+async function combinedVisibleText(page, applicationSurface) {
+  const blocks = [];
+  try {
+    blocks.push(await page.locator("body").innerText({ timeout: 10000 }));
+  } catch (_error) {
+    // Ignore.
+  }
+  if (applicationSurface !== page) {
+    try {
+      blocks.push(await applicationSurface.locator("body").innerText({ timeout: 10000 }));
+    } catch (_error) {
+      // Ignore.
+    }
+  }
+  return blocks.join("\n").toLowerCase();
 }
 
 function textUploadPath(markdownPath) {
