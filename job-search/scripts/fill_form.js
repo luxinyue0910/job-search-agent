@@ -515,6 +515,8 @@ async function main() {
     await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
     await fillFirst(applicationSurface, ['input[name*="location" i]', 'input[aria-label*="location" i]', 'input[id*="location" i]'], personal.location);
     await fillFirst(applicationSurface, ['input[name*="linkedin" i]', 'input[aria-label*="linkedin" i]', 'input[id*="linkedin" i]'], links.linkedin);
+    await fillFirst(applicationSurface, ['input[name*="github" i]', 'input[aria-label*="github" i]', 'input[id*="github" i]', 'input[placeholder*="github" i]'], links.github);
+    await fillByLabel(applicationSurface, /github/i, links.github);
     await fillFirst(applicationSurface, ['input[name*="website" i]', 'input[aria-label*="website" i]', 'input[id*="website" i]', 'input[name*="portfolio" i]', 'input[aria-label*="portfolio" i]'], links.website);
     await chooseCountry(applicationSurface, personal.country || "United States");
 
