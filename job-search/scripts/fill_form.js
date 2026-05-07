@@ -262,6 +262,8 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
   await selectGreenhouseQuestionByLabel(page, /^gender/i, [defaults.gender, "Female", "Decline to self-identify", "Decline To Self Identify"]);
   await clickChoiceByLabel(page, /^race/i, [defaults.race_ethnicity, "Decline To Self Identify"]);
   await selectGreenhouseQuestionByLabel(page, /^race/i, [defaults.race_ethnicity, "Asian (Not Hispanic or Latino)", "Asian", "Decline to self-identify"]);
+  await clickChoiceByLabel(page, /sexual orientation/i, [defaults.sexual_orientation, "I don't wish to answer"]);
+  await selectGreenhouseQuestionByLabel(page, /sexual orientation/i, [defaults.sexual_orientation, "Heterosexual", "I don't wish to answer"]);
   await clickChoiceByLabel(page, /veteran/i, ["I am not a protected veteran", defaults.veteran_status]);
   await selectGreenhouseQuestionByLabel(page, /veteran/i, ["I am not a veteran", "I am not a protected veteran", defaults.veteran_status]);
   await clickChoiceByLabel(page, /disability/i, ["No, I do not have a disability and have not had one in the past", defaults.disability_status]);
