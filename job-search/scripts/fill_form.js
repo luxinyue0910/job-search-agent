@@ -163,6 +163,39 @@ async function selectByLabel(page, labelPattern, preferredLabels) {
   return false;
 }
 
+async function fillSchoolField(page, education, actionItems) {
+  const school = education.school || "University of Colorado Boulder";
+  const field = fieldByLabel(page, /^school|college|university|institution/i);
+  if (!(await field.count())) return false;
+
+  try {
+    const nativeSelect = field.locator("select").first();
+    if (await nativeSelect.count()) {
+      await nativeSelect.selectOption({ label: school }, { timeout: FILL_TIMEOUT });
+      return true;
+    }
+  } catch (_error) {
+    // Fall through to text/combobox handling.
+  }
+
+  try {
+    const input = field.locator('input[role="combobox"], input:not([type="hidden"]), textarea').first();
+    if (await input.count()) {
+      await input.click({ timeout: FILL_TIMEOUT });
+      await input.fill(school, { timeout: FILL_TIMEOUT });
+      try {
+        await page.getByRole("option", { name: new RegExp(`^${escapeRegExp(school)}$`, "i") }).first().click({ timeout: FILL_TIMEOUT });
+      } catch (_optionError) {
+        actionItems.add("School field was filled as text only. Confirm it did not auto-select the wrong university.");
+      }
+      return true;
+    }
+  } catch (_error) {
+    actionItems.add("School field needs manual review. Use University of Colorado Boulder.");
+  }
+  return false;
+}
+
 async function clickChoiceByLabel(page, labelPattern, preferredLabels) {
   const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
   if (!labels.length) return false;
@@ -243,7 +276,7 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
   await fillByLabel(page, /location|candidate location|city/i, personal.location);
   await fillGreenhouseQuestionByLabel(page, /candidate location|location/i, personal.location);
 
-  await selectByLabel(page, /^school/i, [education.school, "University of Colorado Boulder", "Other"]);
+  await fillSchoolField(page, education, actionItems);
   await selectByLabel(page, /^degree/i, [education.degree, "Master of Science", "Master's Degree", "Masters"]);
   await selectByLabel(page, /discipline|major/i, [education.major, "Computer Science"]);
 
@@ -261,36 +294,7 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
   await clickChoiceByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
   await selectGreenhouseQuestionByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
 
-  await answerDemographicQuestion(page, /gender|gender identity/i, [defaults.gender, "Female", "Woman", "Decline to self-identify", "Decline To Self Identify"]);
-  await answerDemographicQuestion(page, /hispanic|latino/i, [
-    defaults.hispanic_latino,
-    "No",
-    "No, I am not Hispanic or Latino",
-    "No, I am not Hispanic/Latino",
-    "Not Hispanic or Latino",
-    "Decline to self-identify",
-  ]);
-  await answerDemographicQuestion(page, /race|ethnicity|racial/i, [
-    defaults.race_ethnicity,
-    "Asian",
-    "Asian (Not Hispanic or Latino)",
-    "Asian (Not Hispanic/Latino)",
-    "Decline to self-identify",
-  ]);
-  await answerDemographicQuestion(page, /sexual orientation/i, [defaults.sexual_orientation, "Heterosexual", "I don't wish to answer"]);
-  await answerDemographicQuestion(page, /veteran/i, [
-    "I am not a protected veteran",
-    "I am not a veteran",
-    "No",
-    defaults.veteran_status,
-    "Decline to self-identify",
-  ]);
-  await answerDemographicQuestion(page, /disability/i, [
-    "No, I do not have a disability and have not had one in the past",
-    "No",
-    defaults.disability_status,
-    "Decline to self-identify",
-  ]);
+  actionItems.add("Review EEO demographic fields manually: gender, Hispanic/Latino, race, veteran, disability, and sexual orientation.");
 }
 
 async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabels) {
