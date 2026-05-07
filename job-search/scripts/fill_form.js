@@ -258,16 +258,36 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
   await clickChoiceByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
   await selectGreenhouseQuestionByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
 
-  await clickChoiceByLabel(page, /^gender/i, [defaults.gender, "Decline To Self Identify"]);
-  await selectGreenhouseQuestionByLabel(page, /^gender/i, [defaults.gender, "Female", "Decline to self-identify", "Decline To Self Identify"]);
-  await clickChoiceByLabel(page, /^race/i, [defaults.race_ethnicity, "Decline To Self Identify"]);
-  await selectGreenhouseQuestionByLabel(page, /^race/i, [defaults.race_ethnicity, "Asian (Not Hispanic or Latino)", "Asian", "Decline to self-identify"]);
-  await clickChoiceByLabel(page, /sexual orientation/i, [defaults.sexual_orientation, "I don't wish to answer"]);
-  await selectGreenhouseQuestionByLabel(page, /sexual orientation/i, [defaults.sexual_orientation, "Heterosexual", "I don't wish to answer"]);
-  await clickChoiceByLabel(page, /veteran/i, ["I am not a protected veteran", defaults.veteran_status]);
-  await selectGreenhouseQuestionByLabel(page, /veteran/i, ["I am not a veteran", "I am not a protected veteran", defaults.veteran_status]);
-  await clickChoiceByLabel(page, /disability/i, ["No, I do not have a disability and have not had one in the past", defaults.disability_status]);
-  await selectGreenhouseQuestionByLabel(page, /disability/i, ["No, I do not have a disability and have not had one in the past", defaults.disability_status]);
+  await answerDemographicQuestion(page, /gender|gender identity/i, [defaults.gender, "Female", "Woman", "Decline to self-identify", "Decline To Self Identify"]);
+  await answerDemographicQuestion(page, /hispanic|latino/i, [
+    defaults.hispanic_latino,
+    "No",
+    "No, I am not Hispanic or Latino",
+    "No, I am not Hispanic/Latino",
+    "Not Hispanic or Latino",
+    "Decline to self-identify",
+  ]);
+  await answerDemographicQuestion(page, /race|ethnicity|racial/i, [
+    defaults.race_ethnicity,
+    "Asian",
+    "Asian (Not Hispanic or Latino)",
+    "Asian (Not Hispanic/Latino)",
+    "Decline to self-identify",
+  ]);
+  await answerDemographicQuestion(page, /sexual orientation/i, [defaults.sexual_orientation, "Heterosexual", "I don't wish to answer"]);
+  await answerDemographicQuestion(page, /veteran/i, [
+    "I am not a protected veteran",
+    "I am not a veteran",
+    "No",
+    defaults.veteran_status,
+    "Decline to self-identify",
+  ]);
+  await answerDemographicQuestion(page, /disability/i, [
+    "No, I do not have a disability and have not had one in the past",
+    "No",
+    defaults.disability_status,
+    "Decline to self-identify",
+  ]);
 }
 
 async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabels) {
@@ -305,6 +325,46 @@ async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabe
           // Try next label.
         }
       }
+    }
+  }
+  return false;
+}
+
+async function answerDemographicQuestion(page, labelPattern, preferredLabels) {
+  const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
+  if (!labels.length) return false;
+  if (await clickChoiceByLabel(page, labelPattern, labels)) return true;
+  if (await selectByLabel(page, labelPattern, labels)) return true;
+  if (await selectGreenhouseQuestionByLabel(page, labelPattern, labels)) return true;
+  return clickChoiceNearLabel(page, labelPattern, labels);
+}
+
+async function clickChoiceNearLabel(page, labelPattern, preferredLabels) {
+  const labels = Array.isArray(preferredLabels) ? preferredLabels.filter(Boolean) : [preferredLabels].filter(Boolean);
+  const field = fieldByLabel(page, labelPattern);
+  for (const label of labels) {
+    const labelRegex = new RegExp(escapeRegExp(label), "i");
+    try {
+      if (!(await field.count())) continue;
+      await field.getByText(labelRegex).first().click({ timeout: 2500 });
+      return true;
+    } catch (_error) {
+      // Try next control type.
+    }
+    try {
+      if (!(await field.count())) continue;
+      await field.locator("label").filter({ hasText: labelRegex }).first().click({ timeout: 2500 });
+      return true;
+    } catch (_error) {
+      // Try next control type.
+    }
+    try {
+      if (!(await field.count())) continue;
+      await field.getByRole("combobox").first().click({ timeout: 2500 });
+      await page.getByRole("option", { name: labelRegex }).first().click({ timeout: 2500 });
+      return true;
+    } catch (_error) {
+      // Try next label.
     }
   }
   return false;
