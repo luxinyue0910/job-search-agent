@@ -96,11 +96,24 @@ Examples:
 ```bash
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
 python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --score --update-sources
+python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --pages-per-query 3 --score --update-sources
 python3 job-search/scripts/job_search.py discover-web-jobs --provider bing --since-days 7 --score --update-sources
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter
 ```
+
+Use `--pages-per-query` with SerpAPI when the first Google result page is too shallow. Each extra page costs another SerpAPI request per query, so keep `--max-queries` and `--pages-per-query` balanced.
+
+Aggregator discovery is intentionally human-in-the-loop. Use Jobright or Wellfound as lead sources, then resolve companies back to official ATS boards before applying:
+
+```bash
+JOB_SEARCH_PRIVATE_DIR=/path/to/private node job-search/scripts/collect_aggregator_leads.js --provider jobright --resolve-sources
+JOB_SEARCH_PRIVATE_DIR=/path/to/private node job-search/scripts/collect_aggregator_leads.js --provider wellfound --resolve-sources
+python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+```
+
+The collector opens a real browser profile, waits for you to log in and set filters, scrolls the visible result list, writes `data/aggregator_leads.json`, and optionally searches for official Greenhouse, Lever, or Ashby boards to add to `sources.json`.
 
 `data/sources.json` can include ATS identifiers to avoid brittle HTML scraping:
 

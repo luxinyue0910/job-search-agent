@@ -6,7 +6,8 @@
   "scripts": {
     "gmail:notify": "node scripts/gmail_notify.js",
     "outlook:notify": "node scripts/outlook_notify.js",
-    "fill:form": "node scripts/fill_form.js"
+    "fill:form": "node scripts/fill_form.js",
+    "collect:aggregator": "node scripts/collect_aggregator_leads.js"
   },
   "dependencies": {
     "playwright": "^1.44.0"

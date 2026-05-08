@@ -1033,20 +1033,35 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         return f"Unable to fetch job description from {app['url']}. Error: {error}"
 
 
-def search_serpapi(query: str, since_days: float | None, limit: int) -> list[str]:
+def search_serpapi(query: str, since_days: float | None, limit: int, pages: int = 1) -> list[str]:
     api_key = os.environ.get("SERPAPI_API_KEY")
     if not api_key:
         raise SystemExit("Set SERPAPI_API_KEY or use --provider bing with BING_SEARCH_API_KEY.")
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": api_key,
-        "num": str(min(limit, 100)),
-    }
-    if since_days is not None:
-        params["tbs"] = "qdr:w" if since_days <= 7 else "qdr:m"
-    data = fetch_json(f"https://serpapi.com/search.json?{urllib.parse.urlencode(params)}")
-    return [item.get("link", "") for item in data.get("organic_results", []) if item.get("link")]
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+    per_page = min(limit, 100)
+    for page_index in range(max(1, pages)):
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": api_key,
+            "num": str(per_page),
+        }
+        if page_index:
+            params["start"] = str(page_index * per_page)
+        if since_days is not None:
+            params["tbs"] = "qdr:w" if since_days <= 7 else "qdr:m"
+        data = fetch_json(f"https://serpapi.com/search.json?{urllib.parse.urlencode(params)}")
+
+        before = len(urls)
+        for item in data.get("organic_results", []):
+            url = item.get("link", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                urls.append(url)
+        if len(urls) == before:
+            break
+    return urls
 
 
 def search_bing(query: str, since_days: float | None, limit: int) -> list[str]:
@@ -1071,7 +1086,7 @@ def search_bing(query: str, since_days: float | None, limit: int) -> list[str]:
 
 def web_search_urls(query: str, args: argparse.Namespace) -> list[str]:
     if args.provider == "serpapi":
-        return search_serpapi(query, args.since_days, args.results_per_query)
+        return search_serpapi(query, args.since_days, args.results_per_query, args.pages_per_query)
     if args.provider == "bing":
         return search_bing(query, args.since_days, args.results_per_query)
     raise SystemExit(f"Unsupported search provider: {args.provider}")
@@ -1561,6 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours.")
     web_discover.add_argument("--since-days", type=float, default=7, help="Only add jobs posted within this many days.")
     web_discover.add_argument("--results-per-query", type=int, default=10)
+    web_discover.add_argument("--pages-per-query", type=int, default=1, help="SerpAPI only: follow this many Google result pages per query.")
     web_discover.add_argument("--max-queries", type=int, default=48)
     web_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
     web_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
