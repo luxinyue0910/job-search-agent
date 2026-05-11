@@ -35,6 +35,7 @@ PROFILE_PATH = PRIVATE_BASE_ROOT / "profile.json"
 APPLICATIONS_JSON = PRIVATE_BASE_ROOT / "data" / "applications.json"
 APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
 SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
+WATCHLIST_PATH = PRIVATE_BASE_ROOT / "data" / "company_watchlist.json"
 SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
@@ -55,6 +56,8 @@ CSV_FIELDS = [
     "first_seen",
     "last_seen",
     "source",
+    "source_query",
+    "freshness_source",
     "date_applied",
     "resume_path",
     "cover_letter_path",
@@ -112,6 +115,8 @@ DEFAULT_DISCOVERY_TITLE_KEYWORDS = [
     "platform",
     "devops",
     "infrastructure",
+    "system development engineer",
+    "systems development engineer",
     "cloud",
     "new grad",
     "junior",
@@ -166,7 +171,7 @@ def configure_person(person: str) -> None:
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, SEEN_JOBS_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -178,6 +183,7 @@ def configure_person(person: str) -> None:
     APPLICATIONS_JSON = PERSON_ROOT / "data" / "applications.json"
     APPLICATIONS_CSV = PERSON_ROOT / "data" / "applications.csv"
     SOURCES_PATH = PERSON_ROOT / "data" / "sources.json"
+    WATCHLIST_PATH = PERSON_ROOT / "data" / "company_watchlist.json"
     SEEN_JOBS_PATH = PERSON_ROOT / "data" / "seen_jobs.json"
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
@@ -351,6 +357,12 @@ def parse_datetime(value: Any) -> dt.datetime | None:
 def normalize_datetime(value: Any) -> str:
     parsed = parse_datetime(value)
     return parsed.replace(microsecond=0).isoformat() if parsed else ""
+
+
+def relative_search_days(args: argparse.Namespace) -> float | None:
+    if getattr(args, "since_hours", None) is not None:
+        return max(float(args.since_hours) / 24, 0.05)
+    return getattr(args, "since_days", None)
 
 
 def normalize_job_url(url: str) -> str:
@@ -636,6 +648,11 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
     role = str(candidate.get("role", "")).lower()
     if not role:
         return False
+    combined = f"{candidate.get('role', '')} {candidate.get('url', '')}".lower()
+    if re.search(r"\b(senior|sr\.?|staff|principal|manager|director|lead|intern|internship)\b", combined):
+        return False
+    if re.search(r"\b(canada|france|india|united kingdom|uk|london|paris|toronto|vancouver)\b", combined):
+        return False
     profile_terms = [
         str(item).lower()
         for item in profile.get("targets", {}).get("roles", []) + profile.get("targets", {}).get("levels", [])
@@ -661,7 +678,7 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
         return True
 
     allowed_states = {str(item).lower() for item in preferences.get("relocation_allowed_states", [])}
-    if "wa" in allowed_states and re.search(r"\b(wa|washington|seattle|bellevue)\b", value):
+    if "wa" in allowed_states and re.search(r"\b(wa|washington|seattle|bellevue|redmond|kirkland)\b", value):
         return True
     if "ca" in allowed_states and re.search(
         r"\b(ca|california|san francisco|sf|san jose|palo alto|mountain view|sunnyvale|los angeles)\b",
@@ -717,6 +734,8 @@ def process_discovered_candidates(
                 "updated_at": candidate.get("updated_at", seen_record.get("updated_at", "")),
                 "last_seen": current_seen_at,
                 "source": candidate.get("source", seen_record.get("source", "")),
+                "source_query": candidate.get("source_query", seen_record.get("source_query", "")),
+                "freshness_source": candidate.get("freshness_source", seen_record.get("freshness_source", "")),
             }
         )
         candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
@@ -867,7 +886,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
     for app in apps:
         if normalize_job_url(app.get("url", "")) == normalized_url:
             changed = False
-            for field in ["posted_at", "updated_at", "first_seen", "last_seen", "source"]:
+            for field in ["posted_at", "updated_at", "first_seen", "last_seen", "source", "source_query", "freshness_source"]:
                 if candidate.get(field) and app.get(field) != candidate[field]:
                     app[field] = candidate[field]
                     changed = True
@@ -893,6 +912,8 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "first_seen": candidate.get("first_seen", ""),
         "last_seen": candidate.get("last_seen", ""),
         "source": candidate.get("source", ""),
+        "source_query": candidate.get("source_query", ""),
+        "freshness_source": candidate.get("freshness_source", ""),
         "date_applied": "",
         "resume_path": "",
         "cover_letter_path": "",
@@ -1092,10 +1113,11 @@ def search_bing(query: str, since_days: float | None, limit: int) -> list[str]:
 
 
 def web_search_urls(query: str, args: argparse.Namespace) -> list[str]:
+    since_days = relative_search_days(args)
     if args.provider == "serpapi":
-        return search_serpapi(query, args.since_days, args.results_per_query, args.pages_per_query)
+        return search_serpapi(query, since_days, args.results_per_query, args.pages_per_query)
     if args.provider == "bing":
-        return search_bing(query, args.since_days, args.results_per_query)
+        return search_bing(query, since_days, args.results_per_query)
     raise SystemExit(f"Unsupported search provider: {args.provider}")
 
 
@@ -1108,6 +1130,211 @@ def build_web_discovery_queries(args: argparse.Namespace) -> list[str]:
             for location in locations:
                 queries.append(f'site:{site} "{role}" "{location}"')
     return queries
+
+
+def load_watchlist() -> dict[str, Any]:
+    if not WATCHLIST_PATH.exists():
+        return {"companies": []}
+    data = load_json(WATCHLIST_PATH)
+    data.setdefault("companies", [])
+    return data
+
+
+def list_or_default(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list) and value:
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return default
+
+
+def build_watchlist_queries(args: argparse.Namespace) -> list[dict[str, str]]:
+    watchlist = load_watchlist()
+    default_roles = args.role or watchlist.get("default_roles") or DEFAULT_WEB_DISCOVERY_ROLES
+    default_locations = args.location or watchlist.get("default_locations") or DEFAULT_WEB_DISCOVERY_LOCATIONS
+    default_exclusions = [str(item).strip() for item in watchlist.get("default_exclusions", []) if str(item).strip()]
+    query_items: list[dict[str, str]] = []
+
+    for company_config in watchlist.get("companies", []):
+        if not company_config.get("active", True):
+            continue
+        company = str(company_config.get("company", "")).strip()
+        if not company:
+            continue
+        sites = list_or_default(company_config.get("career_sites"), [])
+        roles = list_or_default(company_config.get("roles"), default_roles)
+        locations = list_or_default(company_config.get("locations"), default_locations)
+        templates = list_or_default(company_config.get("query_templates"), [])
+        exclusions = [str(item).strip() for item in company_config.get("exclude_terms", default_exclusions) if str(item).strip()]
+        exclusion_suffix = " ".join(f"-{term}" for term in exclusions)
+
+        if templates:
+            for template in templates:
+                has_placeholder = "{" in template and "}" in template
+                site_values = sites or [""]
+                role_values = roles if "{role}" in template else [""]
+                location_values = locations if "{location}" in template else [""]
+                for site in site_values:
+                    for role in role_values:
+                        for location in location_values:
+                            try:
+                                query = template.format(company=company, site=site, role=role, location=location)
+                            except KeyError as error:
+                                raise SystemExit(f"Bad query template for {company}: missing {{{error.args[0]}}}") from error
+                            query = re.sub(r"\s+", " ", f"{query} {exclusion_suffix}").strip()
+                            if query:
+                                query_items.append({"company": company, "site": site, "query": query})
+                if not has_placeholder and template.strip():
+                    query = re.sub(r"\s+", " ", f"{template.strip()} {exclusion_suffix}").strip()
+                    query_items.append({"company": company, "site": sites[0] if sites else "", "query": query})
+            continue
+
+        for site in sites:
+            for role in roles:
+                for location in locations:
+                    query = f'site:{site} "{role}" "{location}" {exclusion_suffix}'.strip()
+                    query_items.append(
+                        {
+                            "company": company,
+                            "site": site,
+                            "query": query,
+                        }
+                    )
+
+    deduped: list[dict[str, str]] = []
+    seen_queries: set[str] = set()
+    for item in query_items:
+        if item["query"] in seen_queries:
+            continue
+        seen_queries.add(item["query"])
+        deduped.append(item)
+
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for item in deduped:
+        grouped.setdefault(item["company"], []).append(item)
+    balanced: list[dict[str, str]] = []
+    while any(grouped.values()):
+        for company in list(grouped):
+            if grouped[company]:
+                balanced.append(grouped[company].pop(0))
+    return balanced[: args.max_queries]
+
+
+def html_attr(pattern: str, raw: str) -> str:
+    match = re.search(pattern, raw, flags=re.I | re.S)
+    return html.unescape(match.group(1)).strip() if match else ""
+
+
+def extract_html_title(raw: str, company: str, url: str) -> str:
+    title = (
+        html_attr(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', raw)
+        or html_attr(r'<meta[^>]+name=["\']title["\'][^>]+content=["\']([^"\']+)["\']', raw)
+        or html_attr(r"<title[^>]*>(.*?)</title>", raw)
+        or html_attr(r"<h1[^>]*>(.*?)</h1>", raw)
+    )
+    title = html_to_text(title)
+    for separator in [" | ", " - ", " – ", " — ", " at "]:
+        if separator in title:
+            parts = [part.strip() for part in title.split(separator) if part.strip()]
+            if parts:
+                title = parts[0]
+                break
+    if company:
+        title = re.sub(rf"\b{re.escape(company)}\b", "", title, flags=re.I).strip(" -|")
+    return title or infer_role_from_url(url)
+
+
+def extract_first_datetime(raw: str, patterns: list[str]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.I | re.S)
+        if not match:
+            continue
+        normalized = normalize_datetime(html.unescape(match.group(1)))
+        if normalized:
+            return normalized
+    return ""
+
+
+def extract_location(raw: str) -> str:
+    text = html_to_text(raw[:80_000])
+    patterns = [
+        r"\bLocation\s*[:\-]\s*([^|•\n]{2,90})",
+        r"\bLocations\s*[:\-]\s*([^|•\n]{2,90})",
+        r"\bWork Location\s*[:\-]\s*([^|•\n]{2,90})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return match.group(1).strip()
+    for location in DEFAULT_WEB_DISCOVERY_LOCATIONS + ["Redmond", "Mountain View", "Sunnyvale", "Menlo Park"]:
+        if re.search(rf"\b{re.escape(location)}\b", text, flags=re.I):
+            return location
+    return ""
+
+
+def candidate_from_watchlist_url(
+    url: str,
+    company: str,
+    query: str,
+    current_seen_at: str,
+    use_search_seen_date: bool,
+) -> dict[str, Any] | None:
+    normalized = normalize_job_url(url)
+    ats_candidate = ats_candidate_from_url(normalized)
+    if ats_candidate:
+        ats_candidate["source_query"] = query
+        ats_candidate["freshness_source"] = "official_posted_at" if ats_candidate.get("posted_at") else "unknown"
+        if not ats_candidate.get("posted_at") and use_search_seen_date:
+            ats_candidate["posted_at"] = current_seen_at
+            ats_candidate["freshness_source"] = "search_seen_at"
+            ats_candidate["notes"] = "No official posted date parsed; using first search-seen time for freshness."
+        return ats_candidate
+
+    try:
+        raw = fetch_url(normalized)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch watchlist URL {normalized}: {error}", file=sys.stderr)
+        return None
+
+    posted_at = extract_first_datetime(
+        raw,
+        [
+            r'"datePosted"\s*:\s*"([^"]+)"',
+            r'"datePublished"\s*:\s*"([^"]+)"',
+            r'"postedDate"\s*:\s*"([^"]+)"',
+            r'"published_at"\s*:\s*"([^"]+)"',
+            r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']date["\'][^>]+content=["\']([^"\']+)["\']',
+        ],
+    )
+    updated_at = extract_first_datetime(
+        raw,
+        [
+            r'"dateModified"\s*:\s*"([^"]+)"',
+            r'"updated_at"\s*:\s*"([^"]+)"',
+            r'<meta[^>]+property=["\']article:modified_time["\'][^>]+content=["\']([^"\']+)["\']',
+        ],
+    )
+    freshness_source = "official_posted_at" if posted_at else "unknown"
+    notes = ""
+    if not posted_at and use_search_seen_date:
+        posted_at = current_seen_at
+        freshness_source = "search_seen_at"
+        notes = "Watchlist search result; no official posted date parsed; using first search-seen time for freshness."
+
+    return {
+        "company": company,
+        "role": extract_html_title(raw, company, normalized),
+        "url": normalized,
+        "platform": detect_platform(normalized),
+        "location": extract_location(raw),
+        "posted_at": posted_at,
+        "updated_at": updated_at,
+        "source": f"watchlist:{company}",
+        "source_query": query,
+        "freshness_source": freshness_source,
+        "notes": notes,
+    }
 
 
 def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
@@ -1215,6 +1442,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
 
 def command_discover_web_jobs(args: argparse.Namespace) -> None:
     require_person_files()
+    if args.since_hours is None and args.since_days is None:
+        args.since_days = 7
     profile = load_profile()
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
@@ -1249,6 +1478,59 @@ def command_discover_web_jobs(args: argparse.Namespace) -> None:
         "Web discovery complete. "
         f"Provider: {args.provider}. Queries: {len(queries)}. Failed queries: {failed_queries}. "
         f"Search URLs: {len(urls)}. ATS jobs parsed: {len(candidates)}. Added sources: {added_sources}. "
+        f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Added: {stats['added']}. Existing: {stats['existing']}. "
+        f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
+        f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
+        f"Scoring failed: {stats['scoring_failed']}."
+    )
+
+
+def command_discover_watchlist_jobs(args: argparse.Namespace) -> None:
+    require_person_files()
+    if args.since_hours is None and args.since_days is None:
+        args.since_days = 7
+    profile = load_profile()
+    seen = load_seen_jobs()
+    cutoff = discovery_cutoff(args)
+    current_seen_at = now_utc_iso()
+    query_items = build_watchlist_queries(args)
+    urls: dict[str, dict[str, str]] = {}
+    failed_queries = 0
+    candidates: dict[str, dict[str, Any]] = {}
+
+    if not query_items:
+        raise SystemExit(f"No active companies found in {WATCHLIST_PATH}.")
+
+    for item in query_items:
+        query = item["query"]
+        try:
+            for url in web_search_urls(query, args):
+                normalized = normalize_job_url(url)
+                if normalized:
+                    urls.setdefault(normalized, item)
+        except Exception as error:  # noqa: BLE001
+            failed_queries += 1
+            print(f"Watchlist search query failed: {query}: {error}", file=sys.stderr)
+
+    for url, item in urls.items():
+        candidate = candidate_from_watchlist_url(
+            url,
+            item["company"],
+            item["query"],
+            current_seen_at,
+            args.use_search_seen_date,
+        )
+        if not candidate:
+            continue
+        candidates[candidate["url"]] = candidate
+
+    stats = process_discovered_candidates(list(candidates.values()), args, profile, seen, cutoff, current_seen_at)
+    save_seen_jobs(seen)
+    print(
+        "Watchlist discovery complete. "
+        f"Provider: {args.provider}. Queries: {len(query_items)}. Failed queries: {failed_queries}. "
+        f"Search URLs: {len(urls)}. Jobs parsed: {len(candidates)}. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Added: {stats['added']}. Existing: {stats['existing']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
@@ -1537,6 +1819,7 @@ def command_run(args: argparse.Namespace) -> None:
 def command_init_person(_args: argparse.Namespace) -> None:
     create_from_template(ROOT / "examples" / "profile.example.json", PROFILE_PATH)
     create_from_template(ROOT / "examples" / "sources.example.json", SOURCES_PATH)
+    create_from_template(ROOT / "examples" / "company_watchlist.example.json", WATCHLIST_PATH)
     create_from_template(ROOT / "examples" / "applications.example.json", APPLICATIONS_JSON)
     create_from_template(ROOT / "examples" / "applications.example.csv", APPLICATIONS_CSV)
     create_from_template(ROOT / "examples" / "seen_jobs.example.json", SEEN_JOBS_PATH)
@@ -1581,7 +1864,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     web_discover.add_argument("--provider", choices=["serpapi", "bing"], default="serpapi")
     web_discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours.")
-    web_discover.add_argument("--since-days", type=float, default=7, help="Only add jobs posted within this many days.")
+    web_discover.add_argument("--since-days", type=float, help="Only add jobs posted within this many days. Defaults to 7.")
     web_discover.add_argument("--results-per-query", type=int, default=10)
     web_discover.add_argument("--pages-per-query", type=int, default=1, help="SerpAPI only: follow this many Google result pages per query.")
     web_discover.add_argument("--max-queries", type=int, default=48)
@@ -1595,6 +1878,33 @@ def build_parser() -> argparse.ArgumentParser:
     web_discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     web_discover.add_argument("--update-sources", action="store_true", help="Add newly discovered ATS boards to sources.json.")
     web_discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
+
+    watchlist_discover = subcommands.add_parser(
+        "discover-watchlist-jobs",
+        help="Use company_watchlist.json and a search API to discover jobs on company career sites.",
+    )
+    watchlist_discover.add_argument("--provider", choices=["serpapi", "bing"], default="serpapi")
+    watchlist_discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours.")
+    watchlist_discover.add_argument("--since-days", type=float, help="Only add jobs posted within this many days. Defaults to 7.")
+    watchlist_discover.add_argument("--results-per-query", type=int, default=10)
+    watchlist_discover.add_argument("--pages-per-query", type=int, default=2, help="SerpAPI only: follow this many Google result pages per query.")
+    watchlist_discover.add_argument("--max-queries", type=int, default=80)
+    watchlist_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
+    watchlist_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
+    watchlist_discover.add_argument(
+        "--include-unknown-posted-date",
+        action="store_true",
+        help="Add jobs even when neither official posted date nor search-seen fallback is available.",
+    )
+    watchlist_discover.add_argument(
+        "--no-search-seen-date",
+        dest="use_search_seen_date",
+        action="store_false",
+        help="Do not use first search-seen time as a fallback posted_at for self-hosted career pages.",
+    )
+    watchlist_discover.set_defaults(use_search_seen_date=True)
+    watchlist_discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
+    watchlist_discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
 
     add = subcommands.add_parser("add-url", help="Manually add one job URL.")
     add.add_argument("url")
@@ -1638,6 +1948,8 @@ def main() -> None:
         command_discover_jobs(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
+    elif args.command == "discover-watchlist-jobs":
+        command_discover_watchlist_jobs(args)
     elif args.command == "add-url":
         command_add_url(args)
     elif args.command == "score-job":

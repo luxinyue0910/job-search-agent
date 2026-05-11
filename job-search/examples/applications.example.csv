@@ -1,1 +1,1 @@
-id,company,role,url,platform,location,status,fit_score,ats_score,date_found,date_applied,resume_path,cover_letter_path,screenshot_path,notes
+id,company,role,url,platform,location,status,fit_score,ats_score,date_found,posted_at,updated_at,first_seen,last_seen,source,source_query,freshness_source,date_applied,resume_path,cover_letter_path,screenshot_path,notes

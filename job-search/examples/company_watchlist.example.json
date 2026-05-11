@@ -1,0 +1,55 @@
+{
+  "default_roles": [
+    "Software Engineer",
+    "Backend Engineer",
+    "AI Engineer",
+    "Machine Learning Engineer",
+    "New Grad Software Engineer",
+    "Software Engineer I",
+    "Platform Engineer",
+    "DevOps Engineer"
+  ],
+  "default_locations": [
+    "Seattle",
+    "Bellevue",
+    "Washington",
+    "Remote",
+    "San Francisco",
+    "Bay Area",
+    "California"
+  ],
+  "default_exclusions": [
+    "senior",
+    "sr",
+    "staff",
+    "principal",
+    "manager",
+    "director",
+    "lead",
+    "intern",
+    "internship",
+    "canada"
+  ],
+  "companies": [
+    {
+      "company": "Amazon",
+      "active": true,
+      "career_sites": [
+        "amazon.jobs"
+      ],
+      "query_templates": [
+        "site:{site} \"{role}\" \"{location}\""
+      ]
+    },
+    {
+      "company": "Microsoft",
+      "active": true,
+      "career_sites": [
+        "jobs.careers.microsoft.com"
+      ],
+      "query_templates": [
+        "site:{site} \"{role}\" \"{location}\""
+      ]
+    }
+  ]
+}
