@@ -947,15 +947,23 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     level_score = 2.0
 
     dealbreakers: list[str] = []
+    action_items = []
     if re.search(r"security clearance|active clearance|secret clearance|top secret", jd_text, re.I):
         dealbreakers.append("Security clearance appears required.")
     if re.search(r"\b(senior|staff|principal|lead)\b", app.get("role", ""), re.I):
         dealbreakers.append("Role title appears senior/staff/principal/lead.")
     years = extract_years(jd_text)
     max_years = max(years) if years else 0
-    threshold = int(profile.get("dealbreakers", {}).get("minimum_years_over", 5))
+    dealbreaker_config = profile.get("dealbreakers", {})
+    threshold = int(dealbreaker_config.get("minimum_years_over", 5))
     if max_years > threshold:
         dealbreakers.append(f"JD mentions {max_years}+ years, above threshold {threshold}.")
+    penalty_from = int(dealbreaker_config.get("lower_weight_minimum_years_from", 3))
+    if max_years >= penalty_from:
+        level_score = max(0.4, level_score - 1.4)
+        action_items.append(
+            f"JD mentions {max_years}+ years; lower priority for 0-2 years experience target."
+        )
     if re.search(r"we do not sponsor|no sponsorship|unable to sponsor", jd_text, re.I):
         if profile.get("work_authorization", {}).get("requires_sponsorship"):
             dealbreakers.append("JD says sponsorship is unavailable.")
@@ -964,7 +972,6 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
 
     fit_score = 0.0 if dealbreakers else round(min(10.0, role_score + tech_score + location_score + level_score), 1)
     status = "skipped" if dealbreakers else ("needs_review" if fit_score < 6.0 or ats_score < 60 else "scored")
-    action_items = []
     if ats_score < 60:
         action_items.append("Review ATS keyword gap before applying.")
     if fit_score < 6.0 and not dealbreakers:

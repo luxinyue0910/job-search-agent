@@ -4,6 +4,7 @@ const path = require("path");
 
 const FILL_TIMEOUT = 900;
 const NAVIGATION_TIMEOUT = 5000;
+const DEFAULT_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 function parseArgs(argv) {
   const args = {};
@@ -476,9 +477,17 @@ async function main() {
 
   const { chromium } = require("playwright");
   const userDataDir = path.join(selected.dir, ".browser-profile", selected.person, "ats");
-  const context = await chromium.launchPersistentContext(userDataDir, {
+  const chromePath = args.chrome || process.env.JOB_SEARCH_CHROME_PATH || DEFAULT_CHROME_PATH;
+  const launchOptions = {
     headless: false,
-    viewport: { width: 1400, height: 950 }
+    viewport: { width: 1280, height: 1400 },
+  };
+  if (chromePath && fs.existsSync(chromePath)) {
+    launchOptions.executablePath = chromePath;
+    console.log(`Using Chrome: ${chromePath}`);
+  }
+  const context = await chromium.launchPersistentContext(userDataDir, {
+    ...launchOptions,
   });
   const page = context.pages()[0] || await context.newPage();
 
