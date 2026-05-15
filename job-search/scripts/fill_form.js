@@ -537,7 +537,7 @@ async function main() {
         await fileInputs[0].setInputFiles(resumePath);
       }
     } else {
-      actionItems.add("Resume upload skipped because resume_path did not point to an existing file.");
+      actionItems.add("Resume upload skipped because profile.resume_file or app.resume_path did not point to an existing file.");
     }
 
     console.log("Uploading cover letter and filling structured questions...");

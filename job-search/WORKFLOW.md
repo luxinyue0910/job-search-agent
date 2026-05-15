@@ -26,7 +26,12 @@ python3 job-search/scripts/job_search.py init-person
 - `$JOB_SEARCH_PRIVATE_DIR/data/applications.json`
 
 4. Add your PDF resume under `$JOB_SEARCH_PRIVATE_DIR/resume/` and set `profile.json` `resume_file`.
-5. Optional browser setup:
+5. Keep the PDF and Markdown resume in sync:
+
+- `profile.json` `resume_file` is the file uploaded to ATS forms.
+- `resume/master_resume.md` is used for scoring, keyword matching, and generating tailored application materials.
+
+6. Optional browser setup:
 
 ```bash
 cd job-search
