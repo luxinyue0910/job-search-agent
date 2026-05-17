@@ -14,6 +14,7 @@ import csv
 import datetime as dt
 import hashlib
 import html
+import http.cookiejar
 import json
 import os
 import re
@@ -391,6 +392,13 @@ def fetch_json(url: str, timeout: int = 20) -> Any:
         return json.loads(response.read().decode(charset, errors="replace"))
 
 
+def fetch_json_with_opener(opener: urllib.request.OpenerDirector, url: str, headers: dict[str, str], timeout: int = 20) -> Any:
+    request = urllib.request.Request(url, headers=headers)
+    with opener.open(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
 def html_to_text(raw: str) -> str:
     raw = re.sub(r"(?is)<script.*?</script>", " ", raw)
     raw = re.sub(r"(?is)<style.*?</style>", " ", raw)
@@ -599,6 +607,84 @@ def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
+def microsoft_pcsx_session() -> tuple[urllib.request.OpenerDirector, dict[str, str]]:
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+    }
+    response = opener.open(urllib.request.Request("https://apply.careers.microsoft.com/careers", headers=base_headers), timeout=20)
+    response.read()
+    csrf_token = response.headers.get("x-csrf-token", "")
+    headers = {
+        "User-Agent": base_headers["User-Agent"],
+        "Accept": "application/json,*/*;q=0.8",
+        "Referer": "https://apply.careers.microsoft.com/careers",
+    }
+    if csrf_token:
+        headers["X-CSRFToken"] = csrf_token
+    return opener, headers
+
+
+def microsoft_job_url(position_id: Any) -> str:
+    return f"https://jobs.careers.microsoft.com/global/en/job/{position_id}"
+
+
+def discover_microsoft_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Microsoft")
+    keywords = source.get("keywords") or ["Software Engineer", "Software Development Engineer", "New Grad Software Engineer", "AI Engineer"]
+    locations = source.get("locations") or ["Redmond, Washington, United States", "Seattle, Washington, United States", "Bellevue, Washington, United States", "Mountain View, California, United States", "San Francisco, California, United States"]
+    max_pages = int(source.get("max_pages", 3))
+    page_size = 10
+    opener, headers = microsoft_pcsx_session()
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in keywords:
+        for location in locations:
+            for page_index in range(max_pages):
+                params = {
+                    "domain": "microsoft.com",
+                    "query": str(keyword),
+                    "location": str(location),
+                    "start": str(page_index * page_size),
+                    "hl": "en",
+                }
+                api_url = f"https://apply.careers.microsoft.com/api/pcsx/search?{urllib.parse.urlencode(params)}"
+                try:
+                    data = fetch_json_with_opener(opener, api_url, headers)
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch Microsoft careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                    break
+                positions = data.get("data", {}).get("positions", []) if isinstance(data, dict) else []
+                if not positions:
+                    break
+                for job in positions:
+                    position_id = job.get("id")
+                    if not position_id:
+                        continue
+                    url = normalize_job_url(microsoft_job_url(position_id))
+                    location_values = job.get("standardizedLocations") or job.get("locations") or []
+                    if isinstance(location_values, str):
+                        location_text = location_values
+                    else:
+                        location_text = "; ".join(str(item) for item in location_values if item)
+                    candidates[url] = {
+                        "company": company,
+                        "role": job.get("name") or infer_role_from_url(url),
+                        "url": url,
+                        "platform": "microsoft_jobs",
+                        "location": location_text,
+                        "posted_at": normalize_datetime(job.get("postedTs")),
+                        "updated_at": normalize_datetime(job.get("updatedTs") or job.get("lastModifiedTs")),
+                        "source": source.get("url", "https://jobs.careers.microsoft.com"),
+                        "notes": f"Microsoft careers direct adapter; display_job_id={job.get('displayJobId', '')}",
+                    }
+                if len(positions) < page_size:
+                    break
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -607,6 +693,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_lever_jobs(source)
     if platform == "ashby":
         return discover_ashby_jobs(source)
+    if platform == "microsoft_jobs":
+        return discover_microsoft_jobs(source)
     return find_links_for_source(source)
 
 
@@ -911,6 +999,38 @@ def fetch_greenhouse_job_text(url: str) -> str | None:
     return "\n\n".join(str(block) for block in blocks if block)
 
 
+def fetch_microsoft_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "microsoft.com" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    position_id = parts[-1] if parts else ""
+    if not position_id.isdigit():
+        return None
+    opener, headers = microsoft_pcsx_session()
+    params = {
+        "position_id": position_id,
+        "domain": "microsoft.com",
+        "hl": "en",
+    }
+    api_url = f"https://apply.careers.microsoft.com/api/pcsx/position_details?{urllib.parse.urlencode(params)}"
+    data = fetch_json_with_opener(opener, api_url, headers)
+    job = data.get("data", {}) if isinstance(data, dict) else {}
+    location_values = job.get("standardizedLocations") or job.get("locations") or []
+    if isinstance(location_values, str):
+        location_text = location_values
+    else:
+        location_text = "; ".join(str(item) for item in location_values if item)
+    blocks = [
+        job.get("name", ""),
+        job.get("displayJobId", ""),
+        location_text,
+        job.get("department", ""),
+        html_to_text(job.get("jobDescription", "")),
+    ]
+    return "\n\n".join(str(block) for block in blocks if block)
+
+
 def infer_role_from_url(url: str) -> str:
     path = urllib.parse.urlparse(url).path
     parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
@@ -1150,7 +1270,7 @@ def template_path(name: str) -> Path:
 def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
     if jd_file:
         return Path(jd_file).read_text(encoding="utf-8", errors="replace")
-    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text]:
+    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text, fetch_microsoft_job_text]:
         try:
             text = fetcher(app["url"])
             if text:
@@ -1550,6 +1670,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     profile = profile_for_track(getattr(args, "track", None))
     sources = load_json(SOURCES_PATH).get("sources", [])
+    source_company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
+    if source_company_filters:
+        sources = [source for source in sources if str(source.get("company", "")).lower() in source_company_filters]
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
     stats = empty_discovery_stats()
@@ -2135,6 +2258,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
+    discover.add_argument(
+        "--source-company",
+        action="append",
+        help="Only run discovery for a specific source company. Repeat for multiple companies.",
+    )
 
     web_discover = subcommands.add_parser(
         "discover-web-jobs",
