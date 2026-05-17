@@ -1767,7 +1767,7 @@ def command_prepare_application(args: argparse.Namespace) -> None:
 
     cover_template = template_path("cover_letter.md").read_text(encoding="utf-8")
     cover_path = output_dir / "cover_letter.md"
-    cover_path.write_text(render_cover_letter(cover_template, app, profile), encoding="utf-8")
+    cover_path.write_text(render_cover_letter(cover_template, app, profile, jd_text), encoding="utf-8")
 
     screening_template = template_path("screening_answers.md").read_text(encoding="utf-8")
     screening_path = output_dir / "screening_answers.md"
@@ -1776,7 +1776,7 @@ def command_prepare_application(args: argparse.Namespace) -> None:
     update_application(
         app["id"],
         {
-            "status": "prepared",
+            "status": app.get("status") if app.get("status") == "applied" else "prepared",
             "resume_path": str(resume_path),
             "resume_file": str(path_from_track(track, "resume_file") or app.get("resume_file", "")),
             "target_track": track.get("id", app.get("target_track", "")),
@@ -1806,9 +1806,111 @@ def render_tailored_resume(master: str, app: dict[str, Any], jd_text: str, missi
     return note + master
 
 
-def render_cover_letter(template: str, app: dict[str, Any], profile: dict[str, Any]) -> str:
+def rank_keywords_for_text(keywords: list[Any], text: str, limit: int = 6) -> list[str]:
+    lower = text.lower()
+    ranked: list[str] = []
+    for keyword in keywords:
+        value = str(keyword).strip()
+        if not value:
+            continue
+        if re.search(rf"\b{re.escape(value.lower())}\b", lower):
+            ranked.append(value)
+    return merge_unique([], ranked)[:limit]
+
+
+def display_keywords(keywords: list[str]) -> str:
+    display_names = {
+        "aws": "AWS",
+        "gcp": "GCP",
+        "azure": "Azure",
+        "docker": "Docker",
+        "github actions": "GitHub Actions",
+        "pytest": "pytest",
+        "python": "Python",
+        "ci": "CI",
+        "ci/cd": "CI/CD",
+        "qa": "QA",
+        "sdet": "SDET",
+        "api": "API",
+        "llm": "LLM",
+        "rag": "RAG",
+    }
+    return ", ".join(display_names.get(keyword.lower(), keyword) for keyword in keywords)
+
+
+def cover_letter_context(app: dict[str, Any], profile: dict[str, Any], jd_text: str) -> dict[str, str]:
+    track_id = profile.get("_track", {}).get("id") or app.get("target_track") or ""
+    matched = app.get("matched_keywords", [])
+    target_keywords = profile.get("targets", {}).get("keywords", [])
+    track_keywords = profile.get("_track", {}).get("scoring_keywords", [])
+    relevant = rank_keywords_for_text(matched + track_keywords + target_keywords, jd_text, 6)
+    if not relevant:
+        relevant = [str(item) for item in target_keywords[:5]]
+
+    role = f"{app.get('role', '')} {jd_text}".lower()
+    if track_id == "qa_engineer":
+        if re.search(r"security|cloud|terraform|kubernetes", role):
+            hook = "the role connects quality engineering with cloud automation, reliability, and practical security-focused engineering work"
+            project = (
+                "my QA work at Youmigo validating auth-sensitive API flows, building pytest/FastAPI TestClient regression coverage, "
+                "and using GitHub Actions CI"
+            )
+            focus = "reliable automated validation, clear defect isolation, and maintainable cloud-facing workflows"
+        elif re.search(r"automation|sdet|software development engineer in test|test automation", role):
+            hook = "the role emphasizes test automation, regression coverage, and reliable engineering workflows"
+            project = (
+                "my Youmigo QA work using Postman, pytest, FastAPI TestClient, mocked services, and GitHub Actions CI to validate "
+                "checkout, ticketing, webhook, refund, and host-management flows"
+            )
+            focus = "maintainable test automation, accurate defect isolation, and reliable releases"
+        elif re.search(r"mobile|ios|android", role):
+            hook = "the role emphasizes mobile quality, user-facing reliability, and careful validation of real application behavior"
+            project = (
+                "my Youmigo QA work reproducing iOS UX issues, validating Firebase Analytics funnels, and tracing frontend state, "
+                "API responses, logs, and persistence behavior"
+            )
+            focus = "high-quality mobile releases and practical regression coverage"
+        else:
+            hook = "the role emphasizes test automation, regression coverage, and product quality for real users"
+            project = (
+                "my Youmigo QA work using Postman, pytest, FastAPI TestClient, mocked services, and GitHub Actions CI to validate "
+                "checkout, ticketing, webhook, refund, and host-management flows"
+            )
+            focus = "strong regression coverage, accurate bug reproduction, and reliable releases"
+    else:
+        if re.search(r"backend|api|distributed|platform|infrastructure|cloud|aws", role):
+            hook = "the role aligns with backend systems, cloud infrastructure, and production reliability work"
+            project = (
+                "my Youmigo work building AWS-based ingestion, ticketing, and image delivery systems with FastAPI, Lambda, SQS, "
+                "Step Functions, DynamoDB, S3, and CloudFront"
+            )
+            focus = "scalable backend systems and reliable software for users"
+        elif re.search(r"ai|machine learning|llm|rag|retrieval", role):
+            hook = "the role aligns with practical AI systems, retrieval quality, and production-oriented software engineering"
+            project = (
+                "my multi-modal RAG project and Youmigo LLM-powered ingestion work, including retrieval evaluation, "
+                "LLM workflows, and production constraints"
+            )
+            focus = "practical AI features that are reliable, measurable, and useful to users"
+        else:
+            hook = "the role aligns with practical software engineering, production constraints, and user-facing impact"
+            project = (
+                "my Youmigo engineering work across backend services, automation, mobile integration, and cloud delivery"
+            )
+            focus = "shipping reliable software for users"
+
+    return {
+        "hook": hook,
+        "skills": ", ".join(relevant),
+        "project": project,
+        "focus": focus,
+    }
+
+
+def render_cover_letter(template: str, app: dict[str, Any], profile: dict[str, Any], jd_text: str = "") -> str:
     personal = profile.get("personal", {})
     links = profile.get("links", {})
+    context = cover_letter_context(app, profile, jd_text)
     replacements = {
         "[Your Name]": personal.get("name", ""),
         "[Your Email]": personal.get("email", ""),
@@ -1820,10 +1922,10 @@ def render_cover_letter(template: str, app: dict[str, Any], profile: dict[str, A
         "[Date]": today(),
         "[Company]": app.get("company", ""),
         "[Role]": app.get("role", ""),
-        "[Company Hook]": "its products, engineering work, and the impact described in the job posting",
-        "[Relevant Skills]": ", ".join(profile.get("targets", {}).get("keywords", [])[:5]),
-        "[Relevant Project]": "one of my strongest real projects",
-        "[Role Focus]": "shipping reliable software for users",
+        "[Company Hook]": context["hook"],
+        "[Relevant Skills]": display_keywords(context["skills"].split(", ")) if context["skills"] else "",
+        "[Relevant Project]": context["project"],
+        "[Role Focus]": context["focus"],
     }
     result = template
     for old, new in replacements.items():
