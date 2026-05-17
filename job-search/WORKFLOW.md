@@ -85,6 +85,28 @@ python3 job-search/scripts/job_search.py prepare-application --id <application-i
 python3 job-search/scripts/job_search.py notify
 ```
 
+## Tracks
+
+Use tracks when the same person is applying with different resume/search/scoring strategies, such as SDE, QA/SDET, or mobile. Tracks share the same private profile, `sources.json`, `company_watchlist.json`, `applications.json`, and `seen_jobs.json`; each application can record `target_track`, `matched_tracks`, and `resume_file`.
+
+Track files live under `$JOB_SEARCH_PRIVATE_DIR/tracks/<track-id>/`:
+
+- `track.json`: roles, search terms, scoring keywords, and resume paths.
+- `master_resume.md`: the Markdown resume used for scoring and tailored materials.
+- `resume.pdf`: the PDF uploaded to ATS forms for that track.
+
+Examples:
+
+```bash
+python3 job-search/scripts/job_search.py discover-jobs --track qa_engineer --since-days 7 --score
+python3 job-search/scripts/job_search.py discover-web-jobs --track qa_engineer --since-days 7 --score --update-sources
+python3 job-search/scripts/job_search.py discover-watchlist-jobs --track qa_engineer --since-days 7 --score
+python3 job-search/scripts/job_search.py score-job --id <application-id> --track qa_engineer
+python3 job-search/scripts/job_search.py prepare-application --id <application-id> --track qa_engineer
+```
+
+If a job is found by both QA and SDE searches, the tracker keeps one application by URL and appends both values to `matched_tracks`. `prepare-application` uses the application `target_track` unless you override it with `--track`.
+
 Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, and related roles; pass `--no-role-filter` to review every fresh posting.
 
 Use `discover-web-jobs` to expand beyond known company boards. It calls a search API, looks for public Greenhouse, Lever, and Ashby job URLs, parses the original ATS posting, then applies the same posted-date, title, location, seen-job, and tracker de-dupe rules. This avoids logging into LinkedIn, Indeed, Jobright, or Wellfound and treats those sites as discovery hints rather than scrape targets.

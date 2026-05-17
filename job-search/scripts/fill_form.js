@@ -47,7 +47,9 @@ function writeJson(filePath, data) {
 function writeCsv(root, tracker) {
   const fields = [
     "id", "company", "role", "url", "platform", "location", "status", "fit_score", "ats_score",
-    "date_found", "date_applied", "resume_path", "cover_letter_path", "screenshot_path", "notes"
+    "date_found", "posted_at", "updated_at", "first_seen", "last_seen", "source", "source_query",
+    "freshness_source", "target_track", "matched_tracks", "resume_file", "date_applied",
+    "resume_path", "cover_letter_path", "screenshot_path", "notes"
   ];
   const rows = [fields.join(",")];
   for (const app of tracker.applications || []) {
@@ -530,14 +532,14 @@ async function main() {
     await chooseCountry(applicationSurface, personal.country || "United States");
 
     console.log("Uploading resume...");
-    const resumePath = resolveWorkspacePath(root, selected.dir, profile.resume_file || app.resume_path || "");
+    const resumePath = resolveWorkspacePath(root, selected.dir, app.resume_file || profile.resume_file || app.resume_path || "");
     if (resumePath && fs.existsSync(resumePath)) {
       const fileInputs = await applicationSurface.locator('input[type="file"]').all();
       if (fileInputs.length > 0) {
         await fileInputs[0].setInputFiles(resumePath);
       }
     } else {
-      actionItems.add("Resume upload skipped because profile.resume_file or app.resume_path did not point to an existing file.");
+      actionItems.add("Resume upload skipped because app.resume_file, profile.resume_file, or app.resume_path did not point to an existing file.");
     }
 
     console.log("Uploading cover letter and filling structured questions...");

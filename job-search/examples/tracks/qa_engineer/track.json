@@ -1,0 +1,83 @@
+{
+  "id": "qa_engineer",
+  "name": "QA / SDET",
+  "resume_file": "tracks/qa_engineer/resume.pdf",
+  "master_resume": "tracks/qa_engineer/master_resume.md",
+  "targets": {
+    "roles": [
+      "QA Engineer",
+      "Software QA Engineer",
+      "SDET",
+      "Software Development Engineer in Test",
+      "Test Automation Engineer",
+      "Quality Engineer"
+    ],
+    "levels": [
+      "Entry Level",
+      "Junior",
+      "QA Engineer I",
+      "Software Engineer in Test I"
+    ],
+    "keywords": [
+      "QA",
+      "SDET",
+      "test automation",
+      "regression testing",
+      "API testing",
+      "mobile testing",
+      "Postman",
+      "pytest",
+      "JMeter",
+      "GitHub Actions",
+      "CI",
+      "bug reproduction",
+      "root cause analysis"
+    ]
+  },
+  "web_discovery_roles": [
+    "QA Engineer",
+    "Software QA Engineer",
+    "SDET",
+    "Software Development Engineer in Test",
+    "Test Automation Engineer",
+    "Quality Engineer",
+    "Mobile QA Engineer",
+    "API QA Engineer"
+  ],
+  "watchlist_roles": [
+    "QA Engineer",
+    "SDET",
+    "Software Development Engineer in Test",
+    "Test Automation Engineer"
+  ],
+  "discovery_title_keywords": [
+    "qa",
+    "quality assurance",
+    "quality engineer",
+    "sdet",
+    "software development engineer in test",
+    "software engineer in test",
+    "test automation",
+    "automation engineer",
+    "mobile qa",
+    "api qa"
+  ],
+  "scoring_keywords": [
+    "Postman",
+    "pytest",
+    "JMeter",
+    "FastAPI TestClient",
+    "GitHub Actions",
+    "CI/CD",
+    "Firebase Analytics",
+    "DebugView",
+    "API testing",
+    "mobile testing",
+    "regression testing",
+    "webhooks",
+    "mocked services",
+    "test plan",
+    "bug tracking",
+    "root cause analysis"
+  ]
+}

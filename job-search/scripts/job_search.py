@@ -37,6 +37,7 @@ APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
 SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
 WATCHLIST_PATH = PRIVATE_BASE_ROOT / "data" / "company_watchlist.json"
 SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
+TRACKS_DIR = PRIVATE_BASE_ROOT / "tracks"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 
@@ -58,6 +59,9 @@ CSV_FIELDS = [
     "source",
     "source_query",
     "freshness_source",
+    "target_track",
+    "matched_tracks",
+    "resume_file",
     "date_applied",
     "resume_path",
     "cover_letter_path",
@@ -171,7 +175,7 @@ def configure_person(person: str) -> None:
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, OUTPUT_DIR, NOTIFICATIONS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -185,6 +189,7 @@ def configure_person(person: str) -> None:
     SOURCES_PATH = PERSON_ROOT / "data" / "sources.json"
     WATCHLIST_PATH = PERSON_ROOT / "data" / "company_watchlist.json"
     SEEN_JOBS_PATH = PERSON_ROOT / "data" / "seen_jobs.json"
+    TRACKS_DIR = PERSON_ROOT / "tracks"
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 
@@ -229,6 +234,63 @@ def save_seen_jobs(seen: dict[str, Any]) -> None:
 def load_profile() -> dict[str, Any]:
     require_person_files()
     return load_json(PROFILE_PATH)
+
+
+def load_track(track_id: str | None) -> dict[str, Any]:
+    track = str(track_id or "").strip()
+    if not track:
+        return {}
+    safe_track = re.sub(r"[^a-zA-Z0-9_-]+", "-", track).strip("-")
+    path = TRACKS_DIR / safe_track / "track.json"
+    if not path.exists():
+        raise SystemExit(f"Unknown track '{track}'. Expected {path}")
+    data = load_json(path)
+    data.setdefault("id", safe_track)
+    data.setdefault("root", str(path.parent))
+    return data
+
+
+def merge_unique(base: list[Any], extra: list[Any]) -> list[Any]:
+    items: list[Any] = []
+    seen: set[str] = set()
+    for item in base + extra:
+        key = str(item).strip()
+        if not key or key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        items.append(item)
+    return items
+
+
+def profile_for_track(track_id: str | None) -> dict[str, Any]:
+    profile = json.loads(json.dumps(load_profile()))
+    track = load_track(track_id)
+    if not track:
+        profile["_track"] = {}
+        return profile
+
+    targets = profile.setdefault("targets", {})
+    track_targets = track.get("targets", {})
+    for key in ["roles", "levels"]:
+        if track_targets.get(key):
+            targets[key] = [str(item) for item in track_targets.get(key, []) if str(item).strip()]
+    for key in ["keywords"]:
+        targets[key] = merge_unique(
+            [str(item) for item in targets.get(key, [])],
+            [str(item) for item in track_targets.get(key, [])],
+        )
+    profile["_track"] = track
+    return profile
+
+
+def path_from_track(track: dict[str, Any], field: str) -> Path | None:
+    value = str(track.get(field, "")).strip()
+    if not value:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return PERSON_ROOT / value
 
 
 def load_tracker() -> dict[str, Any]:
@@ -658,7 +720,14 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
         for item in profile.get("targets", {}).get("roles", []) + profile.get("targets", {}).get("levels", [])
         if str(item).strip()
     ]
-    terms = profile_terms + DEFAULT_DISCOVERY_TITLE_KEYWORDS
+    track_terms = [
+        str(item).lower()
+        for item in profile.get("_track", {}).get("discovery_title_keywords", [])
+        if str(item).strip()
+    ]
+    terms = profile_terms + track_terms
+    if not track_terms:
+        terms += DEFAULT_DISCOVERY_TITLE_KEYWORDS
     return any(re.search(rf"\b{re.escape(term)}\b", role) for term in terms)
 
 
@@ -711,8 +780,16 @@ def process_discovered_candidates(
 ) -> dict[str, int]:
     stats = empty_discovery_stats()
     seen_jobs = seen.setdefault("jobs", {})
+    track = load_track(getattr(args, "track", None))
+    track_id = str(track.get("id", "")).strip()
+    track_resume = path_from_track(track, "resume_file") if track else None
     for candidate in candidates:
         stats["discovered"] += 1
+        if track_id:
+            candidate["target_track"] = track_id
+            candidate["matched_tracks"] = [track_id]
+            if track_resume:
+                candidate["resume_file"] = str(track_resume)
         candidate["url"] = normalize_job_url(candidate["url"])
         key = candidate["url"]
         seen_record = seen_jobs.setdefault(
@@ -736,8 +813,12 @@ def process_discovered_candidates(
                 "source": candidate.get("source", seen_record.get("source", "")),
                 "source_query": candidate.get("source_query", seen_record.get("source_query", "")),
                 "freshness_source": candidate.get("freshness_source", seen_record.get("freshness_source", "")),
+                "target_track": candidate.get("target_track", seen_record.get("target_track", "")),
+                "resume_file": candidate.get("resume_file", seen_record.get("resume_file", "")),
             }
         )
+        if track_id:
+            seen_record["matched_tracks"] = merge_unique(seen_record.get("matched_tracks", []), [track_id])
         candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
         candidate["last_seen"] = current_seen_at
 
@@ -890,6 +971,17 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
                 if candidate.get(field) and app.get(field) != candidate[field]:
                     app[field] = candidate[field]
                     changed = True
+            if candidate.get("target_track") and not app.get("target_track"):
+                app["target_track"] = candidate["target_track"]
+                changed = True
+            if candidate.get("resume_file") and (not app.get("resume_file") or app.get("target_track") == candidate.get("target_track")):
+                app["resume_file"] = candidate["resume_file"]
+                changed = True
+            if candidate.get("matched_tracks"):
+                merged = merge_unique(app.get("matched_tracks", []), candidate.get("matched_tracks", []))
+                if merged != app.get("matched_tracks", []):
+                    app["matched_tracks"] = merged
+                    changed = True
             if changed:
                 save_tracker(tracker)
             return app, False
@@ -914,6 +1006,9 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "source": candidate.get("source", ""),
         "source_query": candidate.get("source_query", ""),
         "freshness_source": candidate.get("freshness_source", ""),
+        "target_track": candidate.get("target_track", ""),
+        "matched_tracks": candidate.get("matched_tracks", []),
+        "resume_file": candidate.get("resume_file", ""),
         "date_applied": "",
         "resume_path": "",
         "cover_letter_path": "",
@@ -956,8 +1051,9 @@ def extract_years(text: str) -> list[int]:
 
 def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> dict[str, Any]:
     target_keywords = [str(item) for item in profile.get("targets", {}).get("keywords", [])]
-    matched = sorted(set(keyword_matches(jd_text, TECH_KEYWORDS + [k.lower() for k in target_keywords])))
-    resume_text = master_resume_path().read_text(encoding="utf-8", errors="replace")
+    track_keywords = [str(item) for item in profile.get("_track", {}).get("scoring_keywords", [])]
+    matched = sorted(set(keyword_matches(jd_text, TECH_KEYWORDS + [k.lower() for k in target_keywords + track_keywords])))
+    resume_text = master_resume_path(profile).read_text(encoding="utf-8", errors="replace")
     resume_matches = sorted(set(keyword_matches(resume_text, matched)))
     ats_score = round((len(resume_matches) / len(matched)) * 100) if matched else 0
 
@@ -1024,7 +1120,11 @@ def app_output_dir(app: dict[str, Any]) -> Path:
     return OUTPUT_DIR / slugify(app.get("company", "unknown")) / slugify(app.get("role", "unknown-role"))
 
 
-def master_resume_path() -> Path:
+def master_resume_path(profile: dict[str, Any] | None = None) -> Path:
+    track = (profile or {}).get("_track", {})
+    track_resume = path_from_track(track, "master_resume") if track else None
+    if track_resume and track_resume.exists():
+        return track_resume
     person_resume = PERSON_ROOT / "resume" / "master_resume.md"
     if person_resume.exists():
         return person_resume
@@ -1122,7 +1222,8 @@ def web_search_urls(query: str, args: argparse.Namespace) -> list[str]:
 
 
 def build_web_discovery_queries(args: argparse.Namespace) -> list[str]:
-    roles = args.role or DEFAULT_WEB_DISCOVERY_ROLES
+    track = load_track(getattr(args, "track", None))
+    roles = args.role or track.get("web_discovery_roles") or DEFAULT_WEB_DISCOVERY_ROLES
     locations = args.location or DEFAULT_WEB_DISCOVERY_LOCATIONS
     queries = []
     for site in ATS_SEARCH_SITES:
@@ -1150,7 +1251,8 @@ def list_or_default(value: Any, default: list[str]) -> list[str]:
 
 def build_watchlist_queries(args: argparse.Namespace) -> list[dict[str, str]]:
     watchlist = load_watchlist()
-    default_roles = args.role or watchlist.get("default_roles") or DEFAULT_WEB_DISCOVERY_ROLES
+    track = load_track(getattr(args, "track", None))
+    default_roles = args.role or track.get("watchlist_roles") or track.get("web_discovery_roles") or watchlist.get("default_roles") or DEFAULT_WEB_DISCOVERY_ROLES
     default_locations = args.location or watchlist.get("default_locations") or DEFAULT_WEB_DISCOVERY_LOCATIONS
     default_exclusions = [str(item).strip() for item in watchlist.get("default_exclusions", []) if str(item).strip()]
     query_items: list[dict[str, str]] = []
@@ -1394,13 +1496,19 @@ def update_sources_from_candidates(candidates: list[dict[str, Any]]) -> int:
     return added
 
 
-def command_find_jobs(_args: argparse.Namespace) -> None:
+def command_find_jobs(args: argparse.Namespace) -> None:
     require_person_files()
+    track = load_track(getattr(args, "track", None))
+    track_resume = path_from_track(track, "resume_file") if track else None
     sources = load_json(SOURCES_PATH).get("sources", [])
     new_count = 0
     review_count = 0
     for source in sources:
         for candidate in find_links_for_source(source):
+            if track.get("id"):
+                candidate["target_track"] = track["id"]
+                candidate["matched_tracks"] = [track["id"]]
+                candidate["resume_file"] = str(track_resume or "")
             app, created = upsert_application(candidate)
             if created:
                 new_count += 1
@@ -1411,7 +1519,7 @@ def command_find_jobs(_args: argparse.Namespace) -> None:
 
 def command_discover_jobs(args: argparse.Namespace) -> None:
     require_person_files()
-    profile = load_profile()
+    profile = profile_for_track(getattr(args, "track", None))
     sources = load_json(SOURCES_PATH).get("sources", [])
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
@@ -1444,7 +1552,7 @@ def command_discover_web_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     if args.since_hours is None and args.since_days is None:
         args.since_days = 7
-    profile = load_profile()
+    profile = profile_for_track(getattr(args, "track", None))
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
     current_seen_at = now_utc_iso()
@@ -1490,7 +1598,7 @@ def command_discover_watchlist_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     if args.since_hours is None and args.since_days is None:
         args.since_days = 7
-    profile = load_profile()
+    profile = profile_for_track(getattr(args, "track", None))
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
     current_seen_at = now_utc_iso()
@@ -1540,6 +1648,7 @@ def command_discover_watchlist_jobs(args: argparse.Namespace) -> None:
 
 
 def command_add_url(args: argparse.Namespace) -> None:
+    track = load_track(getattr(args, "track", None))
     candidate = {
         "company": args.company or "Unknown Company",
         "role": args.role or infer_role_from_url(args.url),
@@ -1547,6 +1656,9 @@ def command_add_url(args: argparse.Namespace) -> None:
         "platform": args.platform or detect_platform(args.url),
         "location": args.location or "",
         "notes": args.notes or "",
+        "target_track": track.get("id", ""),
+        "matched_tracks": [track["id"]] if track.get("id") else [],
+        "resume_file": str(path_from_track(track, "resume_file") or "") if track else "",
     }
     app, created = upsert_application(candidate)
     state = "created" if created else "already existed"
@@ -1555,7 +1667,15 @@ def command_add_url(args: argparse.Namespace) -> None:
 
 def command_score_job(args: argparse.Namespace) -> None:
     app = get_application(args.id)
-    profile = load_profile()
+    requested_track = getattr(args, "track", None) or app.get("target_track")
+    profile = profile_for_track(requested_track)
+    track = profile.get("_track", {})
+    if track.get("id"):
+        app["target_track"] = track["id"]
+        app["matched_tracks"] = merge_unique(app.get("matched_tracks", []), [track["id"]])
+        track_resume = path_from_track(track, "resume_file")
+        if track_resume:
+            app["resume_file"] = str(track_resume)
     jd_text = read_job_text(app, args.jd_file)
     score = score_text(app, jd_text, profile)
     output_dir = app_output_dir(app)
@@ -1578,6 +1698,9 @@ def command_score_job(args: argparse.Namespace) -> None:
             "missing_keywords": score["missing_keywords"],
             "jd_path": str(jd_path),
             "score_report_path": str(report_path),
+            "target_track": app.get("target_track", ""),
+            "matched_tracks": app.get("matched_tracks", []),
+            "resume_file": app.get("resume_file", ""),
             "notes": "; ".join(score["dealbreakers"] or score["action_items"]),
         },
     )
@@ -1595,6 +1718,7 @@ def render_score_report(app: dict[str, Any], score: dict[str, Any]) -> str:
 
         - URL: {app.get('url')}
         - Platform: {app.get('platform')}
+        - Track: {app.get('target_track') or 'default'}
         - Fit score: {score['fit_score']}/10
         - ATS score: {score['ats_score']}/100
         - Status: {score['status']}
@@ -1623,7 +1747,8 @@ def command_prepare_application(args: argparse.Namespace) -> None:
     if app.get("dealbreakers"):
         raise SystemExit("This job has dealbreakers. Override by editing tracker status before preparing.")
 
-    profile = load_profile()
+    profile = profile_for_track(getattr(args, "track", None) or app.get("target_track"))
+    track = profile.get("_track", {})
     output_dir = app_output_dir(app)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1635,7 +1760,7 @@ def command_prepare_application(args: argparse.Namespace) -> None:
         jd_text = read_job_text(app)
         (output_dir / "jd.md").write_text(jd_text + "\n", encoding="utf-8")
 
-    resume_master = master_resume_path().read_text(encoding="utf-8")
+    resume_master = master_resume_path(profile).read_text(encoding="utf-8")
     missing = app.get("missing_keywords", [])
     resume_path = output_dir / "resume_tailored.md"
     resume_path.write_text(render_tailored_resume(resume_master, app, jd_text, missing), encoding="utf-8")
@@ -1653,6 +1778,8 @@ def command_prepare_application(args: argparse.Namespace) -> None:
         {
             "status": "prepared",
             "resume_path": str(resume_path),
+            "resume_file": str(path_from_track(track, "resume_file") or app.get("resume_file", "")),
+            "target_track": track.get("id", app.get("target_track", "")),
             "cover_letter_path": str(cover_path),
             "screening_answers_path": str(screening_path),
             "action_items": ["Review materials, then run fill-form. Final submit must be manual."],
@@ -1806,7 +1933,7 @@ def command_run(args: argparse.Namespace) -> None:
     for app in tracker.get("applications", []):
         if app.get("status") == "found":
             try:
-                score_args = argparse.Namespace(id=app["id"], jd_file=None)
+                score_args = argparse.Namespace(id=app["id"], jd_file=None, track=getattr(args, "track", None))
                 command_score_job(score_args)
             except Exception as error:  # noqa: BLE001
                 update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
@@ -1824,6 +1951,8 @@ def command_init_person(_args: argparse.Namespace) -> None:
     create_from_template(ROOT / "examples" / "applications.example.csv", APPLICATIONS_CSV)
     create_from_template(ROOT / "examples" / "seen_jobs.example.json", SEEN_JOBS_PATH)
     create_from_template(ROOT / "examples" / "master_resume.example.md", PERSON_ROOT / "resume" / "master_resume.md")
+    create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "track.json", TRACKS_DIR / "qa_engineer" / "track.json")
+    create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "master_resume.md", TRACKS_DIR / "qa_engineer" / "master_resume.md")
     for template in ["cover_letter.md", "screening_answers.md", "notification_email.md"]:
         create_from_template(ROOT / "templates" / template, PERSON_ROOT / "templates" / template)
     profile = load_json(PROFILE_PATH)
@@ -1845,11 +1974,13 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     subcommands.add_parser("init-person", help="Create an isolated profile/resume/tracker partition.")
-    subcommands.add_parser("find-jobs", help="Fetch ATS source pages and add job links to the tracker.")
+    find_jobs = subcommands.add_parser("find-jobs", help="Fetch ATS source pages and add job links to the tracker.")
+    find_jobs.add_argument("--track", help="Target track for discovered applications.")
 
     discover = subcommands.add_parser("discover-jobs", help="Discover jobs with ATS APIs and filter by posted date.")
     discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours. Defaults to 24.")
     discover.add_argument("--since-days", type=float, help="Only add jobs posted within this many days.")
+    discover.add_argument("--track", help="Target track, such as qa_engineer, mobile_engineer, or backend_sde.")
     discover.add_argument(
         "--include-unknown-posted-date",
         action="store_true",
@@ -1868,6 +1999,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_discover.add_argument("--results-per-query", type=int, default=10)
     web_discover.add_argument("--pages-per-query", type=int, default=1, help="SerpAPI only: follow this many Google result pages per query.")
     web_discover.add_argument("--max-queries", type=int, default=48)
+    web_discover.add_argument("--track", help="Target track, such as qa_engineer, mobile_engineer, or backend_sde.")
     web_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
     web_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
     web_discover.add_argument(
@@ -1889,6 +2021,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchlist_discover.add_argument("--results-per-query", type=int, default=10)
     watchlist_discover.add_argument("--pages-per-query", type=int, default=2, help="SerpAPI only: follow this many Google result pages per query.")
     watchlist_discover.add_argument("--max-queries", type=int, default=80)
+    watchlist_discover.add_argument("--track", help="Target track, such as qa_engineer, mobile_engineer, or backend_sde.")
     watchlist_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
     watchlist_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
     watchlist_discover.add_argument(
@@ -1913,13 +2046,16 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--platform")
     add.add_argument("--location")
     add.add_argument("--notes")
+    add.add_argument("--track", help="Target track for this application.")
 
     score = subcommands.add_parser("score-job", help="Score one job by id or URL.")
     score.add_argument("--id", required=True)
     score.add_argument("--jd-file")
+    score.add_argument("--track", help="Override the application target track while scoring.")
 
     prepare = subcommands.add_parser("prepare-application", help="Generate local application materials.")
     prepare.add_argument("--id", required=True)
+    prepare.add_argument("--track", help="Override the application target track while preparing materials.")
 
     notify = subcommands.add_parser("notify", help="Write and optionally send the run summary.")
     notify.add_argument("--send-email", action="store_true", help="Send using profile.notifications.provider.")
@@ -1927,6 +2063,7 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--send-outlook", action="store_true")
 
     run = subcommands.add_parser("run", help="Find jobs, score unscored jobs, and write notification.")
+    run.add_argument("--track", help="Target track for found and scored applications.")
     run.add_argument("--send-email", action="store_true", help="Send using profile.notifications.provider.")
     run.add_argument("--send-gmail", action="store_true")
     run.add_argument("--send-outlook", action="store_true")
