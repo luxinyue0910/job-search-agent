@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -155,6 +156,10 @@ ATS_SEARCH_SITES = [
     "jobs.lever.co",
     "jobs.ashbyhq.com",
 ]
+
+
+class SearchRateLimited(RuntimeError):
+    """Raised when a search provider asks us to stop sending requests."""
 
 
 def today() -> str:
@@ -813,12 +818,16 @@ def process_discovered_candidates(
                 "source": candidate.get("source", seen_record.get("source", "")),
                 "source_query": candidate.get("source_query", seen_record.get("source_query", "")),
                 "freshness_source": candidate.get("freshness_source", seen_record.get("freshness_source", "")),
-                "target_track": candidate.get("target_track", seen_record.get("target_track", "")),
-                "resume_file": candidate.get("resume_file", seen_record.get("resume_file", "")),
             }
         )
         if track_id:
             seen_record["matched_tracks"] = merge_unique(seen_record.get("matched_tracks", []), [track_id])
+            if not seen_record.get("target_track"):
+                seen_record["target_track"] = track_id
+            if candidate.get("resume_file") and (
+                not seen_record.get("resume_file") or seen_record.get("target_track") == track_id
+            ):
+                seen_record["resume_file"] = candidate["resume_file"]
         candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
         candidate["last_seen"] = current_seen_at
 
@@ -1179,7 +1188,12 @@ def search_serpapi(query: str, since_days: float | None, limit: int, pages: int 
             params["start"] = str(page_index * per_page)
         if since_days is not None:
             params["tbs"] = "qdr:w" if since_days <= 7 else "qdr:m"
-        data = fetch_json(f"https://serpapi.com/search.json?{urllib.parse.urlencode(params)}")
+        try:
+            data = fetch_json(f"https://serpapi.com/search.json?{urllib.parse.urlencode(params)}")
+        except urllib.error.HTTPError as error:
+            if error.code == 429:
+                raise SearchRateLimited("SerpAPI returned 429 Too Many Requests. Stop this run and retry later or use a smaller batch.") from error
+            raise
 
         before = len(urls)
         for item in data.get("organic_results", []):
@@ -1230,7 +1244,22 @@ def build_web_discovery_queries(args: argparse.Namespace) -> list[str]:
         for role in roles:
             for location in locations:
                 queries.append(f'site:{site} "{role}" "{location}"')
-    return queries
+    grouped: dict[str, list[str]] = {}
+    for query in queries:
+        site = query.split(" ", 1)[0]
+        grouped.setdefault(site, []).append(query)
+    balanced: list[str] = []
+    while any(grouped.values()):
+        for site in list(grouped):
+            if grouped[site]:
+                balanced.append(grouped[site].pop(0))
+    return balanced
+
+
+def wait_between_search_queries(args: argparse.Namespace, query_index: int) -> None:
+    delay = float(getattr(args, "search_delay_seconds", 0) or 0)
+    if query_index > 0 and delay > 0:
+        time.sleep(delay)
 
 
 def load_watchlist() -> dict[str, Any]:
@@ -1561,12 +1590,19 @@ def command_discover_web_jobs(args: argparse.Namespace) -> None:
     failed_queries = 0
     candidates: dict[str, dict[str, Any]] = {}
 
-    for query in queries:
+    rate_limited = False
+    for index, query in enumerate(queries):
+        wait_between_search_queries(args, index)
         try:
             for url in web_search_urls(query, args):
                 normalized = normalize_job_url(url)
                 if detect_platform(normalized) in {"greenhouse", "lever", "ashby"}:
                     urls.setdefault(normalized, query)
+        except SearchRateLimited as error:
+            failed_queries += 1
+            rate_limited = True
+            print(f"Search provider rate limited; stopping remaining queries: {error}", file=sys.stderr)
+            break
         except Exception as error:  # noqa: BLE001
             failed_queries += 1
             print(f"Search query failed: {query}: {error}", file=sys.stderr)
@@ -1585,6 +1621,7 @@ def command_discover_web_jobs(args: argparse.Namespace) -> None:
     print(
         "Web discovery complete. "
         f"Provider: {args.provider}. Queries: {len(queries)}. Failed queries: {failed_queries}. "
+        f"Rate limited: {rate_limited}. "
         f"Search URLs: {len(urls)}. ATS jobs parsed: {len(candidates)}. Added sources: {added_sources}. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Added: {stats['added']}. Existing: {stats['existing']}. "
@@ -1610,13 +1647,20 @@ def command_discover_watchlist_jobs(args: argparse.Namespace) -> None:
     if not query_items:
         raise SystemExit(f"No active companies found in {WATCHLIST_PATH}.")
 
-    for item in query_items:
+    rate_limited = False
+    for index, item in enumerate(query_items):
+        wait_between_search_queries(args, index)
         query = item["query"]
         try:
             for url in web_search_urls(query, args):
                 normalized = normalize_job_url(url)
                 if normalized:
                     urls.setdefault(normalized, item)
+        except SearchRateLimited as error:
+            failed_queries += 1
+            rate_limited = True
+            print(f"Search provider rate limited; stopping remaining watchlist queries: {error}", file=sys.stderr)
+            break
         except Exception as error:  # noqa: BLE001
             failed_queries += 1
             print(f"Watchlist search query failed: {query}: {error}", file=sys.stderr)
@@ -1638,6 +1682,7 @@ def command_discover_watchlist_jobs(args: argparse.Namespace) -> None:
     print(
         "Watchlist discovery complete. "
         f"Provider: {args.provider}. Queries: {len(query_items)}. Failed queries: {failed_queries}. "
+        f"Rate limited: {rate_limited}. "
         f"Search URLs: {len(urls)}. Jobs parsed: {len(candidates)}. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Added: {stats['added']}. Existing: {stats['existing']}. "
@@ -2101,6 +2146,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_discover.add_argument("--results-per-query", type=int, default=10)
     web_discover.add_argument("--pages-per-query", type=int, default=1, help="SerpAPI only: follow this many Google result pages per query.")
     web_discover.add_argument("--max-queries", type=int, default=48)
+    web_discover.add_argument("--search-delay-seconds", type=float, default=2.0, help="Delay between search API queries to avoid provider rate limits.")
     web_discover.add_argument("--track", help="Target track, such as qa_engineer, mobile_engineer, or backend_sde.")
     web_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
     web_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
@@ -2123,6 +2169,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchlist_discover.add_argument("--results-per-query", type=int, default=10)
     watchlist_discover.add_argument("--pages-per-query", type=int, default=2, help="SerpAPI only: follow this many Google result pages per query.")
     watchlist_discover.add_argument("--max-queries", type=int, default=80)
+    watchlist_discover.add_argument("--search-delay-seconds", type=float, default=2.0, help="Delay between search API queries to avoid provider rate limits.")
     watchlist_discover.add_argument("--track", help="Target track, such as qa_engineer, mobile_engineer, or backend_sde.")
     watchlist_discover.add_argument("--role", action="append", help="Role query term. Repeat to add multiple roles.")
     watchlist_discover.add_argument("--location", action="append", help="Location query term. Repeat to add multiple locations.")
