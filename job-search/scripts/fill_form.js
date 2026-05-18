@@ -717,8 +717,10 @@ async function main() {
   const chromePath = args.chrome || process.env.JOB_SEARCH_CHROME_PATH || DEFAULT_CHROME_PATH;
   const launchOptions = {
     headless: false,
-    viewport: { width: 1280, height: 1400 },
+    viewport: null,
     args: [
+      "--start-maximized",
+      "--window-size=1440,1000",
       "--disable-extensions",
       "--disable-component-extensions-with-background-pages",
       "--disable-features=Translate",
@@ -786,9 +788,13 @@ async function main() {
     }
 
     console.log("Uploading cover letter and filling structured questions...");
-    await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
+    const coverLetter = coverLetterText(app.cover_letter_path, root);
+    const coverLetterUploaded = await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
     await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
-    await fillFirst(applicationSurface, ['textarea[name*="cover" i]', 'textarea[aria-label*="cover" i]'], coverLetterText(app.cover_letter_path, root));
+    const coverLetterFilled = await fillCoverLetterFields(applicationSurface, coverLetter);
+    if (coverLetter && !coverLetterFilled && !coverLetterUploaded) {
+      actionItems.add("Cover letter was generated but no compatible cover letter field or upload control was confirmed.");
+    }
     await fillFirst(applicationSurface, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
     await fillFirst(applicationSurface, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
     if (applicationSurface === page) {
@@ -800,9 +806,10 @@ async function main() {
     await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
     await fillAshbyDataPathText(applicationSurface, "1c1690a4-cce6-4e38-99cb-71dc879c5164", personal.phone);
 
+    await scrollToSubmitOrBottom(page, applicationSurface);
     console.log("Capturing pre-submit screenshot...");
     actionItems.add("Review all fields manually. Final application submit must be clicked by you, not automation.");
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await page.screenshot({ path: screenshotPath, fullPage: Boolean(args["full-screenshot"]) });
     updateApp(tracker, app.id, { status: "needs_review", screenshot_path: screenshotPath, action_items: [...actionItems] });
     writeJson(trackerPath, tracker);
     writeCsv(selected.dir, tracker);
@@ -871,6 +878,57 @@ async function uploadCoverLetter(page, relativePath, root) {
     // Fall back to manual review.
   }
   return false;
+}
+
+async function fillCoverLetterFields(page, value) {
+  if (!value) return false;
+  let filled = false;
+  for (const selector of [
+    'textarea[name*="cover" i]',
+    'textarea[aria-label*="cover" i]',
+    'textarea[id*="cover" i]',
+    'textarea[placeholder*="cover" i]',
+  ]) {
+    filled = (await fillFirst(page, [selector], value)) || filled;
+  }
+  for (const label of [/cover\s*letter/i, /letter of interest/i, /message to (the )?(hiring|recruiting) team/i]) {
+    try {
+      const field = fieldByLabel(page, label);
+      const textarea = field.locator("textarea").first();
+      if (await textarea.count()) {
+        const current = await textarea.inputValue({ timeout: FILL_TIMEOUT }).catch(() => "");
+        if (!current.trim()) {
+          await textarea.fill(value, { timeout: FILL_TIMEOUT });
+        }
+        filled = true;
+      }
+    } catch (_error) {
+      // Try the next cover-letter-shaped field.
+    }
+  }
+  return filled;
+}
+
+async function scrollToSubmitOrBottom(page, applicationSurface) {
+  for (const surface of [applicationSurface, page]) {
+    try {
+      const submit = surface.getByRole("button", { name: /submit|send application|finish application/i }).last();
+      if (await submit.count()) {
+        await submit.scrollIntoViewIfNeeded({ timeout: FILL_TIMEOUT });
+        await page.waitForTimeout(500);
+        return true;
+      }
+    } catch (_error) {
+      // Fall back to a page-level scroll.
+    }
+  }
+  try {
+    await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
+    await page.waitForTimeout(500);
+    return true;
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function openApplicationSurface(page) {
