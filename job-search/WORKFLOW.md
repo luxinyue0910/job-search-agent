@@ -189,6 +189,8 @@ Fill a supported ATS form up to the submit/review step:
 node job-search/scripts/fill_form.js --id <application-id>
 ```
 
+The form filler launches a dedicated ATS Chrome profile with extensions disabled by default, so tools like Jobright do not inject sidebars or slow down DOM automation. Use `--allow-extensions` only when a specific application flow needs an extension.
+
 Send the latest notification markdown to yourself through Outlook or Gmail:
 
 ```bash

@@ -483,7 +483,15 @@ async function main() {
   const launchOptions = {
     headless: false,
     viewport: { width: 1280, height: 1400 },
+    args: [
+      "--disable-extensions",
+      "--disable-component-extensions-with-background-pages",
+      "--disable-features=Translate",
+    ],
   };
+  if (args["allow-extensions"]) {
+    launchOptions.args = [];
+  }
   if (chromePath && fs.existsSync(chromePath)) {
     launchOptions.executablePath = chromePath;
     console.log(`Using Chrome: ${chromePath}`);
