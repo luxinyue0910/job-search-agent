@@ -234,7 +234,7 @@ function fieldByLabel(page, labelPattern) {
   const flags = labelPattern instanceof RegExp ? labelPattern.flags.replace("g", "") : "i";
   const source = labelPattern instanceof RegExp ? labelPattern.source : escapeRegExp(String(labelPattern));
   const regex = new RegExp(source, flags.includes("i") ? flags : `${flags}i`);
-  return page.locator(".field-wrapper, .select, fieldset, .education--form").filter({ hasText: regex }).first();
+  return page.locator(".field-wrapper, .select, fieldset, .education--form, .ashby-application-form-field-entry, [data-field-path]").filter({ hasText: regex }).first();
 }
 
 async function chooseCountry(page, country) {
@@ -451,6 +451,241 @@ async function answerRelocationQuestions(page, app, preferences, defaults, actio
   }
 }
 
+async function fillAshbyCommonFields(page, profile, app, actionItems) {
+  const defaults = profile.application_defaults || {};
+  const preferences = profile.preferences || {};
+  const canCommuteOrRelocate = canWorkAtRoleLocation(app, preferences);
+
+  const result = await page.evaluate(
+    ({ defaults, canCommuteOrRelocate }) => {
+      const actions = [];
+      const visible = (node) => {
+        if (!node || !(node instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim();
+      const escape = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const blocks = () => Array.from(document.querySelectorAll("fieldset, section, form > div, main div, div"))
+        .filter((node) => visible(node) && normalize(node.innerText).length)
+        .sort((a, b) => normalize(a.innerText).length - normalize(b.innerText).length);
+      const findBlock = (pattern, selector) => blocks().find((node) => {
+        if (!pattern.test(normalize(node.innerText))) return false;
+        if (!selector) return true;
+        return Array.from(node.querySelectorAll(selector)).some(visible);
+      });
+      const controlText = (node) => normalize([
+        node.innerText,
+        node.textContent,
+        node.getAttribute("aria-label"),
+        node.getAttribute("value"),
+      ].filter(Boolean).join(" "));
+      const clickControl = (control) => {
+        if (!control) return false;
+        control.scrollIntoView({ block: "center", inline: "nearest" });
+        if (control.tagName === "INPUT" && ["radio", "checkbox"].includes(control.type)) {
+          if (control.checked) return true;
+          control.checked = true;
+          control.dispatchEvent(new Event("input", { bubbles: true }));
+          control.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+        if (String(control.className || "").includes("active") || control.getAttribute("aria-pressed") === "true") {
+          return true;
+        }
+        control.click();
+        return true;
+      };
+      const clickChoice = (questionPattern, choices) => {
+        const block = findBlock(questionPattern, "button, label, input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox']");
+        if (!block) return false;
+        const controls = Array.from(block.querySelectorAll("button, label, input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox']"))
+          .filter(visible);
+        for (const choice of choices.filter(Boolean)) {
+          const exact = new RegExp(`^${escape(choice)}$`, "i");
+          const loose = new RegExp(escape(choice), "i");
+          const control = controls.find((node) => exact.test(controlText(node))) || controls.find((node) => loose.test(controlText(node)));
+          if (clickControl(control)) {
+            actions.push(`answered:${normalize(choice)}`);
+            return true;
+          }
+        }
+        return false;
+      };
+      const fillText = (questionPattern, value) => {
+        const block = findBlock(questionPattern, "input:not([type='hidden']):not([type='file']), textarea");
+        if (!block || !value) return false;
+        const input = Array.from(block.querySelectorAll("input:not([type='hidden']):not([type='file']), textarea"))
+          .filter(visible)
+          .find((node) => !node.value);
+        if (!input) return false;
+        input.scrollIntoView({ block: "center", inline: "nearest" });
+        input.focus();
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        actions.push(`filled:${normalize(value)}`);
+        return true;
+      };
+
+      fillText(/where have you most recently worked/i, "Youmigo Tech");
+      clickChoice(/require company sponsorship/i, [defaults.requires_sponsorship || "No", "No"]);
+      clickChoice(/commuting distance|open to relocation|local snowflake office/i, [canCommuteOrRelocate ? "YES" : "NO", canCommuteOrRelocate ? "Yes" : "No"]);
+      clickChoice(/worked at snowflake in the past/i, ["NO", "No"]);
+      clickChoice(/authorized to work in the country/i, [defaults.authorized_to_work || "YES", "YES", "Yes"]);
+      clickChoice(/U\.S\. person.*best describes|describes your.*U\.S\. person/i, ["I am a U.S. person"]);
+      clickChoice(/PricewaterhouseCoopers|PwC/i, ["No - I have never been employed by PwC"]);
+      clickChoice(/government or military entity|government contractor/i, ["NO", "No"]);
+      clickChoice(/redact or remove age-identifying|school attendance or graduation/i, ["I Acknowledge", "Acknowledge"]);
+      clickChoice(/Candidate Privacy Notice/i, ["I have read and agree to the Snowflake Candidate Privacy Notice", "I have read"]);
+      clickChoice(/Gender|Input gender/i, [defaults.gender || "Female", "Female"]);
+      clickChoice(/Race|Hispanic or Latino/i, [defaults.race_ethnicity || defaults.race || "Asian (Not Hispanic or Latino)", "Asian"]);
+      clickChoice(/Veteran Status|protected veteran/i, [defaults.veteran_status === "No" ? "I am not a protected veteran" : defaults.veteran_status, "I am not a protected veteran"]);
+      clickChoice(/Disability Status/i, [defaults.disability_status === "No" ? "No, I don't have a disability and have not had one in the past" : defaults.disability_status, "No, I don't have a disability"]);
+
+      return actions;
+    },
+    { defaults, canCommuteOrRelocate },
+  ).catch(() => []);
+
+  if (!result.length) {
+    actionItems.add("Ashby common screening fields may need manual review.");
+  }
+
+  await fillAshbyTextByQuestion(page, /where have you most recently worked/i, "Youmigo Tech");
+  await clickAshbyButtonByQuestion(page, /require company sponsorship/i, "No");
+  await clickAshbyButtonByQuestion(page, /commuting distance|open to relocation|local snowflake office/i, canCommuteOrRelocate ? "Yes" : "No");
+  await clickAshbyButtonByQuestion(page, /worked at Snowflake in the past/i, "No");
+  await clickAshbyButtonByQuestion(page, /authorized to work in the country/i, "Yes");
+  await clickAshbyChoiceByQuestion(page, /U\.S\. person.*best describes|describes your.*U\.S\. person/i, "I am a U.S. person");
+  await clickAshbyChoiceByQuestion(page, /PricewaterhouseCoopers|PwC/i, "No - I have never been employed by PwC");
+  await clickAshbyButtonByQuestion(page, /government or military entity|government contractor/i, "No");
+  await clickAshbyChoiceByQuestion(page, /redact or remove age-identifying|school attendance or graduation/i, "I Acknowledge");
+  await clickAshbyChoiceByQuestion(page, /Candidate Privacy Notice/i, "I have read and agree to the Snowflake Candidate Privacy Notice");
+  await clickAshbyChoiceByQuestion(page, /Gender|Input gender/i, defaults.gender || "Female");
+  await clickAshbyChoiceByQuestion(page, /Race|Hispanic or Latino/i, defaults.race_ethnicity || "Asian");
+  await clickAshbyChoiceByQuestion(page, /Veteran Status|protected veteran/i, defaults.veteran_status === "No" ? "I am not a protected veteran" : defaults.veteran_status);
+  await clickAshbyChoiceByQuestion(page, /Disability Status/i, defaults.disability_status === "No" ? "No, I don't have a disability and have not had one in the past" : defaults.disability_status);
+
+  await clickAshbyDataPathButton(page, "c773adde-72b8-494f-8f4f-bb9b84608c29", "No");
+  await fillAshbyDataPathText(page, "1c1690a4-cce6-4e38-99cb-71dc879c5164", profile.personal?.phone || "");
+  await clickAshbyDataPathButton(page, "4c8e248b-f134-416f-9fa5-38c9e679f7b1", canCommuteOrRelocate ? "Yes" : "No");
+  await clickAshbyDataPathButton(page, "a3cc08ef-4552-444a-b493-c608c65670df", "Yes");
+  await clickAshbyDataPathButton(page, "962f2552-c3ca-4d6c-a7d8-b7b1340558ae", "No");
+  await clickAshbyDataPathButton(page, "a7d1a4bb-e59b-4149-a733-f46f352b0cb5", "No");
+  await clickAshbyDataPathChoice(page, "_systemfield_eeoc_race", defaults.race_ethnicity || "Asian");
+}
+
+async function ashbyField(page, questionPattern) {
+  return page.locator(".ashby-application-form-field-entry, fieldset, [data-field-path]").filter({ hasText: questionPattern }).first();
+}
+
+async function fillAshbyTextByQuestion(page, questionPattern, value) {
+  if (!value) return false;
+  try {
+    const field = await ashbyField(page, questionPattern);
+    const input = field.locator("input:not([type='hidden']):not([type='file']), textarea").first();
+    if (!(await input.count())) return false;
+    await input.fill(String(value), { timeout: FILL_TIMEOUT });
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function clickAshbyButtonByQuestion(page, questionPattern, label) {
+  try {
+    const field = await ashbyField(page, questionPattern);
+    const button = field.getByRole("button", { name: new RegExp(`^${escapeRegExp(label)}$`, "i") }).first();
+    if (!(await button.count())) return false;
+    const isActive = await button.evaluate((node) => String(node.className || "").includes("active") || node.getAttribute("aria-pressed") === "true").catch(() => false);
+    if (!isActive) {
+      await button.click({ timeout: FILL_TIMEOUT });
+    }
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function clickAshbyChoiceByQuestion(page, questionPattern, label) {
+  try {
+    const field = await ashbyField(page, questionPattern);
+    const exact = new RegExp(`^${escapeRegExp(label)}$`, "i");
+    const radio = field.getByRole("radio", { name: exact }).first();
+    if (await radio.count()) {
+      await radio.check({ timeout: FILL_TIMEOUT });
+      return true;
+    }
+    const checkbox = field.getByRole("checkbox", { name: exact }).first();
+    if (await checkbox.count()) {
+      await checkbox.check({ timeout: FILL_TIMEOUT });
+      return true;
+    }
+    await field.getByText(exact).first().click({ timeout: FILL_TIMEOUT });
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function clickAshbyDataPathButton(page, dataPath, label) {
+  try {
+    const field = page.locator(`[data-field-path="${cssEscape(dataPath)}"]`).first();
+    if (!(await field.count())) return false;
+    const button = field.getByRole("button", { name: new RegExp(`^${escapeRegExp(label)}$`, "i") }).first();
+    if (!(await button.count())) return false;
+    const isActive = await button.evaluate((node) => String(node.className || "").includes("active")).catch(() => false);
+    if (!isActive) {
+      await button.click({ timeout: FILL_TIMEOUT });
+    }
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function fillAshbyDataPathText(page, dataPath, value) {
+  if (!value) return false;
+  try {
+    const field = page.locator(`[data-field-path="${cssEscape(dataPath)}"]`).first();
+    if (!(await field.count())) return false;
+    const input = field.locator("input:not([type='hidden']):not([type='file']), textarea").first();
+    if (!(await input.count())) return false;
+    await input.fill(String(value), { timeout: FILL_TIMEOUT });
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function clickAshbyDataPathChoice(page, dataPath, label) {
+  try {
+    const field = page.locator(`[data-field-path="${cssEscape(dataPath)}"]`).first();
+    if (!(await field.count())) return false;
+    const exact = new RegExp(`^${escapeRegExp(label)}(?: \\(.*\\))?$`, "i");
+    const radio = field.getByRole("radio", { name: exact }).first();
+    if (await radio.count()) {
+      await radio.check({ timeout: FILL_TIMEOUT });
+      return true;
+    }
+    await field.getByText(exact).first().click({ timeout: FILL_TIMEOUT });
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function canWorkAtRoleLocation(app, preferences) {
+  const allowedStates = new Set((preferences.relocation_allowed_states || []).map((item) => String(item).toUpperCase()));
+  const jobText = `${app.location || ""} ${app.role || ""} ${app.url || ""}`;
+  const mentionsAllowedState = [...allowedStates].some((state) => new RegExp(`\\b${escapeRegExp(state)}\\b`, "i").test(jobText));
+  const mentionsAllowedName = /(california|san francisco|san jose|palo alto|mountain view|sunnyvale|los angeles|washington|seattle|bellevue|menlo park|bay area)/i.test(jobText);
+  const mentionsOtherState = /\b(NY|New York|Texas|TX|Colorado|CO|Massachusetts|MA|Illinois|IL|Florida|FL|London|United Kingdom|Singapore|France|Japan|Korea|Australia|Qatar|Dubai|Abu Dhabi)\b/i.test(jobText);
+  return Boolean(mentionsAllowedState || mentionsAllowedName || (!mentionsOtherState && preferences.willing_to_relocate));
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -552,14 +787,18 @@ async function main() {
 
     console.log("Uploading cover letter and filling structured questions...");
     await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
+    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
     await fillFirst(applicationSurface, ['textarea[name*="cover" i]', 'textarea[aria-label*="cover" i]'], coverLetterText(app.cover_letter_path, root));
     await fillFirst(applicationSurface, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
     await fillFirst(applicationSurface, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
     if (applicationSurface === page) {
       await fillStructuredApplicationFields(applicationSurface, profile, app, actionItems);
+      await fillAshbyCommonFields(applicationSurface, profile, app, actionItems);
     } else {
       actionItems.add("Embedded application form detected; review EEO, authorization, sponsorship, and screening fields manually.");
     }
+    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
+    await fillAshbyDataPathText(applicationSurface, "1c1690a4-cce6-4e38-99cb-71dc879c5164", personal.phone);
 
     console.log("Capturing pre-submit screenshot...");
     actionItems.add("Review all fields manually. Final application submit must be clicked by you, not automation.");
@@ -618,6 +857,16 @@ async function uploadCoverLetter(page, relativePath, root) {
       await input.setInputFiles(uploadPath);
       return true;
     }
+    const ashbyAdditionalAttachment = page.locator('[data-field-path="b1890667-a914-4163-b3c1-c5b694fd412c"] input[type="file"]').first();
+    if (await ashbyAdditionalAttachment.count()) {
+      await ashbyAdditionalAttachment.setInputFiles(uploadPath);
+      return true;
+    }
+    const fileInputs = await page.locator('input[type="file"]').all();
+    if (fileInputs.length > 1) {
+      await fileInputs[fileInputs.length - 1].setInputFiles(uploadPath);
+      return true;
+    }
   } catch (_error) {
     // Fall back to manual review.
   }
@@ -664,11 +913,23 @@ async function combinedVisibleText(page, applicationSurface) {
 
 function textUploadPath(markdownPath) {
   const parsed = path.parse(markdownPath);
-  const uploadPath = path.join(parsed.dir, `${parsed.name}.txt`);
+  const uploadPath = path.join(parsed.dir, `${parsed.name}.rtf`);
   if (!fs.existsSync(uploadPath) || fs.statSync(uploadPath).mtimeMs < fs.statSync(markdownPath).mtimeMs) {
-    fs.writeFileSync(uploadPath, fs.readFileSync(markdownPath, "utf8"), "utf8");
+    fs.writeFileSync(uploadPath, markdownToRtf(fs.readFileSync(markdownPath, "utf8")), "utf8");
   }
   return uploadPath;
+}
+
+function markdownToRtf(markdown) {
+  const text = String(markdown || "")
+    .replace(/^#+\s*/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1");
+  const escaped = text
+    .replace(/[\\{}]/g, "\\$&")
+    .replace(/\n/g, "\\par\n");
+  return `{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Arial;}}\\fs22\n${escaped}\n}`;
 }
 
 function resolveWorkspacePath(root, selectedDir, value) {
