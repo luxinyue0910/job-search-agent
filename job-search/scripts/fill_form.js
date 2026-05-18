@@ -276,6 +276,7 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
     `${personal.city || ""}, ${personal.state || ""}`.trim().replace(/,\s*$/, ""),
     personal.city,
   ]);
+  await fillFirst(page, ["#candidate-location"], personal.city || personal.location);
   await fillByLabel(page, /location|candidate location|city/i, personal.location);
   await fillGreenhouseQuestionByLabel(page, /candidate location|location/i, personal.location);
 
@@ -286,18 +287,55 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
   await clickChoiceByLabel(page, /personal pronouns|pronouns/i, ["She /Her", "She/Her", "She / Her"]);
   await fillByLabel(page, /current company/i, "Youmigo Tech");
   await fillByLabel(page, /current title/i, "Full-stack Software Engineer");
+  await answerDemographicQuestion(page, /how did you hear|referral source/i, [
+    defaults.referral_source || "Company Website",
+    "Company Website",
+    "Web Search",
+    "Other",
+  ]);
+  await fillByLabel(page, /where or from who did you hear|where.*hear/i, defaults.referral_source || "Company Website");
   await fillByLabel(page, /current visa status|visa status/i, defaults.current_visa_status || workAuth.status || "Green Card");
   await fillGreenhouseQuestionByLabel(page, /current visa status|basis of your current employment authorization/i, defaults.current_visa_status || workAuth.status || "Green Card");
 
   await clickChoiceByLabel(page, /authorized|legally authorized/i, ["Yes"]);
+  await answerDemographicQuestion(page, /authorized.*United States|legally authorized|legally eligible/i, ["Yes"]);
   await clickChoiceByLabel(page, /h-?1b|sponsorship|sponsor/i, ["No"]);
   await selectGreenhouseQuestionByLabel(page, /sponsorship|sponsor/i, ["No"]);
+  await answerDemographicQuestion(page, /visa sponsorship|sponsorship/i, ["No"]);
+
+  await answerDemographicQuestion(page, /at least 4 years.*software engineering experience/i, ["No"]);
+  await answerDemographicQuestion(page, /production applications.*TypeScript|TypeScript/i, ["Yes"]);
+  await fillGreenhouseQuestionByLabel(
+    page,
+    /Angular.*async|remote data state|architect around it/i,
+    "I have not used Angular as my primary production framework, but the async-state issue I watch for is allowing loading, error, stale, and success states to spread across components. I usually architect around that by keeping remote data behind a clear service/store boundary, modeling request state explicitly, cancelling or ignoring stale responses, and keeping components focused on rendering predictable typed state.",
+  );
 
   await answerRelocationQuestions(page, app, preferences, defaults, actionItems);
+  await answerDemographicQuestion(page, /hybrid work schedule|work.*office/i, ["Yes"]);
+  await answerDemographicQuestion(page, /which .*office|office.*interested/i, [
+    defaults.office_preference || "",
+    "San Francisco",
+    "SF",
+    "New York",
+  ]);
+  await answerDemographicQuestion(page, /require.*relocation|relocation.*work/i, ["Yes"]);
+  await answerDemographicQuestion(page, /new hire onboarding|first week/i, ["Yes"]);
+  await answerDemographicQuestion(page, /salary.*estimated range|compensation.*range/i, ["Yes"]);
   await clickChoiceByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
   await selectGreenhouseQuestionByLabel(page, /acknowledge|confirm|agree/i, ["Yes, I acknowledge, agree, and confirm.", "Yes"]);
 
-  actionItems.add("Review EEO demographic fields manually: gender, Hispanic/Latino, race, veteran, disability, and sexual orientation.");
+  const demographicResults = [
+    await answerDemographicQuestion(page, /gender/i, [defaults.gender || "Female", "Female"]),
+    await answerDemographicQuestion(page, /hispanic|latino/i, [defaults.hispanic_latino === "No" ? "No" : defaults.hispanic_latino, "No"]),
+    await answerDemographicQuestion(page, /race|ethnicity/i, [defaults.race_ethnicity || "Asian", "Asian"]),
+    await answerDemographicQuestion(page, /veteran/i, [defaults.veteran_status === "No" ? "I am not a protected veteran" : defaults.veteran_status, "No", "I am not a protected veteran"]),
+    await answerDemographicQuestion(page, /disability/i, [defaults.disability_status === "No" ? "No, I don't have a disability and have not had one in the past" : defaults.disability_status, "No"]),
+    await answerDemographicQuestion(page, /sexual orientation/i, [defaults.sexual_orientation || "Heterosexual", "Heterosexual"]),
+  ];
+  if (!demographicResults.every(Boolean)) {
+    actionItems.add("Review EEO demographic fields manually: gender, Hispanic/Latino, race, veteran, disability, and sexual orientation.");
+  }
 }
 
 async function selectGreenhouseQuestionByLabel(page, labelPattern, preferredLabels) {
@@ -721,6 +759,7 @@ async function main() {
     args: [
       "--start-maximized",
       "--window-size=1440,1000",
+      "--new-window",
       "--disable-extensions",
       "--disable-component-extensions-with-background-pages",
       "--disable-features=Translate",
@@ -737,6 +776,7 @@ async function main() {
     ...launchOptions,
   });
   const page = context.pages()[0] || await context.newPage();
+  await page.bringToFront().catch(() => {});
 
   const outputDir = path.join(selected.dir, "output", slug(app.company), slug(app.role));
   fs.mkdirSync(outputDir, { recursive: true });
@@ -745,6 +785,7 @@ async function main() {
 
   try {
     await page.goto(app.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.bringToFront().catch(() => {});
     await page.waitForTimeout(2500);
     const applicationSurface = await openApplicationSurface(page);
     console.log(`Using ${applicationSurface === page ? "main page" : "embedded application frame"} for form filling.`);
@@ -809,7 +850,8 @@ async function main() {
     await scrollToSubmitOrBottom(page, applicationSurface);
     console.log("Capturing pre-submit screenshot...");
     actionItems.add("Review all fields manually. Final application submit must be clicked by you, not automation.");
-    await page.screenshot({ path: screenshotPath, fullPage: Boolean(args["full-screenshot"]) });
+    const fullPageScreenshot = Boolean(args["full-screenshot"]) || /greenhouse|lever/i.test(app.platform || "");
+    await page.screenshot({ path: screenshotPath, fullPage: fullPageScreenshot });
     updateApp(tracker, app.id, { status: "needs_review", screenshot_path: screenshotPath, action_items: [...actionItems] });
     writeJson(trackerPath, tracker);
     writeCsv(selected.dir, tracker);
@@ -923,9 +965,13 @@ async function scrollToSubmitOrBottom(page, applicationSurface) {
     }
   }
   try {
-    await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
+    const moved = await page.evaluate(() => {
+      const before = window.scrollY;
+      window.scrollBy({ top: window.innerHeight * 0.75, behavior: "instant" });
+      return window.scrollY !== before;
+    });
     await page.waitForTimeout(500);
-    return true;
+    return moved;
   } catch (_error) {
     return false;
   }
