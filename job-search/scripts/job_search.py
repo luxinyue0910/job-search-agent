@@ -2396,6 +2396,19 @@ def display_keywords(keywords: list[str]) -> str:
         "api": "API",
         "llm": "LLM",
         "rag": "RAG",
+        "ai": "AI",
+        "artificial intelligence": "Artificial Intelligence",
+        "machine learning": "Machine Learning",
+        "genai": "GenAI",
+        "agentic ai": "Agentic AI",
+        "multi-agent": "Multi-Agent",
+        "fastapi": "FastAPI",
+        "sqs": "SQS",
+        "lambda": "Lambda",
+        "step functions": "Step Functions",
+        "dynamodb": "DynamoDB",
+        "s3": "S3",
+        "cloudfront": "CloudFront",
     }
     return ", ".join(display_names.get(keyword.lower(), keyword) for keyword in keywords)
 
@@ -2439,6 +2452,34 @@ def cover_letter_context(app: dict[str, Any], profile: dict[str, Any], jd_text: 
                 "checkout, ticketing, webhook, refund, and host-management flows"
             )
             focus = "strong regression coverage, accurate bug reproduction, and reliable releases"
+    elif track_id == "fde_ai_engineer":
+        if re.search(r"forward deployed|fde|customer|solutions engineer|field engineer|implementation|professional services", role):
+            hook = (
+                "the role combines hands-on AI engineering with customer-facing problem solving, fast iteration, "
+                "and production rollout in ambiguous environments"
+            )
+            project = (
+                "my Youmigo work building a production AWS-based multi-agent content ingestion pipeline with LLM extraction, "
+                "SQS/Lambda/Step Functions orchestration, DynamoDB deduplication, and reliability controls for messy real-world sources"
+            )
+            focus = "turning ambiguous customer or product needs into reliable GenAI workflows that can be deployed, debugged, and improved"
+        elif re.search(r"genai|generative ai|llm|agent|rag|retrieval", role):
+            hook = (
+                "the role aligns with practical GenAI systems, retrieval quality, evaluation, and production-oriented AI engineering"
+            )
+            project = (
+                "my multi-modal RAG project with hybrid retrieval, RRF fusion, Qdrant, reranking, answer synthesis, and LLM/rule-based evaluation, "
+                "alongside Youmigo's LLM-powered ingestion workflow"
+            )
+            focus = "shipping measurable AI systems that balance quality, cost, latency, and reliability"
+        else:
+            hook = (
+                "the role fits my interest in applied AI engineering, rapid prototyping, customer-oriented debugging, and production delivery"
+            )
+            project = (
+                "my Youmigo engineering work across LLM workflows, AWS deployment, backend APIs, frontend integration, and production debugging"
+            )
+            focus = "building practical AI products that solve real user and business problems"
     else:
         if re.search(r"backend|api|distributed|platform|infrastructure|cloud|aws", role):
             hook = "the role aligns with backend systems, cloud infrastructure, and production reliability work"
@@ -2497,8 +2538,31 @@ def render_cover_letter(template: str, app: dict[str, Any], profile: dict[str, A
 
 def render_screening_answers(template: str, app: dict[str, Any], profile: dict[str, Any]) -> str:
     defaults = profile.get("application_defaults", {})
+    track_id = profile.get("_track", {}).get("id") or app.get("target_track") or ""
     result = template.replace("[Company]", app.get("company", "the company"))
     result = result.replace("[role need]", app.get("role", "the role"))
+    result = result.replace("[Role]", app.get("role", "the role"))
+    result = result.replace("[skills]", ", ".join(profile.get("targets", {}).get("keywords", [])[:5]) or "relevant skills")
+    result = result.replace("[relevant project/skill]", "my production GenAI and backend engineering work")
+    if track_id == "fde_ai_engineer":
+        result += textwrap.dedent(
+            """
+
+            ## Production Agentic AI / GenAI Application
+
+            I designed and built a production-grade multi-agent content ingestion pipeline for Youmigo, an event discovery app. The business use case was to replace manual event curation with an automated system that could discover local events from aggregator pages and original source pages, extract structured event data, deduplicate results, and prepare reliable content for the mobile app.
+
+            The system used LLM-based extraction and validation prompts, a two-hop crawler, AWS Lambda workers, SQS queues, Step Functions orchestration, DynamoDB for deduplication/state tracking, and S3/CloudFront for media assets. It continuously processed thousands of events per batch, supported configurable LLM token budgets, and reduced duplicate processing by about 40%.
+
+            The biggest technical challenge was making the pipeline reliable across messy and inconsistent websites while controlling LLM cost. I solved this with source-page fallback, structured validation, idempotent processing, retry paths, and monitoring around failed extraction cases.
+
+            ## AWS GenAI Deployment
+
+            I operated the Youmigo GenAI ingestion workflow on AWS. It was primarily a batch/asynchronous deployment rather than real-time inference: crawler and extraction jobs were placed onto SQS, processed by Lambda workers, coordinated with Step Functions, and persisted in DynamoDB and S3. FastAPI services then exposed curated results to the application layer, while CloudFront served optimized media assets.
+
+            For reliability, I used idempotent job handling, DynamoDB state tracking, retry paths, and failure logging so failed pages or LLM extraction errors could be replayed without corrupting production data. The main scaling and cost challenge was processing large event batches while controlling LLM token usage and avoiding duplicate work. Configurable token budgets, queue-based concurrency, and deduplication reduced duplicate processing by about 40% and kept the workflow stable across messy source websites.
+            """
+        )
     result += "\n\n## Profile Defaults\n\n"
     for key, value in defaults.items():
         result += f"- {key}: {value}\n"
@@ -2617,6 +2681,8 @@ def command_init_person(_args: argparse.Namespace) -> None:
     create_from_template(ROOT / "examples" / "master_resume.example.md", PERSON_ROOT / "resume" / "master_resume.md")
     create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "track.json", TRACKS_DIR / "qa_engineer" / "track.json")
     create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "master_resume.md", TRACKS_DIR / "qa_engineer" / "master_resume.md")
+    create_from_template(ROOT / "examples" / "tracks" / "fde_ai_engineer" / "track.json", TRACKS_DIR / "fde_ai_engineer" / "track.json")
+    create_from_template(ROOT / "examples" / "tracks" / "fde_ai_engineer" / "master_resume.md", TRACKS_DIR / "fde_ai_engineer" / "master_resume.md")
     for template in ["cover_letter.md", "screening_answers.md", "notification_email.md"]:
         create_from_template(ROOT / "templates" / template, PERSON_ROOT / "templates" / template)
     profile = load_json(PROFILE_PATH)

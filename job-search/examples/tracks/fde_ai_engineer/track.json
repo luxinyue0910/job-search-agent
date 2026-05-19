@@ -1,0 +1,89 @@
+{
+  "id": "fde_ai_engineer",
+  "name": "FDE / Applied AI Engineer",
+  "resume_file": "resume/Resume_xinyue_2026.5.15.pdf",
+  "master_resume": "tracks/fde_ai_engineer/master_resume.md",
+  "targets": {
+    "roles": [
+      "Forward Deployed Engineer",
+      "Forward Deployed Software Engineer",
+      "Forward Deployed AI Engineer",
+      "AI Engineer",
+      "Applied AI Engineer",
+      "GenAI Engineer",
+      "Solutions Engineer",
+      "Customer Engineer",
+      "AI Solutions Engineer"
+    ],
+    "levels": [
+      "New Grad",
+      "Entry Level",
+      "Junior",
+      "Associate",
+      "Software Engineer I",
+      "Software Engineer II"
+    ],
+    "keywords": [
+      "Python",
+      "TypeScript",
+      "FastAPI",
+      "LLM",
+      "GenAI",
+      "RAG",
+      "Agentic AI",
+      "AWS",
+      "Lambda",
+      "SQS",
+      "Step Functions",
+      "DynamoDB",
+      "Customer-facing",
+      "Production Deployment"
+    ]
+  },
+  "web_discovery_roles": [
+    "Forward Deployed Engineer",
+    "Forward Deployed Software Engineer",
+    "Forward Deployed AI Engineer",
+    "AI Engineer",
+    "Applied AI Engineer",
+    "GenAI Engineer",
+    "AI Solutions Engineer",
+    "Customer Engineer Applied AI"
+  ],
+  "watchlist_roles": [
+    "Forward Deployed Engineer",
+    "Forward Deployed Software Engineer",
+    "Forward Deployed AI Engineer",
+    "AI Engineer",
+    "Applied AI Engineer",
+    "GenAI Engineer",
+    "AI Solutions Engineer"
+  ],
+  "discovery_title_keywords": [
+    "forward deployed engineer",
+    "forward deployed software engineer",
+    "forward deployed ai engineer",
+    "fde",
+    "ai engineer",
+    "applied ai engineer",
+    "genai engineer",
+    "ai solutions engineer",
+    "customer engineer"
+  ],
+  "scoring_keywords": [
+    "LLM",
+    "GenAI",
+    "Agentic AI",
+    "RAG",
+    "Python",
+    "FastAPI",
+    "AWS",
+    "Lambda",
+    "SQS",
+    "Step Functions",
+    "DynamoDB",
+    "Production",
+    "Deployment",
+    "Customer"
+  ]
+}
