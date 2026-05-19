@@ -108,6 +108,11 @@
         "AI Engineer",
         "Production Engineer"
       ],
+      "search_queries": [
+        "Software Engineer"
+      ],
+      "max_requests": 1,
+      "include_location_filters": false,
       "track_keywords": {
         "qa_engineer": [
           "Quality Assurance Engineer",

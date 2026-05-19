@@ -945,25 +945,34 @@ def discover_meta_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Meta")
     keywords = source.get("keywords") or ["Software Engineer", "Backend Engineer", "AI Engineer", "SDET"]
     locations = source.get("locations") or ["Seattle, WA", "Bellevue, WA", "Menlo Park, CA", "San Francisco, CA", "Remote, US"]
+    max_requests = max(1, int(source.get("max_requests", 1)))
+    include_location_filters = bool(source.get("include_location_filters", False))
+    search_queries = [str(item) for item in source.get("search_queries", []) if str(item).strip()]
+    if not search_queries:
+        search_queries = [str(keyword) for keyword in keywords]
     candidates: dict[str, dict[str, Any]] = {}
+    requests_made = 0
 
-    for keyword in keywords:
-        for location in locations:
-            params = {
-                "q": str(keyword),
-                "locations[0]": str(location),
-            }
+    for query in search_queries:
+        location_values = locations if include_location_filters else [""]
+        for location in location_values:
+            if requests_made >= max_requests:
+                return list(candidates.values())
+            params = {"q": str(query)}
+            if location:
+                params["locations[0]"] = str(location)
             search_url = f"https://www.metacareers.com/jobs/?{urllib.parse.urlencode(params)}"
+            requests_made += 1
             try:
                 raw = fetch_url(search_url)
             except urllib.error.HTTPError as error:
                 if error.code == 429:
                     print("Meta careers returned 429 Too Many Requests; stopping Meta adapter for this run.", file=sys.stderr)
                     return list(candidates.values())
-                print(f"Could not fetch Meta careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                print(f"Could not fetch Meta careers search for {query} / {location or 'all locations'}: {error}", file=sys.stderr)
                 continue
             except Exception as error:  # noqa: BLE001
-                print(f"Could not fetch Meta careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                print(f"Could not fetch Meta careers search for {query} / {location or 'all locations'}: {error}", file=sys.stderr)
                 continue
             for job_id in re.findall(r"/(?:v2/)?jobs/(\d{6,})", raw):
                 url = normalize_job_url(f"https://www.metacareers.com/jobs/{job_id}/")
@@ -978,6 +987,7 @@ def discover_meta_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "posted_at": "",
                     "updated_at": "",
                     "source": source.get("url", "https://www.metacareers.com/jobs/"),
+                    "source_query": query,
                     "notes": "Meta careers page adapter; Meta does not expose posted_at in static search HTML.",
                 }
     if not candidates:
