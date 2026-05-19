@@ -1330,6 +1330,8 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     max_years = max(years) if years else 0
     dealbreaker_config = profile.get("dealbreakers", {})
     threshold = int(dealbreaker_config.get("minimum_years_over", 5))
+    if app.get("platform") == "amazon_jobs":
+        threshold = 2
     if max_years > threshold:
         dealbreakers.append(f"JD mentions {max_years}+ years, above threshold {threshold}.")
     penalty_from = int(dealbreaker_config.get("lower_weight_minimum_years_from", 3))
