@@ -49,6 +49,8 @@ CSV_FIELDS = [
     "role",
     "url",
     "platform",
+    "job_number",
+    "external_job_id",
     "location",
     "status",
     "fit_score",
@@ -675,6 +677,8 @@ def discover_microsoft_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                         "url": url,
                         "platform": "microsoft_jobs",
                         "location": location_text,
+                        "job_number": str(job.get("displayJobId") or ""),
+                        "external_job_id": str(position_id),
                         "posted_at": normalize_datetime(job.get("postedTs")),
                         "updated_at": normalize_datetime(job.get("updatedTs") or job.get("lastModifiedTs")),
                         "source": source.get("url", "https://jobs.careers.microsoft.com"),
@@ -906,6 +910,8 @@ def process_discovered_candidates(
                 "source": candidate.get("source", seen_record.get("source", "")),
                 "source_query": candidate.get("source_query", seen_record.get("source_query", "")),
                 "freshness_source": candidate.get("freshness_source", seen_record.get("freshness_source", "")),
+                "job_number": candidate.get("job_number", seen_record.get("job_number", "")),
+                "external_job_id": candidate.get("external_job_id", seen_record.get("external_job_id", "")),
             }
         )
         if track_id:
@@ -1096,7 +1102,17 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
     for app in apps:
         if normalize_job_url(app.get("url", "")) == normalized_url:
             changed = False
-            for field in ["posted_at", "updated_at", "first_seen", "last_seen", "source", "source_query", "freshness_source"]:
+            for field in [
+                "posted_at",
+                "updated_at",
+                "first_seen",
+                "last_seen",
+                "source",
+                "source_query",
+                "freshness_source",
+                "job_number",
+                "external_job_id",
+            ]:
                 if candidate.get(field) and app.get(field) != candidate[field]:
                     app[field] = candidate[field]
                     changed = True
@@ -1130,6 +1146,8 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "date_found": today(),
         "posted_at": candidate.get("posted_at", ""),
         "updated_at": candidate.get("updated_at", ""),
+        "job_number": candidate.get("job_number", ""),
+        "external_job_id": candidate.get("external_job_id", ""),
         "first_seen": candidate.get("first_seen", ""),
         "last_seen": candidate.get("last_seen", ""),
         "source": candidate.get("source", ""),
@@ -1246,7 +1264,12 @@ def location_matches(app: dict[str, Any], jd_text: str, profile: dict[str, Any])
 
 
 def app_output_dir(app: dict[str, Any]) -> Path:
-    return OUTPUT_DIR / slugify(app.get("company", "unknown")) / slugify(app.get("role", "unknown-role"))
+    app_id = str(app.get("id") or "")
+    suffix = app_id.rsplit("-", 1)[-1] if "-" in app_id else ""
+    role_slug = slugify(app.get("role", "unknown-role"))
+    if re.fullmatch(r"[0-9a-f]{8}", suffix):
+        role_slug = f"{role_slug}-{suffix}"
+    return OUTPUT_DIR / slugify(app.get("company", "unknown")) / role_slug
 
 
 def master_resume_path(profile: dict[str, Any] | None = None) -> Path:
@@ -1941,6 +1964,16 @@ def command_prepare_application(args: argparse.Namespace) -> None:
     screening_path = output_dir / "screening_answers.md"
     screening_path.write_text(render_screening_answers(screening_template, app, profile), encoding="utf-8")
 
+    action_items = ["Review materials, then run fill-form. Final submit must be manual."]
+    extra_updates: dict[str, Any] = {}
+    if app.get("platform") == "microsoft_jobs":
+        extra_updates["portal_mode"] = "manual"
+        action_items = [
+            "Microsoft Careers uses a shared candidate portal. Open the original job URL and verify the role/job number before applying.",
+            "Do not continue if the portal shows a different Microsoft role or an old application draft.",
+            "Final submit must be manual.",
+        ]
+
     update_application(
         app["id"],
         {
@@ -1950,7 +1983,8 @@ def command_prepare_application(args: argparse.Namespace) -> None:
             "target_track": track.get("id", app.get("target_track", "")),
             "cover_letter_path": str(cover_path),
             "screening_answers_path": str(screening_path),
-            "action_items": ["Review materials, then run fill-form. Final submit must be manual."],
+            "action_items": action_items,
+            **extra_updates,
         },
     )
     print(f"Prepared application materials in {output_dir}")

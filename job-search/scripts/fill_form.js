@@ -46,7 +46,7 @@ function writeJson(filePath, data) {
 
 function writeCsv(root, tracker) {
   const fields = [
-    "id", "company", "role", "url", "platform", "location", "status", "fit_score", "ats_score",
+    "id", "company", "role", "url", "platform", "job_number", "external_job_id", "location", "status", "fit_score", "ats_score",
     "date_found", "posted_at", "updated_at", "first_seen", "last_seen", "source", "source_query",
     "freshness_source", "target_track", "matched_tracks", "resume_file", "date_applied",
     "resume_path", "cover_letter_path", "screenshot_path", "notes"
@@ -812,6 +812,27 @@ async function main() {
       return;
     }
 
+    if (isMicrosoftJob(app)) {
+      const validation = validateMicrosoftPage(visibleText, app);
+      if (!validation.ok) {
+        actionItems.add(validation.message);
+        actionItems.add("Microsoft Careers portal was not autofilled because the visible role/job number did not match the target application.");
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        updateApp(tracker, app.id, {
+          status: "needs_review",
+          portal_mode: "manual",
+          screenshot_path: screenshotPath,
+          action_items: [...actionItems],
+        });
+        writeJson(trackerPath, tracker);
+        writeCsv(selected.dir, tracker);
+        console.log(`Stopped before filling Microsoft portal: ${validation.message}`);
+        console.log(`Screenshot: ${screenshotPath}`);
+        return;
+      }
+      actionItems.add("Microsoft Careers portal matched the target role, but final job identity and submit still require manual review.");
+    }
+
     const personal = profile.personal || {};
     const links = profile.links || {};
     const defaults = profile.application_defaults || {};
@@ -884,6 +905,46 @@ function updateApp(tracker, id, updates) {
     tracker.applications[index] = { ...tracker.applications[index], ...updates };
     tracker.last_updated = new Date().toISOString();
   }
+}
+
+function isMicrosoftJob(app) {
+  return String(app.platform || "").toLowerCase() === "microsoft_jobs"
+    || /jobs\.careers\.microsoft\.com|apply\.careers\.microsoft\.com/i.test(String(app.url || ""));
+}
+
+function validateMicrosoftPage(visibleText, app) {
+  const text = normalizeForMatch(visibleText);
+  const role = normalizeForMatch(app.role || "");
+  const roleTokens = role.split(" ").filter((token) => token.length > 1);
+  const roleMatched = role && text.includes(role);
+  const tokenMatched = roleTokens.length >= 3 && roleTokens.every((token) => text.includes(token));
+  const jobNumber = normalizeForMatch(app.job_number || "");
+  const externalJobId = normalizeForMatch(app.external_job_id || microsoftIdFromUrl(app.url));
+  const jobNumberMatched = Boolean(jobNumber && text.includes(jobNumber));
+  const externalJobIdMatched = Boolean(externalJobId && text.includes(externalJobId));
+
+  if (roleMatched || tokenMatched || jobNumberMatched || externalJobIdMatched) {
+    return { ok: true, message: "Microsoft portal matches target role or job number." };
+  }
+
+  const expected = [
+    app.role ? `role "${app.role}"` : "",
+    app.job_number ? `job number ${app.job_number}` : "",
+    app.external_job_id ? `external id ${app.external_job_id}` : "",
+  ].filter(Boolean).join(" / ");
+  return {
+    ok: false,
+    message: `Expected Microsoft ${expected || "target job"}, but the current portal page did not show it.`,
+  };
+}
+
+function microsoftIdFromUrl(url) {
+  const match = String(url || "").match(/\/job\/(\d+)/i);
+  return match ? match[1] : "";
+}
+
+function normalizeForMatch(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function slug(value) {
