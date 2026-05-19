@@ -360,6 +360,8 @@ def detect_platform(url: str) -> str:
         return "lever"
     if "ashbyhq.com" in host:
         return "ashby"
+    if "amazon.jobs" in host:
+        return "amazon_jobs"
     return "custom"
 
 
@@ -425,7 +427,14 @@ def parse_datetime(value: Any) -> dt.datetime | None:
     try:
         parsed = dt.datetime.fromisoformat(raw)
     except ValueError:
-        return None
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                parsed = dt.datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
@@ -689,6 +698,95 @@ def discover_microsoft_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def amazon_job_url(job: dict[str, Any]) -> str:
+    job_path = str(job.get("job_path") or "")
+    if job_path:
+        return urllib.parse.urljoin("https://www.amazon.jobs", job_path)
+    job_id = str(job.get("id_icims") or job.get("id") or "")
+    return f"https://www.amazon.jobs/en/jobs/{urllib.parse.quote(job_id)}"
+
+
+def amazon_location_text(job: dict[str, Any]) -> str:
+    locations = job.get("locations") or []
+    parsed_locations: list[str] = []
+    if isinstance(locations, list):
+        for item in locations:
+            if isinstance(item, str):
+                try:
+                    value = json.loads(item)
+                except json.JSONDecodeError:
+                    value = {"location": item}
+            elif isinstance(item, dict):
+                value = item
+            else:
+                continue
+            parsed = value.get("normalizedLocation") or value.get("locationNonStemming") or value.get("location")
+            if parsed:
+                parsed_locations.append(str(parsed))
+    return "; ".join(merge_unique(parsed_locations, [])) or str(job.get("normalized_location") or job.get("location") or "")
+
+
+def discover_amazon_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Amazon")
+    keywords = source.get("keywords") or [
+        "Software Development Engineer",
+        "Software Engineer",
+        "Backend Engineer",
+        "AI Engineer",
+        "SDET",
+    ]
+    locations = source.get("locations") or [
+        "Seattle, Washington, United States",
+        "Bellevue, Washington, United States",
+        "Redmond, Washington, United States",
+        "San Francisco, California, United States",
+        "Palo Alto, California, United States",
+        "United States",
+    ]
+    max_pages = int(source.get("max_pages", 3))
+    page_size = int(source.get("page_size", 10))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in keywords:
+        for location in locations:
+            for page_index in range(max_pages):
+                params = {
+                    "base_query": str(keyword),
+                    "loc_query": str(location),
+                    "offset": str(page_index * page_size),
+                    "result_limit": str(page_size),
+                    "sort": "recent",
+                }
+                api_url = f"https://www.amazon.jobs/en/search.json?{urllib.parse.urlencode(params)}"
+                try:
+                    data = fetch_json(api_url)
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch Amazon jobs search for {keyword} / {location}: {error}", file=sys.stderr)
+                    break
+                jobs = data.get("jobs", []) if isinstance(data, dict) else []
+                if not jobs:
+                    break
+                for job in jobs:
+                    url = normalize_job_url(amazon_job_url(job))
+                    job_number = str(job.get("id_icims") or "")
+                    candidates[url] = {
+                        "company": company,
+                        "role": str(job.get("title") or infer_role_from_url(url)).strip(),
+                        "url": url,
+                        "platform": "amazon_jobs",
+                        "location": amazon_location_text(job),
+                        "job_number": job_number,
+                        "external_job_id": str(job.get("id") or job_number),
+                        "posted_at": normalize_datetime(job.get("posted_date")),
+                        "updated_at": normalize_datetime(job.get("updated_time")),
+                        "source": source.get("url", "https://www.amazon.jobs"),
+                        "notes": f"Amazon jobs direct adapter; id_icims={job_number}",
+                    }
+                if len(jobs) < page_size:
+                    break
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -699,6 +797,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_ashby_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
+    if platform == "amazon_jobs":
+        return discover_amazon_jobs(source)
     return find_links_for_source(source)
 
 
@@ -832,7 +932,9 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
     value = str(location or "").strip().lower()
     if not value:
         return True
-    if re.search(r"\b(remote|united states|usa|u\.s\.|us based|us-based)\b", value):
+    if re.search(r"\b(remote|us based|us-based)\b", value):
+        return True
+    if re.fullmatch(r"(united states|usa|u\.s\.|us|united states of america)", value):
         return True
 
     preferences = profile.get("preferences", {})
@@ -1035,6 +1137,14 @@ def fetch_microsoft_job_text(url: str) -> str | None:
         html_to_text(job.get("jobDescription", "")),
     ]
     return "\n\n".join(str(block) for block in blocks if block)
+
+
+def fetch_amazon_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "amazon.jobs" not in parsed.netloc.lower():
+        return None
+    raw = fetch_url(url)
+    return html_to_text(raw)
 
 
 def infer_role_from_url(url: str) -> str:
@@ -1293,7 +1403,7 @@ def template_path(name: str) -> Path:
 def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
     if jd_file:
         return Path(jd_file).read_text(encoding="utf-8", errors="replace")
-    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text, fetch_microsoft_job_text]:
+    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text, fetch_microsoft_job_text, fetch_amazon_job_text]:
         try:
             text = fetcher(app["url"])
             if text:
