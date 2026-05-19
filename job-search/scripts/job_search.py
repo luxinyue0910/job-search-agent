@@ -472,6 +472,22 @@ def source_platform(source: dict[str, Any]) -> str:
     return str(source.get("platform") or source.get("type") or detect_platform(source.get("url", ""))).lower()
 
 
+def source_for_track(source: dict[str, Any], track_id: str | None) -> dict[str, Any]:
+    if not track_id:
+        return source
+    selected = dict(source)
+    track_overrides = source.get("track_overrides", {})
+    if isinstance(track_overrides, dict) and isinstance(track_overrides.get(track_id), dict):
+        selected.update(track_overrides[track_id])
+    track_keywords = source.get("track_keywords", {})
+    if isinstance(track_keywords, dict) and track_keywords.get(track_id):
+        selected["keywords"] = track_keywords[track_id]
+    track_locations = source.get("track_locations", {})
+    if isinstance(track_locations, dict) and track_locations.get(track_id):
+        selected["locations"] = track_locations[track_id]
+    return selected
+
+
 def greenhouse_board_from_source(source: dict[str, Any]) -> str | None:
     if source.get("board"):
         return str(source["board"])
@@ -1814,7 +1830,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     failed_sources = 0
     current_seen_at = now_utc_iso()
 
+    track_id = profile.get("_track", {}).get("id")
     for source in sources:
+        source = source_for_track(source, track_id)
         try:
             candidates = discover_source_jobs(source)
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.

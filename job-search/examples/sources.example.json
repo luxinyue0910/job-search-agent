@@ -27,6 +27,16 @@
         "Backend Engineer",
         "AI Engineer"
       ],
+      "track_keywords": {
+        "qa_engineer": [
+          "SDET",
+          "Quality Assurance Engineer",
+          "Software Development Engineer in Test",
+          "Test Automation Engineer",
+          "QA Engineer",
+          "Quality Engineer"
+        ]
+      },
       "locations": [
         "Seattle, Washington, United States",
         "Bellevue, Washington, United States",
@@ -42,6 +52,16 @@
         "Software Engineer",
         "AI Engineer"
       ],
+      "track_keywords": {
+        "qa_engineer": [
+          "SDET",
+          "Quality Assurance Engineer",
+          "Software Development Engineer in Test",
+          "Test Automation Engineer",
+          "QA Engineer",
+          "Quality Engineer"
+        ]
+      },
       "locations": [
         "Redmond, Washington, United States",
         "Seattle, Washington, United States"
