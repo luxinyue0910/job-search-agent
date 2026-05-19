@@ -310,6 +310,17 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
     /Angular.*async|remote data state|architect around it/i,
     "I have not used Angular as my primary production framework, but the async-state issue I watch for is allowing loading, error, stale, and success states to spread across components. I usually architect around that by keeping remote data behind a clear service/store boundary, modeling request state explicitly, cancelling or ignoring stale responses, and keeping components focused on rendering predictable typed state.",
   );
+  await fillGreenhouseQuestionByLabel(
+    page,
+    /experience building, deploying, managing, or scaling AI agent solutions.*production/i,
+    "Yes. In Youmigo, I built production AI-assisted workflows around profile understanding, retrieval, matching, and structured generation. I worked on backend APIs, prompt and context design, data quality checks, and deployment/debugging paths so generated recommendations and user-facing outputs stayed reliable in production.",
+  );
+  await fillGreenhouseQuestionByLabel(
+    page,
+    /full-stack application leveraging Agent logic/i,
+    "I built Youmigo as a full-stack application with a Swift iOS frontend, backend services, database-backed user/profile state, and AI-driven matching and generation workflows. I connected user inputs, retrieval/context logic, APIs, and UI review flows so the agent-assisted results could be inspected and improved by users.",
+  );
+  await answerDemographicQuestion(page, /bound by any agreements.*restrict.*work|non-compete|non-solicitation|confidentiality/i, ["No"]);
 
   await answerRelocationQuestions(page, app, preferences, defaults, actionItems);
   await answerDemographicQuestion(page, /hybrid work schedule|work.*office/i, ["Yes"]);
