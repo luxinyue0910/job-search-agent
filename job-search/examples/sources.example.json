@@ -67,6 +67,63 @@
         "Seattle, Washington, United States"
       ],
       "max_pages": 2
+    },
+    {
+      "company": "Google",
+      "platform": "google_jobs",
+      "url": "https://www.google.com/about/careers/applications/jobs/results/",
+      "keywords": [
+        "Software Engineer",
+        "Early Career Software Engineer",
+        "Backend Engineer",
+        "AI Engineer",
+        "Site Reliability Engineer"
+      ],
+      "track_keywords": {
+        "qa_engineer": [
+          "Test Engineer",
+          "Software Engineer in Test",
+          "Quality Engineer",
+          "Test Automation Engineer",
+          "SDET",
+          "Release Engineer"
+        ]
+      },
+      "locations": [
+        "Seattle, WA, USA",
+        "Kirkland, WA, USA",
+        "Sunnyvale, CA, USA",
+        "Mountain View, CA, USA",
+        "San Francisco, CA, USA"
+      ],
+      "max_pages": 2
+    },
+    {
+      "company": "Meta",
+      "platform": "meta_jobs",
+      "url": "https://www.metacareers.com/jobs/",
+      "keywords": [
+        "Software Engineer",
+        "Backend Engineer",
+        "AI Engineer",
+        "Production Engineer"
+      ],
+      "track_keywords": {
+        "qa_engineer": [
+          "Quality Assurance Engineer",
+          "Software Engineer in Test",
+          "Test Automation Engineer",
+          "SDET",
+          "Quality Engineer"
+        ]
+      },
+      "locations": [
+        "Seattle, WA",
+        "Bellevue, WA",
+        "Menlo Park, CA",
+        "San Francisco, CA",
+        "Remote, US"
+      ]
     }
   ]
 }

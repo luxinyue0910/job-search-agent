@@ -354,6 +354,7 @@ def slugify(value: str) -> str:
 
 def detect_platform(url: str) -> str:
     host = urllib.parse.urlparse(url).netloc.lower()
+    path = urllib.parse.urlparse(url).path.lower()
     if "greenhouse.io" in host:
         return "greenhouse"
     if "lever.co" in host:
@@ -362,6 +363,12 @@ def detect_platform(url: str) -> str:
         return "ashby"
     if "amazon.jobs" in host:
         return "amazon_jobs"
+    if "google.com" in host and "/about/careers/applications" in path:
+        return "google_jobs"
+    if "careers.google.com" in host:
+        return "google_jobs"
+    if "metacareers.com" in host:
+        return "meta_jobs"
     return "custom"
 
 
@@ -803,6 +810,181 @@ def discover_amazon_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def google_job_url(job_id: Any, title: str = "") -> str:
+    suffix = f"-{slugify(title)}" if title else ""
+    return f"https://www.google.com/about/careers/applications/jobs/results/{urllib.parse.quote(str(job_id))}{suffix}"
+
+
+def extract_balanced_json_array(raw: str, start: int) -> str | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(raw)):
+        char = raw[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return raw[start : index + 1]
+    return None
+
+
+def google_array_text(value: Any) -> str:
+    if isinstance(value, list) and len(value) > 1 and isinstance(value[1], str):
+        return html_to_text(value[1])
+    if isinstance(value, str):
+        return html_to_text(value)
+    return ""
+
+
+def google_timestamp(value: Any) -> str:
+    if isinstance(value, list) and value and isinstance(value[0], (int, float)):
+        return normalize_datetime(value[0])
+    return normalize_datetime(value)
+
+
+def parse_google_jobs_from_html(raw: str, source_url: str, fallback_company: str = "Google") -> list[dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    for match in re.finditer(r'\["\d{10,}","', raw):
+        payload = extract_balanced_json_array(raw, match.start())
+        if not payload:
+            continue
+        try:
+            job = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if len(job) < 11 or not str(job[0]).isdigit():
+            continue
+        job_id = str(job[0])
+        role = str(job[1] or infer_role_from_url(job_id)).strip()
+        locations = []
+        if isinstance(job[9], list):
+            for item in job[9]:
+                if isinstance(item, list) and item:
+                    locations.append(str(item[0]))
+                elif isinstance(item, str):
+                    locations.append(item)
+        url = normalize_job_url(google_job_url(job_id, role))
+        responsibilities = google_array_text(job[3] if len(job) > 3 else "")
+        qualifications = google_array_text(job[4] if len(job) > 4 else "")
+        description = google_array_text(job[10] if len(job) > 10 else "")
+        candidates[url] = {
+            "company": str(job[7] or fallback_company),
+            "role": role,
+            "url": url,
+            "platform": "google_jobs",
+            "location": "; ".join(merge_unique(locations, [])),
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": google_timestamp(job[12] if len(job) > 12 else ""),
+            "updated_at": google_timestamp(job[13] if len(job) > 13 else ""),
+            "source": source_url,
+            "notes": "Google careers direct adapter; timestamps are parsed from Google Careers embedded data.",
+            "_jd_text": "\n\n".join(block for block in [role, "; ".join(locations), description, responsibilities, qualifications] if block),
+        }
+    return list(candidates.values())
+
+
+def discover_google_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Google")
+    keywords = source.get("keywords") or [
+        "Software Engineer",
+        "Early Career Software Engineer",
+        "AI Engineer",
+        "Backend Engineer",
+        "Site Reliability Engineer",
+    ]
+    locations = source.get("locations") or [
+        "Seattle, WA, USA",
+        "Kirkland, WA, USA",
+        "Sunnyvale, CA, USA",
+        "Mountain View, CA, USA",
+        "San Francisco, CA, USA",
+    ]
+    max_pages = int(source.get("max_pages", 2))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in keywords:
+        for location in locations:
+            for page_index in range(max_pages):
+                params = {
+                    "q": str(keyword),
+                    "location": str(location),
+                }
+                if page_index:
+                    params["page"] = str(page_index + 1)
+                search_url = f"https://www.google.com/about/careers/applications/jobs/results/?{urllib.parse.urlencode(params)}"
+                try:
+                    raw = fetch_url(search_url)
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch Google careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                    break
+                page_candidates = parse_google_jobs_from_html(raw, source.get("url", "https://www.google.com/about/careers/applications/jobs/results/"), str(company))
+                if not page_candidates:
+                    break
+                for candidate in page_candidates:
+                    candidate.pop("_jd_text", None)
+                    candidates[candidate["url"]] = candidate
+                if f"page={page_index + 2}" not in raw and f"page&#61;{page_index + 2}" not in raw:
+                    break
+    return list(candidates.values())
+
+
+def discover_meta_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Meta")
+    keywords = source.get("keywords") or ["Software Engineer", "Backend Engineer", "AI Engineer", "SDET"]
+    locations = source.get("locations") or ["Seattle, WA", "Bellevue, WA", "Menlo Park, CA", "San Francisco, CA", "Remote, US"]
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in keywords:
+        for location in locations:
+            params = {
+                "q": str(keyword),
+                "locations[0]": str(location),
+            }
+            search_url = f"https://www.metacareers.com/jobs/?{urllib.parse.urlencode(params)}"
+            try:
+                raw = fetch_url(search_url)
+            except urllib.error.HTTPError as error:
+                if error.code == 429:
+                    print("Meta careers returned 429 Too Many Requests; stopping Meta adapter for this run.", file=sys.stderr)
+                    return list(candidates.values())
+                print(f"Could not fetch Meta careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                continue
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Meta careers search for {keyword} / {location}: {error}", file=sys.stderr)
+                continue
+            for job_id in re.findall(r"/(?:v2/)?jobs/(\d{6,})", raw):
+                url = normalize_job_url(f"https://www.metacareers.com/jobs/{job_id}/")
+                candidates[url] = {
+                    "company": company,
+                    "role": infer_role_from_url(url),
+                    "url": url,
+                    "platform": "meta_jobs",
+                    "location": location,
+                    "job_number": job_id,
+                    "external_job_id": job_id,
+                    "posted_at": "",
+                    "updated_at": "",
+                    "source": source.get("url", "https://www.metacareers.com/jobs/"),
+                    "notes": "Meta careers page adapter; Meta does not expose posted_at in static search HTML.",
+                }
+    if not candidates:
+        print("Meta careers did not expose static job results; use --include-unknown-posted-date only for manual Meta review.", file=sys.stderr)
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -815,6 +997,10 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
         return discover_amazon_jobs(source)
+    if platform == "google_jobs":
+        return discover_google_jobs(source)
+    if platform == "meta_jobs":
+        return discover_meta_jobs(source)
     return find_links_for_source(source)
 
 
@@ -1163,6 +1349,33 @@ def fetch_amazon_job_text(url: str) -> str | None:
     return html_to_text(raw)
 
 
+def fetch_google_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "google.com" not in parsed.netloc.lower() and "careers.google.com" not in parsed.netloc.lower():
+        return None
+    raw = fetch_url(url)
+    candidates = parse_google_jobs_from_html(raw, url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    job_id = ""
+    if path_parts:
+        id_match = re.match(r"(\d{10,})", path_parts[-1])
+        if id_match:
+            job_id = id_match.group(1)
+    for candidate in candidates:
+        if not job_id or candidate.get("external_job_id") == job_id:
+            text = candidate.get("_jd_text")
+            if text:
+                return str(text)
+    return html_to_text(raw)
+
+
+def fetch_meta_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "metacareers.com" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
 def infer_role_from_url(url: str) -> str:
     path = urllib.parse.urlparse(url).path
     parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
@@ -1421,7 +1634,14 @@ def template_path(name: str) -> Path:
 def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
     if jd_file:
         return Path(jd_file).read_text(encoding="utf-8", errors="replace")
-    for fetcher in [fetch_ashby_job_text, fetch_greenhouse_job_text, fetch_microsoft_job_text, fetch_amazon_job_text]:
+    for fetcher in [
+        fetch_ashby_job_text,
+        fetch_greenhouse_job_text,
+        fetch_microsoft_job_text,
+        fetch_amazon_job_text,
+        fetch_google_job_text,
+        fetch_meta_job_text,
+    ]:
         try:
             text = fetcher(app["url"])
             if text:
