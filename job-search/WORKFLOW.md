@@ -109,6 +109,8 @@ If a job is found by both QA and SDE searches, the tracker keeps one application
 
 Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, and related roles; pass `--no-role-filter` to review every fresh posting.
 
+Use `classify-sources --custom-only` before maintaining large company lists. It inspects configured career pages and reports whether a `custom` source can be upgraded to a direct platform such as Greenhouse, Lever, Ashby, Gem, or Workday. Use `--apply` after reviewing the output. Workday sources use the public CXS API and parse relative posting dates such as `Posted Today` and `Posted 3 Days Ago`. Phenom pages are detected but still need a dedicated adapter.
+
 Use `discover-web-jobs` to expand beyond known company boards. It calls a search API, looks for public Greenhouse, Lever, and Ashby job URLs, parses the original ATS posting, then applies the same posted-date, title, location, seen-job, and tracker de-dupe rules. This avoids logging into LinkedIn, Indeed, Jobright, or Wellfound and treats those sites as discovery hints rather than scrape targets.
 
 Use `discover-watchlist-jobs` for large companies and Seattle target companies that use custom career sites. The private `company_watchlist.json` is configured for the Bing Web Search API route by default, so daily watchlist discovery does not spend SerpAPI quota.
@@ -124,6 +126,8 @@ Examples:
 
 ```bash
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+python3 job-search/scripts/job_search.py classify-sources --custom-only
+python3 job-search/scripts/job_search.py classify-sources --custom-only --apply
 python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --score --update-sources
 python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --pages-per-query 3 --score --update-sources
 python3 job-search/scripts/job_search.py discover-web-jobs --provider bing --since-days 7 --score --update-sources

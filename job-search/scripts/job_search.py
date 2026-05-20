@@ -153,6 +153,19 @@ DEFAULT_WEB_DISCOVERY_LOCATIONS = [
     "California",
 ]
 
+DEFAULT_WORKDAY_KEYWORDS = [
+    "Software Engineer",
+    "Software Development Engineer",
+    "Backend Engineer",
+    "AI Engineer",
+    "Machine Learning Engineer",
+    "Platform Engineer",
+    "DevOps Engineer",
+    "SDET",
+    "QA Engineer",
+    "Forward Deployed Engineer",
+]
+
 ATS_SEARCH_SITES = [
     "job-boards.greenhouse.io",
     "boards.greenhouse.io",
@@ -363,6 +376,8 @@ def detect_platform(url: str) -> str:
         return "ashby"
     if "jobs.gem.com" in host:
         return "gem"
+    if "myworkdayjobs.com" in host or "myworkdaysite.com" in host:
+        return "workday"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -519,6 +534,10 @@ def greenhouse_board_from_source(source: dict[str, Any]) -> str | None:
     if "greenhouse.io" not in parsed.netloc.lower():
         return None
     parts = [part for part in parsed.path.split("/") if part]
+    if "boards" in parts:
+        index = parts.index("boards")
+        if index + 1 < len(parts):
+            return parts[index + 1]
     return parts[0] if parts else None
 
 
@@ -550,6 +569,31 @@ def gem_board_from_source(source: dict[str, Any]) -> str | None:
         return None
     parts = [part for part in parsed.path.split("/") if part]
     return parts[0] if parts else None
+
+
+def workday_source_parts(source: dict[str, Any]) -> tuple[str, str, str] | None:
+    url = source.get("url", "")
+    parsed = urllib.parse.urlparse(url)
+    host = str(source.get("host") or parsed.netloc).strip()
+    if "myworkdayjobs.com" not in host and "myworkdaysite.com" not in host:
+        return None
+    tenant = str(source.get("tenant") or "").strip()
+    if not tenant:
+        match = re.match(r"([a-zA-Z0-9_-]+)\.wd\d+\.", host)
+        if match:
+            tenant = match.group(1)
+    parts = [part for part in parsed.path.split("/") if part]
+    site = str(source.get("site") or "").strip()
+    if not site and parts:
+        site_candidates = [
+            part
+            for part in parts
+            if not re.fullmatch(r"[a-z]{2}-[A-Z]{2}", part) and part.lower() not in {"job", "jobs", "login"}
+        ]
+        site = site_candidates[0] if site_candidates else parts[-1]
+    if not host or not tenant or not site:
+        return None
+    return host, tenant, site
 
 
 def parse_greenhouse_published_at(url: str) -> str:
@@ -765,6 +809,95 @@ def discover_gem_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return candidates
+
+
+def parse_workday_posted_on(value: Any, now: dt.datetime | None = None) -> str:
+    if value in (None, ""):
+        return ""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    raw = str(value).strip()
+    normalized = normalize_datetime(raw)
+    if normalized:
+        return normalized
+    text = raw.lower()
+    if "today" in text:
+        return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    if "yesterday" in text:
+        return (now - dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(\d+)\+?\s+days?\s+ago", text)
+    if match:
+        return (now - dt.timedelta(days=int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(\d+)\+?\s+hours?\s+ago", text)
+    if match:
+        return (now - dt.timedelta(hours=int(match.group(1)))).replace(microsecond=0).isoformat()
+    raw = re.sub(r"^posted\s+(on\s+)?", "", raw, flags=re.I).strip()
+    return normalize_datetime(raw)
+
+
+def workday_api_url(host: str, tenant: str, site: str, suffix: str) -> str:
+    suffix = suffix if suffix.startswith("/") else f"/{suffix}"
+    return f"https://{host}/wday/cxs/{urllib.parse.quote(tenant)}/{urllib.parse.quote(site)}{suffix}"
+
+
+def workday_human_url(host: str, site: str, external_path: str) -> str:
+    if not external_path.startswith("/"):
+        external_path = f"/{external_path}"
+    return normalize_job_url(f"https://{host}/{urllib.parse.quote(site)}{external_path}")
+
+
+def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    parts = workday_source_parts(source)
+    if not parts:
+        return find_links_for_source(source)
+    host, tenant, site = parts
+    company = source.get("company", "Unknown Company")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    limit = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    candidates: dict[str, dict[str, Any]] = {}
+    endpoint = workday_api_url(host, tenant, site, "/jobs")
+
+    for keyword in [str(item) for item in keywords if str(item).strip() or len(keywords) == 1]:
+        for page_index in range(max_pages):
+            payload = {
+                "appliedFacets": source.get("applied_facets", {}),
+                "limit": limit,
+                "offset": page_index * limit,
+                "searchText": keyword,
+            }
+            try:
+                data = fetch_json_post(endpoint, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Workday API for {company}: {error}", file=sys.stderr)
+                break
+            postings = data.get("jobPostings") or data.get("jobs") or []
+            if not postings:
+                break
+            for job in postings:
+                external_path = str(job.get("externalPath") or job.get("externalPathname") or "").strip()
+                if not external_path:
+                    continue
+                url = workday_human_url(host, site, external_path)
+                title = job.get("title") or job.get("jobTitle") or infer_role_from_url(url)
+                locations = job.get("locationsText") or job.get("locationsDisplayText") or job.get("location") or ""
+                posted_at = parse_workday_posted_on(job.get("postedOn") or job.get("postedOnDate"))
+                candidates[url] = {
+                    "company": company,
+                    "role": title,
+                    "url": url,
+                    "platform": "workday",
+                    "location": locations,
+                    "posted_at": posted_at,
+                    "updated_at": "",
+                    "source": source.get("url", ""),
+                    "external_job_id": job.get("bulletFields", [""])[0] if isinstance(job.get("bulletFields"), list) else "",
+                    "notes": "",
+                }
+            if len(postings) < limit:
+                break
+    return list(candidates.values())
 
 
 def microsoft_pcsx_session() -> tuple[urllib.request.OpenerDirector, dict[str, str]]:
@@ -1131,6 +1264,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_ashby_jobs(source)
     if platform == "gem":
         return discover_gem_jobs(source)
+    if platform == "workday":
+        return discover_workday_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
@@ -1232,6 +1367,40 @@ def ashby_candidate_from_url(url: str) -> dict[str, Any] | None:
     return None
 
 
+def workday_candidate_from_url(url: str) -> dict[str, Any] | None:
+    parts = workday_source_parts({"url": url})
+    if not parts:
+        return None
+    host, tenant, site = parts
+    parsed = urllib.parse.urlparse(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    site_index = next((index for index, part in enumerate(path_parts) if part == site), -1)
+    if site_index < 0 or site_index + 1 >= len(path_parts):
+        return None
+    external_path = "/" + "/".join(path_parts[site_index + 1 :])
+    if not external_path.startswith("/job/"):
+        return None
+    try:
+        data = fetch_json(workday_api_url(host, tenant, site, external_path))
+    except Exception:
+        return None
+    info = data.get("jobPostingInfo", {}) if isinstance(data, dict) else {}
+    normalized_url = workday_human_url(host, site, external_path)
+    return {
+        "company": data.get("hiringOrganization", {}).get("name") if isinstance(data.get("hiringOrganization"), dict) else tenant,
+        "role": info.get("title") or infer_role_from_url(normalized_url),
+        "url": normalized_url,
+        "platform": "workday",
+        "location": info.get("location", "") or "",
+        "posted_at": parse_workday_posted_on(info.get("postedOn") or info.get("startDate")),
+        "updated_at": normalize_datetime(info.get("startDate")),
+        "source": f"https://{host}/{site}",
+        "job_number": info.get("jobReqId", ""),
+        "external_job_id": info.get("jobPostingId", ""),
+        "notes": "",
+    }
+
+
 def ats_candidate_from_url(url: str) -> dict[str, Any] | None:
     platform = detect_platform(url)
     if platform == "greenhouse":
@@ -1240,6 +1409,8 @@ def ats_candidate_from_url(url: str) -> dict[str, Any] | None:
         return lever_candidate_from_url(url)
     if platform == "ashby":
         return ashby_candidate_from_url(url)
+    if platform == "workday":
+        return workday_candidate_from_url(url)
     return None
 
 
@@ -1512,6 +1683,33 @@ def fetch_meta_job_text(url: str) -> str | None:
     if "metacareers.com" not in parsed.netloc.lower():
         return None
     return html_to_text(fetch_url(url))
+
+
+def fetch_workday_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "myworkdayjobs.com" not in parsed.netloc.lower() and "myworkdaysite.com" not in parsed.netloc.lower():
+        return None
+    candidate = workday_candidate_from_url(url)
+    if not candidate:
+        return html_to_text(fetch_url(url))
+    parts = workday_source_parts({"url": url})
+    if not parts:
+        return html_to_text(fetch_url(url))
+    host, tenant, site = parts
+    path_parts = [part for part in parsed.path.split("/") if part]
+    site_index = next((index for index, part in enumerate(path_parts) if part == site), -1)
+    if site_index < 0:
+        return html_to_text(fetch_url(url))
+    external_path = "/" + "/".join(path_parts[site_index + 1 :])
+    data = fetch_json(workday_api_url(host, tenant, site, external_path))
+    info = data.get("jobPostingInfo", {}) if isinstance(data, dict) else {}
+    blocks = [
+        info.get("title", ""),
+        info.get("jobReqId", ""),
+        info.get("location", ""),
+        html_to_text(info.get("jobDescription", "")),
+    ]
+    return "\n\n".join(str(block) for block in blocks if block)
 
 
 def infer_role_from_url(url: str) -> str:
@@ -1839,6 +2037,7 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_amazon_job_text,
         fetch_google_job_text,
         fetch_meta_job_text,
+        fetch_workday_job_text,
     ]:
         try:
             text = fetcher(app["url"])
@@ -2190,6 +2389,29 @@ def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
             "board": board,
             "url": f"https://jobs.ashbyhq.com/{board}",
         }
+    if platform == "gem":
+        board = gem_board_from_source({"url": source_url})
+        if not board:
+            return None
+        return {
+            "company": candidate.get("company") or board,
+            "platform": "gem",
+            "board": board,
+            "url": f"https://jobs.gem.com/{board}",
+        }
+    if platform == "workday":
+        parts = workday_source_parts({"url": source_url})
+        if not parts:
+            return None
+        host, tenant, site = parts
+        return {
+            "company": candidate.get("company") or tenant,
+            "platform": "workday",
+            "host": host,
+            "tenant": tenant,
+            "site": site,
+            "url": f"https://{host}/{site}",
+        }
     return None
 
 
@@ -2212,6 +2434,105 @@ def update_sources_from_candidates(candidates: list[dict[str, Any]]) -> int:
         sources.sort(key=lambda item: (str(item.get("company", "")).lower(), str(item.get("platform", "")).lower()))
         write_json(SOURCES_PATH, data)
     return added
+
+
+def source_from_workday_url(company: str, url: str) -> dict[str, Any] | None:
+    parts = workday_source_parts({"url": url})
+    if not parts:
+        return None
+    host, tenant, site = parts
+    return {
+        "company": company or tenant,
+        "platform": "workday",
+        "host": host,
+        "tenant": tenant,
+        "site": site,
+        "url": f"https://{host}/{site}",
+        "page_size": 20,
+        "max_pages": 5,
+        "keywords": DEFAULT_WORKDAY_KEYWORDS,
+    }
+
+
+def classify_source(source: dict[str, Any]) -> dict[str, Any]:
+    company = str(source.get("company", "")).strip()
+    url = str(source.get("url", "")).strip()
+    result = {
+        "company": company,
+        "current_platform": source_platform(source),
+        "detected_platform": "",
+        "detected_url": "",
+        "source": None,
+        "notes": "",
+    }
+    direct_platform = detect_platform(url)
+    if direct_platform in {"greenhouse", "lever", "ashby", "gem", "workday"}:
+        result["detected_platform"] = direct_platform
+        result["detected_url"] = url
+    else:
+        try:
+            raw = fetch_url(url, timeout=15)
+        except Exception as error:  # noqa: BLE001
+            result["notes"] = f"fetch_failed: {error}"
+            return result
+        links = re.findall(r'https?://[^"\'<>\s)]+', raw, flags=re.I)
+        links.extend(re.findall(r'href=["\']([^"\']+)', raw, flags=re.I))
+        links = [urllib.parse.urljoin(url, html.unescape(candidate)) for candidate in links if candidate]
+        for candidate in links:
+            platform = detect_platform(candidate)
+            if platform in {"greenhouse", "lever", "ashby", "gem", "workday"}:
+                result["detected_platform"] = platform
+                result["detected_url"] = normalize_job_url(candidate)
+                break
+        if not result["detected_platform"] and re.search(r"phenom|phenompeople|phenom-people", raw, flags=re.I):
+            result["detected_platform"] = "phenom"
+            result["detected_url"] = url
+            result["notes"] = "Phenom detected; adapter not implemented yet."
+
+    detected_url = str(result.get("detected_url") or "")
+    platform = str(result.get("detected_platform") or "")
+    if platform == "greenhouse":
+        board = greenhouse_board_from_source({"url": detected_url})
+        result["source"] = {"company": company or board, "platform": "greenhouse", "board": board, "url": f"https://job-boards.greenhouse.io/{board}"} if board else None
+    elif platform == "lever":
+        site = lever_site_from_source({"url": detected_url})
+        result["source"] = {"company": company or site, "platform": "lever", "site": site, "url": f"https://jobs.lever.co/{site}"} if site else None
+    elif platform == "ashby":
+        board = ashby_board_from_source({"url": detected_url})
+        result["source"] = {"company": company or board, "platform": "ashby", "board": board, "url": f"https://jobs.ashbyhq.com/{board}"} if board else None
+    elif platform == "gem":
+        board = gem_board_from_source({"url": detected_url})
+        result["source"] = {"company": company or board, "platform": "gem", "board": board, "url": f"https://jobs.gem.com/{board}"} if board else None
+    elif platform == "workday":
+        result["source"] = source_from_workday_url(company, detected_url)
+    return result
+
+
+def command_classify_sources(args: argparse.Namespace) -> None:
+    require_person_files()
+    data = load_json(SOURCES_PATH)
+    sources = data.setdefault("sources", [])
+    company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
+    changed = 0
+    for index, source in enumerate(sources):
+        if args.custom_only and source_platform(source) != "custom":
+            continue
+        company = str(source.get("company", ""))
+        if company_filters and company.lower() not in company_filters:
+            continue
+        result = classify_source(source)
+        detected = result.get("detected_platform") or "unknown"
+        note = f" ({result['notes']})" if result.get("notes") else ""
+        print(f"{company}: {source_platform(source)} -> {detected} {result.get('detected_url', '')}{note}")
+        replacement = result.get("source")
+        if args.apply and isinstance(replacement, dict) and detected not in {"", "phenom"}:
+            if replacement != source:
+                sources[index] = replacement
+                changed += 1
+    if args.apply and changed:
+        write_json(SOURCES_PATH, data)
+    if args.apply:
+        print(f"Updated {changed} sources in {SOURCES_PATH}.")
 
 
 def command_find_jobs(args: argparse.Namespace) -> None:
@@ -2912,6 +3233,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only run discovery for a specific source company. Repeat for multiple companies.",
     )
 
+    classify = subcommands.add_parser("classify-sources", help="Detect direct ATS platforms behind configured sources.")
+    classify.add_argument("--apply", action="store_true", help="Rewrite detected sources in sources.json.")
+    classify.add_argument("--custom-only", action="store_true", help="Only classify sources currently marked custom.")
+    classify.add_argument(
+        "--source-company",
+        action="append",
+        help="Only classify a specific source company. Repeat for multiple companies.",
+    )
+
     web_discover = subcommands.add_parser(
         "discover-web-jobs",
         help="Use a search API to find fresh public ATS job URLs, then parse and filter them.",
@@ -3012,6 +3342,8 @@ def main() -> None:
         command_find_jobs(args)
     elif args.command == "discover-jobs":
         command_discover_jobs(args)
+    elif args.command == "classify-sources":
+        command_classify_sources(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":
