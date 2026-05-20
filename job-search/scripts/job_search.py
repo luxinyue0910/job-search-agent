@@ -401,6 +401,18 @@ def detect_platform(url: str) -> str:
         return "apple_jobs"
     if "providence.jobs" in host or "prod-search-api.jobsyn.org" in host:
         return "providence_jobs"
+    if "smartrecruiters.com" in host:
+        return "smartrecruiters"
+    if "icims.com" in host:
+        return "icims"
+    if ("oraclecloud.com" in host and ("/candidateexperience/" in path or "/cx_" in path)) or "/sites/cx_" in path:
+        return "oracle_cx"
+    if "jobvite.com" in host:
+        return "jobvite"
+    if "workable.com" in host:
+        return "workable"
+    if "bamboohr.com" in host:
+        return "bamboohr"
     return "custom"
 
 
@@ -1850,6 +1862,418 @@ def discover_providence_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def compact_location_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = []
+        for key in ["city", "region", "state", "stateProvince", "country", "countryName", "remote", "name"]:
+            if value.get(key):
+                parts.append(str(value.get(key)))
+        return ", ".join(merge_unique(parts, []))
+    if isinstance(value, list):
+        return "; ".join(merge_unique([compact_location_text(item) for item in value if item], []))
+    return ""
+
+
+def smartrecruiters_identifier(source: dict[str, Any]) -> str:
+    if source.get("company_identifier"):
+        return str(source["company_identifier"]).strip()
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    if "jobs.smartrecruiters.com" in parsed.netloc.lower() and parts:
+        return parts[0]
+    if "careers.smartrecruiters.com" in parsed.netloc.lower() and parts:
+        return parts[0]
+    return slugify(str(source.get("company") or "")).replace("-", "")
+
+
+def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    identifier = smartrecruiters_identifier(source)
+    if not identifier:
+        return []
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    page_size = min(int(source.get("page_size", 50)), 100)
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "q": keyword,
+                "limit": str(page_size),
+                "offset": str(page_index * page_size),
+                "destination": "PUBLIC",
+            }
+            api_url = f"https://api.smartrecruiters.com/v1/companies/{urllib.parse.quote(identifier)}/postings?{urllib.parse.urlencode(params)}"
+            try:
+                data = fetch_json(api_url)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch SmartRecruiters API for {company}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("content", []) if isinstance(data, dict) else []
+            if not jobs:
+                break
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("id") or job.get("uuid") or "").strip()
+                role = str(job.get("name") or infer_role_from_url(job_id)).strip()
+                url = normalize_job_url(str(job.get("ref") or job.get("postingUrl") or ""))
+                if (not url or "api.smartrecruiters.com" in urllib.parse.urlparse(url).netloc.lower()) and job_id:
+                    url = normalize_job_url(f"https://jobs.smartrecruiters.com/{identifier}/{urllib.parse.quote(job_id)}-{slugify(role)}")
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "smartrecruiters",
+                    "location": compact_location_text(job.get("location")),
+                    "job_number": job_id,
+                    "external_job_id": str(job.get("uuid") or job_id),
+                    "posted_at": normalize_datetime(job.get("releasedDate") or job.get("publishedDate") or job.get("createdOn")),
+                    "updated_at": normalize_datetime(job.get("updatedDate") or job.get("lastUpdated")),
+                    "source": source.get("url", f"https://careers.smartrecruiters.com/{identifier}"),
+                    "source_query": keyword,
+                    "notes": f"SmartRecruiters direct adapter; company_identifier={identifier}",
+                }
+            if len(jobs) < page_size:
+                break
+    return list(candidates.values())
+
+
+def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unknown Company") -> list[dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', raw, flags=re.I | re.S):
+        try:
+            data = json.loads(html.unescape(match.group(1)).strip())
+        except json.JSONDecodeError:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            graph = item.get("@graph") if isinstance(item.get("@graph"), list) else [item]
+            for job in graph:
+                if not isinstance(job, dict) or str(job.get("@type", "")).lower() != "jobposting":
+                    continue
+                url = normalize_job_url(str(job.get("url") or source_url))
+                org = job.get("hiringOrganization", {})
+                company = org.get("name") if isinstance(org, dict) else fallback_company
+                candidates[url] = {
+                    "company": str(company or fallback_company),
+                    "role": str(job.get("title") or infer_role_from_url(url)).strip(),
+                    "url": url,
+                    "platform": detect_platform(url),
+                    "location": compact_location_text(job.get("jobLocation")),
+                    "job_number": str(job.get("identifier", {}).get("value") if isinstance(job.get("identifier"), dict) else job.get("identifier") or ""),
+                    "external_job_id": str(job.get("identifier", {}).get("value") if isinstance(job.get("identifier"), dict) else job.get("identifier") or ""),
+                    "posted_at": normalize_datetime(job.get("datePosted")),
+                    "updated_at": normalize_datetime(job.get("validThrough")),
+                    "source": source_url,
+                    "notes": "Parsed from JobPosting JSON-LD.",
+                }
+    return list(candidates.values())
+
+
+def discover_icims_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    base_url = str(source.get("url") or source.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return []
+    if "/jobs/search" in base_url:
+        search_base = base_url
+    else:
+        search_base = urllib.parse.urljoin(base_url + "/", "jobs/search")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "ss": "1",
+                "searchKeyword": keyword,
+                "pr": str(page_index),
+            }
+            search_url = f"{search_base}?{urllib.parse.urlencode(params)}"
+            try:
+                raw = fetch_url(search_url)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch iCIMS search for {company}: {error}", file=sys.stderr)
+                break
+            for candidate in parse_json_ld_jobs(raw, search_url, str(company)):
+                candidate["company"] = str(company)
+                candidate["platform"] = "icims"
+                candidate["source_query"] = keyword
+                candidates[candidate["url"]] = candidate
+            for href, label in re.findall(r'href=["\']([^"\']*/jobs/\d+[^"\']*)["\'][^>]*>(.*?)</a>', raw, flags=re.I | re.S):
+                url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(href)))
+                role = html_to_text(label) or infer_role_from_url(url)
+                candidates.setdefault(url, {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "icims",
+                    "location": "",
+                    "posted_at": "",
+                    "updated_at": "",
+                    "source": source.get("url", base_url),
+                    "source_query": keyword,
+                    "notes": "iCIMS HTML search adapter; posted_at may require detail page JSON-LD.",
+                })
+            if f"pr={page_index + 1}" not in raw and "iCIMS_Paginator" not in raw:
+                break
+    return list(candidates.values())
+
+
+def oracle_cx_api_url(source: dict[str, Any]) -> str:
+    if source.get("api_url"):
+        return str(source["api_url"]).rstrip("/")
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    return f"{parsed.scheme}://{parsed.netloc}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+
+
+def oracle_site_number(source: dict[str, Any]) -> str:
+    if source.get("site_number"):
+        return str(source["site_number"])
+    match = re.search(r"/sites/([^/?#]+)", str(source.get("url") or ""), flags=re.I)
+    return match.group(1) if match else "CX_1"
+
+
+def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    endpoint = oracle_cx_api_url(source)
+    site_number = oracle_site_number(source)
+    limit = int(source.get("page_size", 25))
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "onlyData": "true",
+                "limit": str(limit),
+                "offset": str(page_index * limit),
+                "finder": f"KeywordSearch;keyword={keyword},siteNumber={site_number}",
+            }
+            api_url = f"{endpoint}?{urllib.parse.urlencode(params)}"
+            try:
+                data = fetch_json(api_url)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Oracle CX API for {company}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("items", []) if isinstance(data, dict) else []
+            if not jobs:
+                break
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                req_id = str(job.get("RequisitionId") or job.get("Id") or job.get("requisitionId") or "").strip()
+                title = str(job.get("Title") or job.get("ExternalTitle") or job.get("title") or infer_role_from_url(req_id)).strip()
+                detail_url = normalize_job_url(str(job.get("ExternalApplyURL") or job.get("ApplyUrl") or ""))
+                if not detail_url:
+                    base = str(source.get("url") or "").rstrip("/")
+                    detail_url = normalize_job_url(f"{base}/job/{urllib.parse.quote(req_id)}") if req_id and base else str(source.get("url") or "")
+                location = compact_location_text(job.get("PrimaryLocation") or job.get("Location") or job.get("locations"))
+                candidates[detail_url] = {
+                    "company": company,
+                    "role": title,
+                    "url": detail_url,
+                    "platform": "oracle_cx",
+                    "location": location,
+                    "job_number": str(job.get("RequisitionNumber") or job.get("ReqNumber") or req_id),
+                    "external_job_id": req_id,
+                    "posted_at": normalize_datetime(job.get("PostedDate") or job.get("CreationDate") or job.get("postedDate")),
+                    "updated_at": normalize_datetime(job.get("LastUpdateDate") or job.get("UpdatedDate")),
+                    "source": source.get("url", endpoint),
+                    "source_query": keyword,
+                    "notes": f"Oracle Candidate Experience adapter; site_number={site_number}",
+                }
+            if len(jobs) < limit:
+                break
+    return list(candidates.values())
+
+
+def jobvite_company_id(source: dict[str, Any]) -> str:
+    if source.get("company_id"):
+        return str(source["company_id"]).strip()
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    if parts:
+        return parts[0]
+    host_parts = parsed.netloc.split(".")
+    return host_parts[0] if host_parts and host_parts[0] != "jobs" else slugify(str(source.get("company") or ""))
+
+
+def discover_jobvite_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    base_url = str(source.get("url") or "").rstrip("/")
+    if not base_url:
+        account = jobvite_company_id(source)
+        base_url = f"https://jobs.jobvite.com/{account}"
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        params = {"nl": "1", "fr": "false", "q": keyword}
+        search_url = f"{base_url}/jobs?{urllib.parse.urlencode(params)}"
+        try:
+            raw = fetch_url(search_url)
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Jobvite page for {company}: {error}", file=sys.stderr)
+            continue
+        for candidate in parse_json_ld_jobs(raw, search_url, str(company)):
+            candidate["company"] = str(company)
+            candidate["platform"] = "jobvite"
+            candidate["source_query"] = keyword
+            candidates[candidate["url"]] = candidate
+        for href, label in re.findall(r'href=["\']([^"\']*/job/[^"\']+)["\'][^>]*>(.*?)</a>', raw, flags=re.I | re.S):
+            url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(href)))
+            candidates.setdefault(url, {
+                "company": company,
+                "role": html_to_text(label) or infer_role_from_url(url),
+                "url": url,
+                "platform": "jobvite",
+                "location": "",
+                "posted_at": "",
+                "updated_at": "",
+                "source": source.get("url", base_url),
+                "source_query": keyword,
+                "notes": "Jobvite HTML adapter; posted_at may require detail page JSON-LD.",
+            })
+    return list(candidates.values())
+
+
+def workable_account(source: dict[str, Any]) -> str:
+    if source.get("account"):
+        return str(source["account"]).strip()
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    if "apply.workable.com" in parsed.netloc.lower() and parts:
+        return parts[0]
+    return slugify(str(source.get("company") or ""))
+
+
+def discover_workable_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    account = workable_account(source)
+    if not account:
+        return []
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    candidates: dict[str, dict[str, Any]] = {}
+    endpoints = [
+        f"https://apply.workable.com/api/v3/accounts/{urllib.parse.quote(account)}/jobs",
+        f"https://apply.workable.com/api/v1/accounts/{urllib.parse.quote(account)}/jobs",
+    ]
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for endpoint in endpoints:
+            params = {"query": keyword}
+            try:
+                data = fetch_json(f"{endpoint}?{urllib.parse.urlencode(params)}")
+            except Exception:
+                continue
+            jobs = data.get("results") or data.get("jobs") or data.get("content") or []
+            if not isinstance(jobs, list):
+                continue
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                shortcode = str(job.get("shortcode") or job.get("id") or "").strip()
+                title = str(job.get("title") or job.get("name") or infer_role_from_url(shortcode)).strip()
+                url = normalize_job_url(str(job.get("url") or job.get("application_url") or ""))
+                if not url and shortcode:
+                    url = normalize_job_url(f"https://apply.workable.com/{account}/j/{urllib.parse.quote(shortcode)}")
+                candidates[url] = {
+                    "company": company,
+                    "role": title,
+                    "url": url,
+                    "platform": "workable",
+                    "location": compact_location_text(job.get("location") or job.get("locations")),
+                    "job_number": shortcode,
+                    "external_job_id": shortcode,
+                    "posted_at": normalize_datetime(job.get("published_on") or job.get("created_at") or job.get("created")),
+                    "updated_at": normalize_datetime(job.get("updated_at")),
+                    "source": source.get("url", f"https://apply.workable.com/{account}/"),
+                    "source_query": keyword,
+                    "notes": f"Workable direct adapter; account={account}",
+                }
+            break
+    return list(candidates.values())
+
+
+def bamboohr_subdomain(source: dict[str, Any]) -> str:
+    if source.get("subdomain"):
+        return str(source["subdomain"]).strip()
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    host = parsed.netloc.lower()
+    if host.endswith(".bamboohr.com"):
+        return host.split(".")[0]
+    return slugify(str(source.get("company") or ""))
+
+
+def discover_bamboohr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    subdomain = bamboohr_subdomain(source)
+    if not subdomain:
+        return []
+    url = f"https://{subdomain}.bamboohr.com/careers/list"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+            "Referer": f"https://{subdomain}.bamboohr.com/careers/",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch BambooHR careers for {company}: {error}", file=sys.stderr)
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        candidates = parse_json_ld_jobs(raw, url, str(company))
+        for candidate in candidates:
+            candidate["platform"] = "bamboohr"
+        return candidates
+    jobs = data.get("result") or data.get("jobs") or data if isinstance(data, dict) else data
+    if not isinstance(jobs, list):
+        return []
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("id") or job.get("jobOpeningId") or "").strip()
+        title = str(job.get("jobOpeningName") or job.get("title") or infer_role_from_url(job_id)).strip()
+        job_url = normalize_job_url(str(job.get("url") or ""))
+        if not job_url and job_id:
+            job_url = normalize_job_url(f"https://{subdomain}.bamboohr.com/careers/{urllib.parse.quote(job_id)}")
+        candidates[job_url] = {
+            "company": company,
+            "role": title,
+            "url": job_url,
+            "platform": "bamboohr",
+            "location": compact_location_text(job.get("location")),
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": normalize_datetime(job.get("datePosted") or job.get("postedDate")),
+            "updated_at": normalize_datetime(job.get("updatedAt")),
+            "source": source.get("url", url),
+            "notes": f"BambooHR direct adapter; subdomain={subdomain}",
+        }
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -1884,6 +2308,18 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_apple_jobs(source)
     if platform == "providence_jobs":
         return discover_providence_jobs(source)
+    if platform == "smartrecruiters":
+        return discover_smartrecruiters_jobs(source)
+    if platform == "icims":
+        return discover_icims_jobs(source)
+    if platform == "oracle_cx":
+        return discover_oracle_cx_jobs(source)
+    if platform == "jobvite":
+        return discover_jobvite_jobs(source)
+    if platform == "workable":
+        return discover_workable_jobs(source)
+    if platform == "bamboohr":
+        return discover_bamboohr_jobs(source)
     return find_links_for_source(source)
 
 
@@ -2392,6 +2828,13 @@ def fetch_providence_job_text(url: str) -> str | None:
     return html_to_text(fetch_url(url))
 
 
+def fetch_direct_platform_job_text(url: str) -> str | None:
+    platform = detect_platform(url)
+    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr"}:
+        return None
+    return html_to_text(fetch_url(url))
+
+
 def infer_role_from_url(url: str) -> str:
     path = urllib.parse.urlparse(url).path
     parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
@@ -2723,6 +3166,7 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_eightfold_job_text,
         fetch_apple_job_text,
         fetch_providence_job_text,
+        fetch_direct_platform_job_text,
         fetch_workday_job_text,
     ]:
         try:
@@ -3201,7 +3645,23 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "notes": "",
     }
     direct_platform = detect_platform(url)
-    if direct_platform in {"greenhouse", "lever", "ashby", "gem", "workday", "eightfold", "apple_jobs", "providence_jobs"}:
+    directly_classifiable = {
+        "greenhouse",
+        "lever",
+        "ashby",
+        "gem",
+        "workday",
+        "eightfold",
+        "apple_jobs",
+        "providence_jobs",
+        "smartrecruiters",
+        "icims",
+        "oracle_cx",
+        "jobvite",
+        "workable",
+        "bamboohr",
+    }
+    if direct_platform in directly_classifiable:
         result["detected_platform"] = direct_platform
         result["detected_url"] = url
     else:
@@ -3215,7 +3675,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         links = [urllib.parse.urljoin(url, html.unescape(candidate)) for candidate in links if candidate]
         for candidate in links:
             platform = detect_platform(candidate)
-            if platform in {"greenhouse", "lever", "ashby", "gem", "workday", "eightfold", "apple_jobs", "providence_jobs"}:
+            if platform in directly_classifiable:
                 result["detected_platform"] = platform
                 result["detected_url"] = normalize_job_url(candidate)
                 break
@@ -3267,6 +3727,19 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company or "Apple", "platform": "apple_jobs", "url": detected_url}
     elif platform == "providence_jobs":
         result["source"] = {"company": company or "Providence", "platform": "providence_jobs", "url": detected_url}
+    elif platform == "smartrecruiters":
+        identifier = smartrecruiters_identifier({"company": company, "url": detected_url})
+        result["source"] = {"company": company or identifier, "platform": "smartrecruiters", "company_identifier": identifier, "url": detected_url}
+    elif platform == "icims":
+        result["source"] = {"company": company, "platform": "icims", "url": detected_url}
+    elif platform == "oracle_cx":
+        result["source"] = {"company": company, "platform": "oracle_cx", "url": detected_url, "site_number": oracle_site_number({"url": detected_url})}
+    elif platform == "jobvite":
+        result["source"] = {"company": company, "platform": "jobvite", "company_id": jobvite_company_id({"company": company, "url": detected_url}), "url": detected_url}
+    elif platform == "workable":
+        result["source"] = {"company": company, "platform": "workable", "account": workable_account({"company": company, "url": detected_url}), "url": detected_url}
+    elif platform == "bamboohr":
+        result["source"] = {"company": company, "platform": "bamboohr", "subdomain": bamboohr_subdomain({"company": company, "url": detected_url}), "url": detected_url}
     return result
 
 
@@ -3318,6 +3791,12 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "eightfold",
         "apple_jobs",
         "providence_jobs",
+        "smartrecruiters",
+        "icims",
+        "oracle_cx",
+        "jobvite",
+        "workable",
+        "bamboohr",
     }
     direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
     print(f"Sources: {len(sources)} total")
