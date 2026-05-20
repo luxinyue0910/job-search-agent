@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -394,6 +395,12 @@ def detect_platform(url: str) -> str:
         return "hirebridge"
     if "successfactors.com" in host:
         return "successfactors"
+    if "eightfold.ai" in host or "jobs.nvidia.com" in host:
+        return "eightfold"
+    if "jobs.apple.com" in host:
+        return "apple_jobs"
+    if "providence.jobs" in host or "prod-search-api.jobsyn.org" in host:
+        return "providence_jobs"
     return "custom"
 
 
@@ -1596,6 +1603,253 @@ def discover_meta_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def eightfold_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
+    base_url = str(source.get("base_url") or source.get("url") or "").rstrip("/")
+    if not base_url:
+        base_url = "https://jobs.nvidia.com" if str(source.get("domain") or "").lower() == "nvidia.com" else ""
+    position_url = str(job.get("positionUrl") or "").strip()
+    if position_url:
+        return normalize_job_url(urllib.parse.urljoin(base_url + "/", position_url.lstrip("/")))
+    job_id = str(job.get("id") or job.get("position_id") or "").strip()
+    return normalize_job_url(urllib.parse.urljoin(base_url + "/", f"careers/job/{job_id}"))
+
+
+def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    base_url = str(source.get("base_url") or source.get("url") or "").rstrip("/")
+    domain = str(source.get("domain") or urllib.parse.urlparse(base_url).netloc.replace(".eightfold.ai", ".com")).strip()
+    if not base_url or not domain:
+        return []
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    locations = source.get("locations") or [
+        "Seattle, WA",
+        "Bellevue, WA",
+        "Redmond, WA",
+        "San Francisco, CA",
+        "Sunnyvale, CA",
+        "Santa Clara, CA",
+        "Remote, US",
+    ]
+    max_pages = int(source.get("max_pages", 3))
+    page_size = int(source.get("page_size", 10))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for location in [str(item) for item in locations if str(item).strip()]:
+            for page_index in range(max_pages):
+                params = {
+                    "domain": domain,
+                    "query": keyword,
+                    "location": location,
+                    "start": str(page_index * page_size),
+                    "sort_by": str(source.get("sort_by") or "timestamp"),
+                }
+                api_url = f"{base_url}/api/pcsx/search?{urllib.parse.urlencode(params)}"
+                try:
+                    data = fetch_json(api_url)
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch Eightfold API for {company}: {error}", file=sys.stderr)
+                    break
+                block = data.get("data", {}) if isinstance(data, dict) else {}
+                jobs = block.get("positions", []) if isinstance(block, dict) else []
+                if not jobs:
+                    break
+                for job in jobs:
+                    if not isinstance(job, dict):
+                        continue
+                    url = eightfold_job_url(source, job)
+                    location_values = job.get("standardizedLocations") or job.get("locations") or []
+                    if isinstance(location_values, str):
+                        location_text = location_values
+                    else:
+                        location_text = "; ".join(str(item) for item in location_values if item)
+                    candidates[url] = {
+                        "company": company,
+                        "role": str(job.get("name") or job.get("displayJobTitle") or infer_role_from_url(url)).strip(),
+                        "url": url,
+                        "platform": "eightfold",
+                        "location": location_text,
+                        "job_number": str(job.get("displayJobId") or job.get("atsJobId") or ""),
+                        "external_job_id": str(job.get("id") or ""),
+                        "posted_at": normalize_datetime(job.get("postedTs")),
+                        "updated_at": normalize_datetime(job.get("creationTs")),
+                        "source": source.get("url", base_url),
+                        "source_query": keyword,
+                        "notes": f"Eightfold direct adapter; queried_location={location}",
+                    }
+                if len(jobs) < page_size:
+                    break
+    return list(candidates.values())
+
+
+def parse_apple_search_results(raw: str, source_url: str, company: str = "Apple") -> tuple[list[dict[str, Any]], int]:
+    match = re.search(r"window\.__staticRouterHydrationData\s*=\s*JSON\.parse\((\".*?\")\);", raw, flags=re.S)
+    if not match:
+        return [], 0
+    try:
+        data = json.loads(json.loads(match.group(1)))
+    except json.JSONDecodeError:
+        return [], 0
+    search_data = data.get("loaderData", {}).get("search", {}) if isinstance(data, dict) else {}
+    results = search_data.get("searchResults", []) if isinstance(search_data, dict) else []
+    total_records = int(search_data.get("totalRecords") or 0) if isinstance(search_data, dict) else 0
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in results:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("positionId") or job.get("jobPositionId") or "").strip()
+        title = str(job.get("postingTitle") or job.get("title") or "").strip()
+        slug = str(job.get("transformedPostingTitle") or slugify(title)).strip()
+        team = job.get("team", {}).get("teamCode") if isinstance(job.get("team"), dict) else ""
+        team_query = f"?team={urllib.parse.quote(str(team))}" if team else ""
+        url = normalize_job_url(f"https://jobs.apple.com/en-us/details/{urllib.parse.quote(job_id)}/{slug}{team_query}") if job_id else source_url
+        locations = []
+        for location in job.get("locations", []) if isinstance(job.get("locations"), list) else []:
+            if not isinstance(location, dict):
+                continue
+            name = location.get("name") or ", ".join(str(location.get(key) or "") for key in ["city", "stateProvince", "countryName"] if location.get(key))
+            if name:
+                locations.append(str(name))
+        candidates[url] = {
+            "company": company,
+            "role": title or infer_role_from_url(url),
+            "url": url,
+            "platform": "apple_jobs",
+            "location": "; ".join(merge_unique(locations, [])),
+            "job_number": str(job.get("reqId") or ""),
+            "external_job_id": job_id,
+            "posted_at": normalize_datetime(job.get("postDateInGMT") or job.get("postingDate")),
+            "updated_at": "",
+            "source": source_url,
+            "notes": "Apple careers direct adapter; parsed from static router hydration data.",
+        }
+    return list(candidates.values()), total_records
+
+
+def discover_apple_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Apple")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    locations = source.get("locations") or ["united-states-USA"]
+    teams = source.get("teams") or ["software-and-services-SFTWR"]
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for location in [str(item) for item in locations if str(item).strip()]:
+            for team in [str(item) for item in teams if str(item).strip()]:
+                for page_index in range(max_pages):
+                    params = {
+                        "sort": "newest",
+                        "location": location,
+                        "team": team,
+                        "search": keyword,
+                    }
+                    if page_index:
+                        params["page"] = str(page_index + 1)
+                    search_url = f"https://jobs.apple.com/en-us/search?{urllib.parse.urlencode(params)}"
+                    try:
+                        raw = fetch_url(search_url)
+                    except Exception as error:  # noqa: BLE001
+                        print(f"Could not fetch Apple careers search for {keyword}: {error}", file=sys.stderr)
+                        break
+                    page_candidates, total_records = parse_apple_search_results(raw, source.get("url", search_url), str(company))
+                    if not page_candidates:
+                        break
+                    for candidate in page_candidates:
+                        candidate["source_query"] = keyword
+                        candidates[candidate["url"]] = candidate
+                    if len(candidates) >= total_records or len(page_candidates) < 20:
+                        break
+    return list(candidates.values())
+
+
+def providence_attr(job: dict[str, Any], key: str) -> str:
+    custom = job.get("customAttributes", {}) if isinstance(job.get("customAttributes"), dict) else {}
+    value = custom.get(key, {}) if isinstance(custom.get(key), dict) else {}
+    values = value.get("stringValues", []) if isinstance(value, dict) else []
+    return str(values[0]) if values else ""
+
+
+def providence_job_url(job: dict[str, Any]) -> str:
+    city_slug = providence_attr(job, "city_display_slug") or slugify(providence_attr(job, "city_display") or "remote")
+    title_slug = providence_attr(job, "title_slug") or slugify(str(job.get("title") or "job"))
+    req_id = str(job.get("requisitionId") or providence_attr(job, "reqid") or "").strip()
+    if req_id:
+        return normalize_job_url(f"https://providence.jobs/{city_slug}/{title_slug}/{urllib.parse.quote(req_id)}/job/")
+    apply_urls = job.get("applicationInfo", {}).get("uris", []) if isinstance(job.get("applicationInfo"), dict) else []
+    return normalize_job_url(str(apply_urls[0])) if apply_urls else "https://providence.jobs/jobs/"
+
+
+def discover_providence_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Providence")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "q": keyword,
+                "page": str(page_index + 1),
+                "num_items": str(page_size),
+                "source": "google_talent",
+                "use_solr_filters": "true",
+                "tenant_uuid": str(source.get("tenant_uuid") or "eb572606-dfb6-4aeb-b85c-0ec27f806dd6"),
+                "company_uuids": str(source.get("company_uuid") or "c677bf29-de60-446f-bc13-fe37c6eb46b2"),
+                "googleTalentDiversificationLevel": "DISABLED",
+                "buids": str(source.get("buids") or "59189,14582,17234,36244,37007,41626,55042,53254"),
+            }
+            api_url = "https://prod-search-api.jobsyn.org/api/v1/google-talent/search?" + urllib.parse.urlencode(params)
+            request = urllib.request.Request(
+                api_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "Accept": "application/json,*/*;q=0.8",
+                    "X-Origin": "providence.jobs",
+                    "Referer": "https://providence.jobs/jobs/",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    data = json.loads(response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Providence jobs API for {keyword}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            if not jobs:
+                break
+            for item in jobs:
+                job = item.get("job", {}) if isinstance(item, dict) else {}
+                if not isinstance(job, dict):
+                    continue
+                url = providence_job_url(job)
+                location = providence_attr(job, "full_location") or "; ".join(str(item) for item in job.get("addresses", []) if item)
+                candidates[url] = {
+                    "company": company,
+                    "role": str(job.get("title") or providence_attr(job, "title") or infer_role_from_url(url)).strip(),
+                    "url": url,
+                    "platform": "providence_jobs",
+                    "location": location,
+                    "job_number": str(providence_attr(job, "reqid") or job.get("requisitionId") or ""),
+                    "external_job_id": str(job.get("name") or job.get("requisitionId") or ""),
+                    "posted_at": normalize_datetime(job.get("postingPublishTime") or job.get("postingCreateTime")),
+                    "updated_at": normalize_datetime(job.get("postingUpdateTime")),
+                    "source": source.get("url", "https://providence.jobs/jobs/"),
+                    "source_query": keyword,
+                    "notes": "Providence/jobsyn Google Talent direct adapter.",
+                    "_jd_text": html_to_text(str(job.get("description") or "")),
+                }
+            pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
+            if not pagination.get("has_more_pages") or len(jobs) < page_size:
+                break
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -1624,6 +1878,12 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_google_jobs(source)
     if platform == "meta_jobs":
         return discover_meta_jobs(source)
+    if platform == "eightfold":
+        return discover_eightfold_jobs(source)
+    if platform == "apple_jobs":
+        return discover_apple_jobs(source)
+    if platform == "providence_jobs":
+        return discover_providence_jobs(source)
     return find_links_for_source(source)
 
 
@@ -2083,6 +2343,55 @@ def fetch_successfactors_job_text(url: str) -> str | None:
     return html_to_text(fetch_url(url))
 
 
+def fetch_eightfold_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "eightfold.ai" not in parsed.netloc.lower() and "jobs.nvidia.com" not in parsed.netloc.lower():
+        return None
+    path_parts = [part for part in parsed.path.split("/") if part]
+    try:
+        job_id = path_parts[path_parts.index("job") + 1]
+    except (ValueError, IndexError):
+        return html_to_text(fetch_url(url))
+    host = parsed.netloc.lower()
+    if "nvidia" in host:
+        base_url = "https://nvidia.eightfold.ai"
+        domain = "nvidia.com"
+    elif "starbucks" in host:
+        base_url = "https://starbucks.eightfold.ai"
+        domain = "starbucks.com"
+    else:
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        domain = urllib.parse.parse_qs(parsed.query).get("domain", [parsed.netloc.replace(".eightfold.ai", ".com")])[0]
+    params = {"position_id": job_id, "domain": domain, "hl": "en"}
+    api_url = f"{base_url}/api/pcsx/position_details?{urllib.parse.urlencode(params)}"
+    data = fetch_json(api_url)
+    job = data.get("data", {}) if isinstance(data, dict) else {}
+    location_values = job.get("standardizedLocations") or job.get("locations") or []
+    location_text = location_values if isinstance(location_values, str) else "; ".join(str(item) for item in location_values if item)
+    blocks = [
+        job.get("name", ""),
+        job.get("displayJobId", ""),
+        location_text,
+        job.get("department", ""),
+        html_to_text(job.get("jobDescription", "")),
+    ]
+    return "\n\n".join(str(block) for block in blocks if block)
+
+
+def fetch_apple_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "jobs.apple.com" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
+def fetch_providence_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "providence.jobs" not in parsed.netloc.lower() and "jobsyn.org" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
 def infer_role_from_url(url: str) -> str:
     path = urllib.parse.urlparse(url).path
     parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
@@ -2411,6 +2720,9 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_m_cloud_job_text,
         fetch_hirebridge_job_text,
         fetch_successfactors_job_text,
+        fetch_eightfold_job_text,
+        fetch_apple_job_text,
+        fetch_providence_job_text,
         fetch_workday_job_text,
     ]:
         try:
@@ -2889,7 +3201,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "notes": "",
     }
     direct_platform = detect_platform(url)
-    if direct_platform in {"greenhouse", "lever", "ashby", "gem", "workday"}:
+    if direct_platform in {"greenhouse", "lever", "ashby", "gem", "workday", "eightfold", "apple_jobs", "providence_jobs"}:
         result["detected_platform"] = direct_platform
         result["detected_url"] = url
     else:
@@ -2903,7 +3215,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         links = [urllib.parse.urljoin(url, html.unescape(candidate)) for candidate in links if candidate]
         for candidate in links:
             platform = detect_platform(candidate)
-            if platform in {"greenhouse", "lever", "ashby", "gem", "workday"}:
+            if platform in {"greenhouse", "lever", "ashby", "gem", "workday", "eightfold", "apple_jobs", "providence_jobs"}:
                 result["detected_platform"] = platform
                 result["detected_url"] = normalize_job_url(candidate)
                 break
@@ -2947,6 +3259,14 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["notes"] = result.get("notes") or "m-cloud detected but config could not be parsed."
     elif platform == "hirebridge" and not result.get("source"):
         result["notes"] = result.get("notes") or "Hirebridge detected but client id could not be parsed."
+    elif platform == "eightfold":
+        host = urllib.parse.urlparse(detected_url).netloc.lower()
+        domain = "nvidia.com" if "nvidia" in host else "starbucks.com" if "starbucks" in host else host.replace(".eightfold.ai", ".com")
+        result["source"] = {"company": company or domain, "platform": "eightfold", "url": detected_url, "base_url": f"https://{host}", "domain": domain}
+    elif platform == "apple_jobs":
+        result["source"] = {"company": company or "Apple", "platform": "apple_jobs", "url": detected_url}
+    elif platform == "providence_jobs":
+        result["source"] = {"company": company or "Providence", "platform": "providence_jobs", "url": detected_url}
     return result
 
 
@@ -2995,6 +3315,9 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "amazon_jobs",
         "google_jobs",
         "meta_jobs",
+        "eightfold",
+        "apple_jobs",
+        "providence_jobs",
     }
     direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
     print(f"Sources: {len(sources)} total")
