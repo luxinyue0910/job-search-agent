@@ -361,6 +361,8 @@ def detect_platform(url: str) -> str:
         return "lever"
     if "ashbyhq.com" in host:
         return "ashby"
+    if "jobs.gem.com" in host:
+        return "gem"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -396,6 +398,21 @@ def fetch_json(url: str, timeout: int = 20) -> Any:
         headers={
             "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
             "Accept": "application/json,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
+def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "Accept": "application/json,*/*;q=0.8",
+            "Content-Type": "application/json",
         },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -525,6 +542,16 @@ def ashby_board_from_source(source: dict[str, Any]) -> str | None:
     return parts[0] if parts else None
 
 
+def gem_board_from_source(source: dict[str, Any]) -> str | None:
+    if source.get("board"):
+        return str(source["board"])
+    parsed = urllib.parse.urlparse(source.get("url", ""))
+    if "jobs.gem.com" not in parsed.netloc.lower():
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else None
+
+
 def parse_greenhouse_published_at(url: str) -> str:
     try:
         raw = fetch_url(url)
@@ -634,6 +661,105 @@ def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "location": job.get("location", "") or "",
                 "posted_at": normalize_datetime(job.get("publishedDate") or job.get("publishedAt") or job.get("createdAt")),
                 "updated_at": normalize_datetime(job.get("updatedAt")),
+                "source": source.get("url", ""),
+                "notes": "",
+            }
+        )
+    return candidates
+
+
+GEM_LIST_QUERY = """
+query JobBoardList($boardId: String!) {
+  oatsExternalJobPostings(boardId: $boardId) {
+    jobPostings {
+      id
+      extId
+      title
+      locations {
+        name
+        city
+        isoCountry
+        isRemote
+      }
+      job {
+        locationType
+        employmentType
+        department {
+          name
+        }
+      }
+    }
+  }
+}
+"""
+
+
+GEM_DETAIL_QUERY = """
+query ExternalJobPostingQuery($boardId: String!, $extId: String!) {
+  oatsExternalJobPosting(boardId: $boardId, extId: $extId) {
+    id
+    title
+    extId
+    startDateTs
+    firstPublishedTsSec
+  }
+}
+"""
+
+
+def discover_gem_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    board = gem_board_from_source(source)
+    if not board:
+        return find_links_for_source(source)
+    company = source.get("company", "Unknown Company")
+    endpoint = "https://jobs.gem.com/api/public/graphql"
+    try:
+        data = fetch_json_post(
+            endpoint,
+            {
+                "operationName": "JobBoardList",
+                "variables": {"boardId": board},
+                "query": GEM_LIST_QUERY,
+            },
+        )
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Gem API for {company}: {error}", file=sys.stderr)
+        return find_links_for_source(source)
+
+    postings = data.get("data", {}).get("oatsExternalJobPostings", {}).get("jobPostings", [])
+    candidates: list[dict[str, Any]] = []
+    for job in postings:
+        ext_id = str(job.get("extId") or "").strip()
+        if not ext_id:
+            continue
+        posted_at = ""
+        updated_at = ""
+        try:
+            detail = fetch_json_post(
+                endpoint,
+                {
+                    "operationName": "ExternalJobPostingQuery",
+                    "variables": {"boardId": board, "extId": ext_id},
+                    "query": GEM_DETAIL_QUERY,
+                },
+                timeout=12,
+            )
+            posting = detail.get("data", {}).get("oatsExternalJobPosting", {}) or {}
+            posted_at = normalize_datetime(posting.get("firstPublishedTsSec") or posting.get("startDateTs"))
+            updated_at = normalize_datetime(posting.get("startDateTs"))
+        except Exception:  # noqa: BLE001
+            pass
+        locations = job.get("locations") if isinstance(job.get("locations"), list) else []
+        location_names = [str(item.get("name") or item.get("city") or "").strip() for item in locations if isinstance(item, dict)]
+        candidates.append(
+            {
+                "company": company,
+                "role": job.get("title") or infer_role_from_url(ext_id),
+                "url": normalize_job_url(f"https://jobs.gem.com/{board}/{ext_id}"),
+                "platform": "gem",
+                "location": ", ".join([name for name in location_names if name]),
+                "posted_at": posted_at,
+                "updated_at": updated_at,
                 "source": source.get("url", ""),
                 "notes": "",
             }
@@ -1003,6 +1129,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_lever_jobs(source)
     if platform == "ashby":
         return discover_ashby_jobs(source)
+    if platform == "gem":
+        return discover_gem_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
@@ -1399,7 +1527,7 @@ def infer_role_from_url(url: str) -> str:
     return "Unknown Role"
 
 
-def find_links_for_source(source: dict[str, Any]) -> list[dict[str, str]]:
+def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     platform = source.get("platform") or detect_platform(source["url"])
     base_url = source["url"].rstrip("/")
@@ -1417,12 +1545,30 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, str]]:
     elif platform == "ashby":
         pattern = r'href=["\']([^"\']*(?:jobs\.ashbyhq\.com|/[^"\']+/[^"\']+)[^"\']*)["\'][^>]*>(.*?)</a>'
     else:
-        pattern = r'href=["\']([^"\']*(?:job|career|position|opening)[^"\']*)["\'][^>]*>(.*?)</a>'
+        pattern = r'href=["\']([^"\']*(?:job|position|opening|requisition|posting)[^"\']*)["\'][^>]*>(.*?)</a>'
 
     for href, label in re.findall(pattern, raw, flags=re.I | re.S):
         url = urllib.parse.urljoin(base_url + "/", html.unescape(href))
         if url.rstrip("/") == base_url:
             continue
+        parsed_link = urllib.parse.urlparse(url)
+        if parsed_link.scheme not in {"http", "https"}:
+            continue
+        if re.search(r"\.(?:css|js|map|png|jpe?g|gif|svg|ico|pdf|zip)(?:$|[?#])", parsed_link.path, flags=re.I):
+            continue
+        if platform == "custom":
+            detail_hint = re.search(
+                r"(?:/job/|/jobs/|/position/|/positions/|/opening/|/openings/|requisition|posting)",
+                parsed_link.path,
+                flags=re.I,
+            )
+            external_board = re.search(
+                r"(?:greenhouse\.io|lever\.co|ashbyhq\.com|jobs\.gem\.com|myworkdayjobs\.com)",
+                parsed_link.netloc,
+                flags=re.I,
+            )
+            if not detail_hint and not external_board:
+                continue
         text = html_to_text(label)
         role = text if 4 <= len(text) <= 120 else infer_role_from_url(url)
         if not role or role.lower() in {"apply", "learn more", "view job"}:
@@ -1438,10 +1584,52 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
 
-    unique: dict[str, dict[str, str]] = {}
+    unique: dict[str, dict[str, Any]] = {}
     for link in links:
         unique[link["url"]] = link
-    return list(unique.values())
+    if platform != "custom" or source.get("parse_job_details", True) is False:
+        return list(unique.values())
+
+    max_detail_pages = int(source.get("max_detail_pages", 40))
+    enriched: list[dict[str, Any]] = []
+    for link in list(unique.values())[:max_detail_pages]:
+        try:
+            detail_raw = fetch_url(link["url"], timeout=12)
+        except Exception:  # noqa: BLE001
+            enriched.append(link)
+            continue
+        posted_at = extract_first_datetime(
+            detail_raw,
+            [
+                r'"datePosted"\s*:\s*"([^"]+)"',
+                r'"datePublished"\s*:\s*"([^"]+)"',
+                r'"postedDate"\s*:\s*"([^"]+)"',
+                r'"published_at"\s*:\s*"([^"]+)"',
+                r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+name=["\']date["\'][^>]+content=["\']([^"\']+)["\']',
+            ],
+        )
+        updated_at = extract_first_datetime(
+            detail_raw,
+            [
+                r'"dateModified"\s*:\s*"([^"]+)"',
+                r'"updated_at"\s*:\s*"([^"]+)"',
+                r'<meta[^>]+property=["\']article:modified_time["\'][^>]+content=["\']([^"\']+)["\']',
+            ],
+        )
+        title = extract_html_title(detail_raw, company, link["url"])
+        link.update(
+            {
+                "role": title or link.get("role", ""),
+                "location": extract_location(detail_raw) or link.get("location", ""),
+                "posted_at": posted_at,
+                "updated_at": updated_at,
+                "source": source.get("url", ""),
+                "freshness_source": "official_posted_at" if posted_at else "unknown",
+            }
+        )
+        enriched.append(link)
+    return enriched
 
 
 def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -2751,7 +2939,11 @@ def build_parser() -> argparse.ArgumentParser:
         "discover-watchlist-jobs",
         help="Use company_watchlist.json and a search API to discover jobs on company career sites.",
     )
-    watchlist_discover.add_argument("--provider", choices=["serpapi", "bing"], default="serpapi")
+    watchlist_discover.add_argument(
+        "--provider",
+        choices=["serpapi", "bing"],
+        default=os.environ.get("JOB_SEARCH_WATCHLIST_PROVIDER", "bing"),
+    )
     watchlist_discover.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours.")
     watchlist_discover.add_argument("--since-days", type=float, help="Only add jobs posted within this many days. Defaults to 7.")
     watchlist_discover.add_argument("--results-per-query", type=int, default=10)
