@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import csv
 import datetime as dt
 import email.utils
 import hashlib
 import html
+import io
 import http.cookiejar
 import json
 import os
@@ -45,6 +47,7 @@ SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
 TRACKS_DIR = PRIVATE_BASE_ROOT / "tracks"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
+DISCOVERY_RUNS_DIR = PRIVATE_BASE_ROOT / "data" / "discovery_runs"
 
 CSV_FIELDS = [
     "id",
@@ -199,7 +202,7 @@ def configure_person(person: str) -> None:
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR, DISCOVERY_RUNS_DIR
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -216,6 +219,7 @@ def configure_person(person: str) -> None:
     TRACKS_DIR = PERSON_ROOT / "tracks"
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
+    DISCOVERY_RUNS_DIR = PERSON_ROOT / "data" / "discovery_runs"
 
 
 def require_person_files() -> None:
@@ -2720,6 +2724,69 @@ def add_stats(target: dict[str, int], source: dict[str, int]) -> None:
         target[key] = target.get(key, 0) + value
 
 
+def discovery_source_status(candidates_count: int, stats: dict[str, int], warnings: str) -> str:
+    if warnings.strip() and candidates_count == 0:
+        return "failed"
+    if warnings.strip():
+        return "partial_success"
+    if stats.get("added", 0) > 0:
+        return "new_jobs_added"
+    if candidates_count == 0:
+        return "searched_no_jobs_returned"
+    return "searched_no_new_matches"
+
+
+def discovery_run_id(started_at: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]+", "-", started_at.replace("+00:00", "Z")).strip("-")
+
+
+def write_discovery_run_report(report: dict[str, Any]) -> Path:
+    run_id = str(report["run_id"])
+    json_path = DISCOVERY_RUNS_DIR / f"{run_id}.json"
+    md_path = DISCOVERY_RUNS_DIR / f"{run_id}.md"
+    write_json(json_path, report)
+
+    totals = report.get("totals", {})
+    lines = [
+        f"# Discovery Run {run_id}",
+        "",
+        f"- Started: {report.get('started_at', '')}",
+        f"- Finished: {report.get('finished_at', '')}",
+        f"- Track: {report.get('track') or 'default'}",
+        f"- Cutoff: {report.get('cutoff', '')}",
+        f"- Sources attempted: {totals.get('sources_attempted', 0)} / {totals.get('sources_planned', 0)}",
+        f"- Failed sources: {totals.get('failed_sources', 0)}",
+        f"- Discovered: {totals.get('discovered', 0)}",
+        f"- Added: {totals.get('added', 0)}",
+        f"- Existing: {totals.get('existing', 0)}",
+        "",
+        "| Status | Company | Platform | Candidates | Added | Existing | Old | Unknown date | Title | Location | Error / warnings |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for source in report.get("sources", []):
+        stats = source.get("stats", {})
+        warning = source.get("error") or source.get("warnings") or ""
+        warning = " ".join(str(warning).split())[:180]
+        lines.append(
+            "| {status} | {company} | {platform} | {candidates} | {added} | {existing} | {old} | {unknown} | {title} | {location} | {warning} |".format(
+                status=source.get("status", ""),
+                company=str(source.get("company", "")).replace("|", "\\|"),
+                platform=source.get("platform", ""),
+                candidates=source.get("candidates_returned", 0),
+                added=stats.get("added", 0),
+                existing=stats.get("existing", 0),
+                old=stats.get("skipped_old", 0),
+                unknown=stats.get("skipped_unknown_date", 0),
+                title=stats.get("skipped_title", 0),
+                location=stats.get("skipped_location", 0),
+                warning=warning.replace("|", "\\|"),
+            )
+        )
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path
+
+
 def fetch_ashby_job_text(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -3950,20 +4017,73 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     stats = empty_discovery_stats()
     failed_sources = 0
     current_seen_at = now_utc_iso()
+    report = {
+        "run_id": discovery_run_id(current_seen_at),
+        "started_at": current_seen_at,
+        "finished_at": "",
+        "track": getattr(args, "track", None) or "",
+        "cutoff": cutoff.replace(microsecond=0).isoformat(),
+        "source_company_filters": sorted(source_company_filters),
+        "include_unknown_posted_date": bool(args.include_unknown_posted_date),
+        "no_role_filter": bool(args.no_role_filter),
+        "score": bool(args.score),
+        "totals": {
+            "sources_planned": len(sources),
+            "sources_attempted": 0,
+            "failed_sources": 0,
+            **empty_discovery_stats(),
+        },
+        "sources": [],
+    }
 
     track_id = profile.get("_track", {}).get("id")
     for source in sources:
         source = source_for_track(source, track_id)
+        source_started = time.time()
+        source_report = {
+            "company": source.get("company", ""),
+            "platform": source_platform(source),
+            "url": source.get("url", ""),
+            "status": "started",
+            "started_at": now_utc_iso(),
+            "finished_at": "",
+            "duration_seconds": 0,
+            "candidates_returned": 0,
+            "stats": empty_discovery_stats(),
+            "warnings": "",
+            "error": "",
+        }
+        report["totals"]["sources_attempted"] += 1
         try:
-            candidates = discover_source_jobs(source)
+            warning_buffer = io.StringIO()
+            with contextlib.redirect_stderr(warning_buffer):
+                candidates = discover_source_jobs(source)
+            source_report["warnings"] = warning_buffer.getvalue().strip()
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.
             failed_sources += 1
+            source_report["status"] = "failed"
+            source_report["error"] = str(error)
+            source_report["finished_at"] = now_utc_iso()
+            source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            report["sources"].append(source_report)
             print(f"Could not discover {source.get('company', source.get('url', 'source'))}: {error}", file=sys.stderr)
             continue
 
-        add_stats(stats, process_discovered_candidates(candidates, args, profile, seen, cutoff, current_seen_at))
+        source_stats = process_discovered_candidates(candidates, args, profile, seen, cutoff, current_seen_at)
+        source_report["candidates_returned"] = len(candidates)
+        source_report["stats"] = source_stats
+        source_report["status"] = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
+        source_report["finished_at"] = now_utc_iso()
+        source_report["duration_seconds"] = round(time.time() - source_started, 2)
+        report["sources"].append(source_report)
+        add_stats(stats, source_stats)
 
     save_seen_jobs(seen)
+    report["finished_at"] = now_utc_iso()
+    report["totals"]["failed_sources"] = failed_sources
+    for key, value in stats.items():
+        report["totals"][key] = value
+    report_path = write_discovery_run_report(report)
     print(
         "Discovery complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
@@ -3972,6 +4092,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
         f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}."
     )
+    print(f"Discovery run report: {report_path}")
 
 
 def command_discover_web_jobs(args: argparse.Namespace) -> None:
