@@ -401,6 +401,8 @@ def detect_platform(url: str) -> str:
         return "apple_jobs"
     if "providence.jobs" in host or "prod-search-api.jobsyn.org" in host:
         return "providence_jobs"
+    if "careers.salesforce.com" in host:
+        return "salesforce_jobs"
     if "smartrecruiters.com" in host:
         return "smartrecruiters"
     if "icims.com" in host:
@@ -1921,6 +1923,8 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
                     continue
                 job_id = str(job.get("id") or job.get("uuid") or "").strip()
                 role = str(job.get("name") or infer_role_from_url(job_id)).strip()
+                if not keyword_matches_title(keyword, role):
+                    continue
                 url = normalize_job_url(str(job.get("ref") or job.get("postingUrl") or ""))
                 if (not url or "api.smartrecruiters.com" in urllib.parse.urlparse(url).netloc.lower()) and job_id:
                     url = normalize_job_url(f"https://jobs.smartrecruiters.com/{identifier}/{urllib.parse.quote(job_id)}-{slugify(role)}")
@@ -1945,7 +1949,7 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
 
 def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unknown Company") -> list[dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
-    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', raw, flags=re.I | re.S):
+    for match in re.finditer(r'<script[^>]+type=["\']application/(?:ld\+json|ld&#x2B;json)["\'][^>]*>(.*?)</script>', raw, flags=re.I | re.S):
         try:
             data = json.loads(html.unescape(match.group(1)).strip())
         except json.JSONDecodeError:
@@ -1974,6 +1978,81 @@ def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unkno
                     "source": source_url,
                     "notes": "Parsed from JobPosting JSON-LD.",
                 }
+    return list(candidates.values())
+
+
+def keyword_matches_title(keyword: str, title: str) -> bool:
+    keyword_terms = [term for term in re.split(r"[^a-z0-9]+", keyword.lower()) if len(term) > 1]
+    title_terms = set(term for term in re.split(r"[^a-z0-9]+", title.lower()) if term)
+    if not keyword_terms:
+        return True
+    if len(keyword_terms) == 1:
+        return keyword_terms[0] in title_terms
+    return all(term in title_terms for term in keyword_terms)
+
+
+def discover_salesforce_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Salesforce")
+    base_url = str(source.get("url") or "https://careers.salesforce.com/en/jobs/").split("?")[0].rstrip("/")
+    keywords = source.get("keywords") or ["Software Engineer", "Backend Engineer", "AI Engineer", "QA Engineer", "SDET"]
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 3))
+    detail_limit = int(source.get("max_detail_pages", 40))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(1, max_pages + 1):
+            params = {"search": keyword, "pagesize": str(page_size)}
+            if page_index > 1:
+                params["page"] = str(page_index)
+            search_url = f"{base_url}/?{urllib.parse.urlencode(params)}"
+            try:
+                raw = fetch_url(search_url)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Salesforce jobs page for {keyword}: {error}", file=sys.stderr)
+                break
+            blocks = re.findall(r'<div class=["\']card card-job["\']>(.*?)</div>\s*</div>', raw, flags=re.I | re.S)
+            if not blocks:
+                break
+            for block in blocks:
+                link_match = re.search(r'<h3[^>]*class=["\']card-title["\'][^>]*>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', block, flags=re.I | re.S)
+                if not link_match:
+                    continue
+                role = html_to_text(link_match.group(2))
+                if not keyword_matches_title(keyword, role):
+                    continue
+                url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(link_match.group(1))))
+                location_items = re.findall(r'<li[^>]*class=["\']list-inline-item["\'][^>]*>(.*?)</li>', block, flags=re.I | re.S)
+                location = "; ".join(merge_unique([html_to_text(item) for item in location_items if html_to_text(item)], []))
+                candidates[url] = {
+                    "company": company,
+                    "role": role or infer_role_from_url(url),
+                    "url": url,
+                    "platform": "salesforce_jobs",
+                    "location": location,
+                    "posted_at": "",
+                    "updated_at": "",
+                    "source": source.get("url", base_url),
+                    "source_query": keyword,
+                    "notes": "Salesforce careers card adapter; detail page JSON-LD may add posted_at.",
+                }
+            if f"page={page_index + 1}" not in raw:
+                break
+    for candidate in list(candidates.values())[:detail_limit]:
+        try:
+            detail_raw = fetch_url(candidate["url"])
+        except Exception:
+            continue
+        details = parse_json_ld_jobs(detail_raw, candidate["url"], str(company))
+        if details:
+            detail = details[0]
+            for key in ["role", "location", "job_number", "external_job_id", "posted_at", "updated_at"]:
+                if detail.get(key):
+                    candidate[key] = detail[key]
+        apply_match = re.search(r'<a[^>]+id=["\']js-apply-external["\'][^>]+href=["\']([^"\']+)["\']', detail_raw, flags=re.I | re.S)
+        if apply_match:
+            candidate["apply_url"] = normalize_job_url(html.unescape(apply_match.group(1)))
     return list(candidates.values())
 
 
@@ -2026,6 +2105,27 @@ def discover_icims_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 })
             if f"pr={page_index + 1}" not in raw and "iCIMS_Paginator" not in raw:
                 break
+    detail_limit = int(source.get("max_detail_pages", 0))
+    if detail_limit > 0:
+        for candidate in list(candidates.values())[:detail_limit]:
+            if candidate.get("posted_at"):
+                continue
+            try:
+                detail_raw = fetch_url(candidate["url"])
+                if "icimsFrame.src" in detail_raw and "application/ld+json" not in detail_raw:
+                    iframe_match = re.search(r"icimsFrame\.src\s*=\s*['\"]([^'\"]+)['\"]", detail_raw)
+                    if iframe_match:
+                        detail_raw = fetch_url(html.unescape(iframe_match.group(1)).replace("\\/", "/"))
+            except Exception:
+                continue
+            detail_jobs = parse_json_ld_jobs(detail_raw, candidate["url"], str(company))
+            if not detail_jobs:
+                continue
+            detail = detail_jobs[0]
+            for key in ["role", "location", "job_number", "external_job_id", "posted_at", "updated_at"]:
+                if detail.get(key):
+                    candidate[key] = detail[key]
+            candidate["notes"] = "iCIMS search adapter enriched from detail page JSON-LD."
     return list(candidates.values())
 
 
@@ -2308,6 +2408,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_apple_jobs(source)
     if platform == "providence_jobs":
         return discover_providence_jobs(source)
+    if platform == "salesforce_jobs":
+        return discover_salesforce_jobs(source)
     if platform == "smartrecruiters":
         return discover_smartrecruiters_jobs(source)
     if platform == "icims":
@@ -3727,6 +3829,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company or "Apple", "platform": "apple_jobs", "url": detected_url}
     elif platform == "providence_jobs":
         result["source"] = {"company": company or "Providence", "platform": "providence_jobs", "url": detected_url}
+    elif platform == "salesforce_jobs":
+        result["source"] = {"company": company or "Salesforce", "platform": "salesforce_jobs", "url": "https://careers.salesforce.com/en/jobs/"}
     elif platform == "smartrecruiters":
         identifier = smartrecruiters_identifier({"company": company, "url": detected_url})
         result["source"] = {"company": company or identifier, "platform": "smartrecruiters", "company_identifier": identifier, "url": detected_url}
@@ -3791,6 +3895,7 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "eightfold",
         "apple_jobs",
         "providence_jobs",
+        "salesforce_jobs",
         "smartrecruiters",
         "icims",
         "oracle_cx",
