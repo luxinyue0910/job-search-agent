@@ -10,6 +10,7 @@ The script intentionally keeps external automation conservative:
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import datetime as dt
 import hashlib
@@ -463,6 +464,7 @@ def parse_datetime(value: Any) -> dt.datetime | None:
         return None
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
+    raw = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", raw)
     try:
         parsed = dt.datetime.fromisoformat(raw)
     except ValueError:
@@ -538,7 +540,19 @@ def greenhouse_board_from_source(source: dict[str, Any]) -> str | None:
         index = parts.index("boards")
         if index + 1 < len(parts):
             return parts[index + 1]
+    if "board_token" in parts:
+        index = parts.index("board_token")
+        if index + 1 < len(parts):
+            return parts[index + 1]
     return parts[0] if parts else None
+
+
+def greenhouse_board_is_fetchable(board: str) -> bool:
+    try:
+        data = fetch_json(f"https://boards-api.greenhouse.io/v1/boards/{urllib.parse.quote(board)}/jobs?content=true", timeout=10)
+    except Exception:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("jobs"), list)
 
 
 def lever_site_from_source(source: dict[str, Any]) -> str | None:
@@ -896,6 +910,85 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "notes": "",
                 }
             if len(postings) < limit:
+                break
+    return list(candidates.values())
+
+
+def phenom_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
+    base_url = str(source.get("base_url") or source.get("url") or "").rstrip("/")
+    locale_path = str(source.get("locale_path") or "/us/en").strip()
+    if locale_path and not locale_path.startswith("/"):
+        locale_path = f"/{locale_path}"
+    job_id = urllib.parse.quote(str(job.get("jobId") or job.get("reqId") or job.get("jobSeqNo") or ""))
+    title_slug = slugify(str(job.get("title") or "job"))
+    if base_url and job_id:
+        return normalize_job_url(f"{base_url}{locale_path}/job/{job_id}/{title_slug}")
+    return normalize_job_url(str(job.get("applyUrl") or source.get("url") or ""))
+
+
+def discover_phenom_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    endpoint = str(source.get("widgets_url") or urllib.parse.urljoin(str(source.get("url", "")).rstrip("/") + "/", "/widgets"))
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            payload = {
+                "ddoKey": "refineSearch",
+                "sortBy": "Most recent",
+                "subsearch": "",
+                "from": page_index * size,
+                "jobs": True,
+                "counts": True,
+                "all_fields": source.get("all_fields", ["category", "country", "state", "city"]),
+                "pageName": source.get("page_name", "search-results"),
+                "size": size,
+                "clearAll": False,
+                "jdsource": "facets",
+                "keywords": keyword,
+                "global": True,
+                "selected_fields": source.get("selected_fields", {}),
+            }
+            try:
+                data = fetch_json_post(endpoint, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Phenom API for {company}: {error}", file=sys.stderr)
+                break
+            block = data.get("refineSearch", {}) if isinstance(data, dict) else {}
+            jobs = block.get("data", {}).get("jobs", []) if isinstance(block.get("data"), dict) else []
+            if not jobs:
+                break
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                url = phenom_job_url(source, job)
+                apply_url = normalize_job_url(str(job.get("applyUrl") or ""))
+                # Prefer Workday detail URLs when available because they expose richer JD text.
+                if detect_platform(apply_url) == "workday":
+                    url = apply_url.removesuffix("/apply")
+                location_values = job.get("multi_location") if isinstance(job.get("multi_location"), list) else []
+                location = "; ".join(str(item) for item in location_values if item) or str(
+                    job.get("location") or job.get("cityStateCountry") or job.get("cityState") or ""
+                )
+                candidates[url] = {
+                    "company": company,
+                    "role": job.get("title") or infer_role_from_url(url),
+                    "url": url,
+                    "platform": "phenom",
+                    "location": location,
+                    "posted_at": normalize_datetime(job.get("postedDate") or job.get("dateCreated")),
+                    "updated_at": normalize_datetime(job.get("dateCreated")),
+                    "source": source.get("url", ""),
+                    "job_number": job.get("reqId") or job.get("jobId") or "",
+                    "external_job_id": job.get("jobSeqNo") or "",
+                    "notes": "",
+                }
+            if len(jobs) < size:
                 break
     return list(candidates.values())
 
@@ -1266,6 +1359,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_gem_jobs(source)
     if platform == "workday":
         return discover_workday_jobs(source)
+    if platform == "phenom":
+        return discover_phenom_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
@@ -2454,6 +2549,22 @@ def source_from_workday_url(company: str, url: str) -> dict[str, Any] | None:
     }
 
 
+def source_from_phenom_url(company: str, url: str) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}" if parsed.netloc else url.rstrip("/")
+    return {
+        "company": company or parsed.netloc,
+        "platform": "phenom",
+        "url": base,
+        "widgets_url": urllib.parse.urljoin(base.rstrip("/") + "/", "/widgets"),
+        "base_url": base,
+        "locale_path": "/us/en",
+        "page_size": 20,
+        "max_pages": 3,
+        "keywords": DEFAULT_WORKDAY_KEYWORDS,
+    }
+
+
 def classify_source(source: dict[str, Any]) -> dict[str, Any]:
     company = str(source.get("company", "")).strip()
     url = str(source.get("url", "")).strip()
@@ -2487,13 +2598,16 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         if not result["detected_platform"] and re.search(r"phenom|phenompeople|phenom-people", raw, flags=re.I):
             result["detected_platform"] = "phenom"
             result["detected_url"] = url
-            result["notes"] = "Phenom detected; adapter not implemented yet."
+            result["notes"] = "Phenom detected."
 
     detected_url = str(result.get("detected_url") or "")
     platform = str(result.get("detected_platform") or "")
     if platform == "greenhouse":
         board = greenhouse_board_from_source({"url": detected_url})
-        result["source"] = {"company": company or board, "platform": "greenhouse", "board": board, "url": f"https://job-boards.greenhouse.io/{board}"} if board else None
+        if board and greenhouse_board_is_fetchable(board):
+            result["source"] = {"company": company or board, "platform": "greenhouse", "board": board, "url": f"https://job-boards.greenhouse.io/{board}"}
+        elif board:
+            result["notes"] = "Greenhouse board candidate was not fetchable."
     elif platform == "lever":
         site = lever_site_from_source({"url": detected_url})
         result["source"] = {"company": company or site, "platform": "lever", "site": site, "url": f"https://jobs.lever.co/{site}"} if site else None
@@ -2505,6 +2619,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company or board, "platform": "gem", "board": board, "url": f"https://jobs.gem.com/{board}"} if board else None
     elif platform == "workday":
         result["source"] = source_from_workday_url(company, detected_url)
+    elif platform == "phenom":
+        result["source"] = source_from_phenom_url(company, detected_url)
     return result
 
 
@@ -2525,7 +2641,7 @@ def command_classify_sources(args: argparse.Namespace) -> None:
         note = f" ({result['notes']})" if result.get("notes") else ""
         print(f"{company}: {source_platform(source)} -> {detected} {result.get('detected_url', '')}{note}")
         replacement = result.get("source")
-        if args.apply and isinstance(replacement, dict) and detected not in {"", "phenom"}:
+        if args.apply and isinstance(replacement, dict) and detected:
             if replacement != source:
                 sources[index] = replacement
                 changed += 1
@@ -2533,6 +2649,36 @@ def command_classify_sources(args: argparse.Namespace) -> None:
         write_json(SOURCES_PATH, data)
     if args.apply:
         print(f"Updated {changed} sources in {SOURCES_PATH}.")
+
+
+def command_audit_sources(_: argparse.Namespace) -> None:
+    require_person_files()
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    platforms = collections.Counter(source_platform(source) for source in sources)
+    direct_platforms = {
+        "greenhouse",
+        "lever",
+        "ashby",
+        "gem",
+        "workday",
+        "phenom",
+        "microsoft_jobs",
+        "amazon_jobs",
+        "google_jobs",
+        "meta_jobs",
+    }
+    direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
+    print(f"Sources: {len(sources)} total")
+    print(f"Direct/API-backed: {direct_count}")
+    print(f"Custom/low-confidence: {platforms.get('custom', 0)}")
+    print("By platform:")
+    for platform, count in sorted(platforms.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {platform}: {count}")
+    custom_sources = [source for source in sources if source_platform(source) == "custom"]
+    if custom_sources:
+        print("Custom companies:")
+        for source in sorted(custom_sources, key=lambda item: str(item.get("company", "")).lower()):
+            print(f"  {source.get('company', 'Unknown Company')}: {source.get('url', '')}")
 
 
 def command_find_jobs(args: argparse.Namespace) -> None:
@@ -3327,6 +3473,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--send-gmail", action="store_true")
     run.add_argument("--send-outlook", action="store_true")
 
+    subcommands.add_parser("audit-sources", help="Summarize configured sources by platform and confidence.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
 
@@ -3344,6 +3491,8 @@ def main() -> None:
         command_discover_jobs(args)
     elif args.command == "classify-sources":
         command_classify_sources(args)
+    elif args.command == "audit-sources":
+        command_audit_sources(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":
