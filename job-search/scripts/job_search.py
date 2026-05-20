@@ -13,6 +13,7 @@ import argparse
 import collections
 import csv
 import datetime as dt
+import email.utils
 import hashlib
 import html
 import http.cookiejar
@@ -387,6 +388,12 @@ def detect_platform(url: str) -> str:
         return "google_jobs"
     if "metacareers.com" in host:
         return "meta_jobs"
+    if "m-cloud.io" in host:
+        return "m_cloud"
+    if "hirebridge.com" in host:
+        return "hirebridge"
+    if "successfactors.com" in host:
+        return "successfactors"
     return "custom"
 
 
@@ -436,6 +443,28 @@ def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any
         return json.loads(response.read().decode(charset, errors="replace"))
 
 
+def parse_jsonp(raw: str) -> Any:
+    stripped = raw.strip()
+    start = stripped.find("(")
+    end = stripped.rfind(")")
+    if start >= 0 and end > start:
+        stripped = stripped[start + 1 : end]
+    return json.loads(stripped)
+
+
+def fetch_jsonp(url: str, timeout: int = 20, referer: str | None = None) -> Any:
+    headers = {
+        "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+        "Accept": "application/javascript,application/json;q=0.9,*/*;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return parse_jsonp(response.read().decode(charset, errors="replace"))
+
+
 def fetch_json_with_opener(opener: urllib.request.OpenerDirector, url: str, headers: dict[str, str], timeout: int = 20) -> Any:
     request = urllib.request.Request(url, headers=headers)
     with opener.open(request, timeout=timeout) as response:
@@ -468,7 +497,12 @@ def parse_datetime(value: Any) -> dt.datetime | None:
     try:
         parsed = dt.datetime.fromisoformat(raw)
     except ValueError:
-        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            parsed = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            parsed = None
+    if parsed is None:
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
             try:
                 parsed = dt.datetime.strptime(raw, fmt)
                 break
@@ -993,6 +1027,221 @@ def discover_phenom_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def m_cloud_location_text(job: dict[str, Any]) -> str:
+    locations = []
+    google_locations = job.get("google_locations")
+    if isinstance(google_locations, list):
+        for location in google_locations:
+            if not isinstance(location, dict):
+                continue
+            city = str(location.get("city") or "").strip()
+            state = str(location.get("state") or "").strip()
+            country = str(location.get("country") or "").strip()
+            text = ", ".join(item for item in [city, state, country] if item)
+            if text:
+                locations.append(text)
+    if locations:
+        return "; ".join(merge_unique(locations, []))
+    for key in ["primary_city", "primary_state", "primary_country"]:
+        value = str(job.get(key) or "").strip()
+        if value:
+            locations.append(value)
+    locations.extend(str(item) for item in job.get("addtnl_locations", []) if item) if isinstance(job.get("addtnl_locations"), list) else None
+    return "; ".join(merge_unique(locations, []))
+
+
+def m_cloud_job_url(job: dict[str, Any]) -> str:
+    url = str(job.get("url") or "").strip()
+    if url:
+        return normalize_job_url(url)
+    seo_url = str(job.get("seo_url") or "").strip()
+    if seo_url:
+        return normalize_job_url(seo_url.removesuffix("/apply"))
+    job_id = str(job.get("id") or job.get("clientid") or "")
+    return normalize_job_url(job_id)
+
+
+def discover_m_cloud_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    endpoint = str(source.get("api_url") or "").rstrip("/")
+    company_name = str(source.get("company_name") or source.get("organization") or "").strip()
+    if not endpoint or not company_name:
+        return []
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    page_size = int(source.get("page_size", 25))
+    max_pages = int(source.get("max_pages", 5))
+    custom_attribute_filter = str(source.get("custom_attribute_filter") or "").strip()
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "pageSize": str(page_size),
+                "offset": str(page_index * page_size),
+                "companyName": company_name,
+                "query": keyword,
+                "sortBy": str(source.get("sort_by") or "open_date"),
+                "sortOrder": str(source.get("sort_order") or "descending"),
+                "callback": "jobSearchCallback",
+            }
+            if custom_attribute_filter:
+                params["customAttributeFilter"] = custom_attribute_filter
+            api_url = f"{endpoint}/job/search?{urllib.parse.urlencode(params)}"
+            try:
+                data = fetch_jsonp(api_url, referer=str(source.get("url") or ""))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch m-cloud API for {company}: {error}", file=sys.stderr)
+                break
+            results = data.get("searchResults", []) if isinstance(data, dict) else []
+            if not results:
+                break
+            for result in results:
+                job = result.get("job", {}) if isinstance(result, dict) else {}
+                if not isinstance(job, dict):
+                    continue
+                url = m_cloud_job_url(job)
+                if not url:
+                    continue
+                role = str(job.get("title") or infer_role_from_url(url)).strip()
+                jd_text = html_to_text(str(job.get("description") or ""))
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "m_cloud",
+                    "location": m_cloud_location_text(job),
+                    "posted_at": normalize_datetime(job.get("open_date")),
+                    "updated_at": normalize_datetime(job.get("timestamp")),
+                    "source": source.get("url", ""),
+                    "job_number": job.get("ref") or job.get("clientid") or "",
+                    "external_job_id": str(job.get("id") or ""),
+                    "_jd_text": "\n\n".join(block for block in [role, m_cloud_location_text(job), jd_text] if block),
+                    "notes": f"m-cloud direct adapter; ref={job.get('ref', '')}",
+                }
+            if len(results) < page_size:
+                break
+    return list(candidates.values())
+
+
+def discover_hirebridge_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    client_id = str(source.get("client_id") or "").strip()
+    if not client_id:
+        return []
+    feed_url = str(source.get("feed_url") or f"https://rss.hirebridge.com/{urllib.parse.quote(client_id)}.json")
+    try:
+        data = fetch_json(feed_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Hirebridge feed for {company}: {error}", file=sys.stderr)
+        return []
+    source_block = data.get("source", {}) if isinstance(data, dict) else {}
+    jobs = source_block.get("job", [])
+    if isinstance(jobs, dict):
+        jobs = [jobs]
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict):
+            continue
+        role = str(job.get("title") or "").strip()
+        url = normalize_job_url(str(job.get("url") or job.get("ApplicationURL") or ""))
+        if not url:
+            continue
+        location = str(job.get("location") or "").strip()
+        blocks = [
+            role,
+            location,
+            job.get("department", ""),
+            job.get("category", ""),
+            html_to_text(str(job.get("jobdesc") or job.get("description") or "")),
+        ]
+        candidates[url] = {
+            "company": company,
+            "role": role or infer_role_from_url(url),
+            "url": url,
+            "platform": "hirebridge",
+            "location": location,
+            "posted_at": normalize_datetime(job.get("date")),
+            "updated_at": normalize_datetime(job.get("modifydate")),
+            "source": source.get("url", ""),
+            "job_number": str(job.get("referencenumber") or ""),
+            "external_job_id": str(job.get("referencenumber") or ""),
+            "_jd_text": "\n\n".join(str(block) for block in blocks if block),
+            "notes": f"Hirebridge direct adapter; ref={job.get('referencenumber', '')}",
+        }
+    return list(candidates.values())
+
+
+def discover_successfactors_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    base_url = str(source.get("url") or "").rstrip("/")
+    search_path = str(source.get("search_path") or "/search/")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    max_pages = int(source.get("max_pages", 3))
+    page_size = int(source.get("page_size", 25))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "q": keyword,
+                "sortColumn": "referencedate",
+                "sortDirection": "desc",
+            }
+            if page_index:
+                params["startrow"] = str(page_index * page_size)
+            search_url = urllib.parse.urljoin(base_url + "/", search_path.lstrip("/")) + "?" + urllib.parse.urlencode(params)
+            try:
+                raw = fetch_url(search_url)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch SuccessFactors search for {company}: {error}", file=sys.stderr)
+                break
+            rows = re.findall(r'<tr[^>]+class=["\'][^"\']*data-row[^"\']*["\'][^>]*>(.*?)</tr>', raw, flags=re.I | re.S)
+            if not rows:
+                break
+            for row in rows:
+                link_match = re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*jobTitle-link[^"\']*["\'][^>]*>(.*?)</a>', row, flags=re.I | re.S)
+                if not link_match:
+                    continue
+                url = normalize_job_url(urllib.parse.urljoin(base_url + "/", html.unescape(link_match.group(1))))
+                role = html_to_text(link_match.group(2))
+                date_match = re.search(r'<span[^>]+class=["\'][^"\']*jobDate[^"\']*["\'][^>]*>(.*?)</span>', row, flags=re.I | re.S)
+                location_match = re.search(r'<span[^>]+class=["\'][^"\']*jobLocation[^"\']*["\'][^>]*>(.*?)</span>', row, flags=re.I | re.S)
+                department_match = re.search(r'<span[^>]+class=["\'][^"\']*jobDepartment[^"\']*["\'][^>]*>(.*?)</span>', row, flags=re.I | re.S)
+                country_match = re.search(r'<span[^>]+class=["\'][^"\']*jobShifttype[^"\']*["\'][^>]*>(.*?)</span>', row, flags=re.I | re.S)
+                job_number_match = re.search(r'<span[^>]+class=["\'][^"\']*jobFacility[^"\']*["\'][^>]*>(.*?)</span>', row, flags=re.I | re.S)
+                location = html_to_text(location_match.group(1)) if location_match else ""
+                if not location:
+                    location = ", ".join(
+                        item
+                        for item in [
+                            html_to_text(department_match.group(1)) if department_match else "",
+                            html_to_text(country_match.group(1)) if country_match else "",
+                        ]
+                        if item
+                    )
+                candidates[url] = {
+                    "company": company,
+                    "role": role or infer_role_from_url(url),
+                    "url": url,
+                    "platform": "successfactors",
+                    "location": location,
+                    "posted_at": normalize_datetime(html_to_text(date_match.group(1)) if date_match else ""),
+                    "updated_at": "",
+                    "source": source.get("url", ""),
+                    "source_query": keyword,
+                    "job_number": html_to_text(job_number_match.group(1)) if job_number_match else "",
+                    "external_job_id": url.rstrip("/").split("/")[-1],
+                    "notes": "SuccessFactors search adapter.",
+                }
+            if len(rows) < page_size:
+                break
+    return list(candidates.values())
+
+
 def microsoft_pcsx_session() -> tuple[urllib.request.OpenerDirector, dict[str, str]]:
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
@@ -1361,6 +1610,12 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_workday_jobs(source)
     if platform == "phenom":
         return discover_phenom_jobs(source)
+    if platform == "m_cloud":
+        return discover_m_cloud_jobs(source)
+    if platform == "hirebridge":
+        return discover_hirebridge_jobs(source)
+    if platform == "successfactors":
+        return discover_successfactors_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
@@ -1807,6 +2062,27 @@ def fetch_workday_job_text(url: str) -> str | None:
     return "\n\n".join(str(block) for block in blocks if block)
 
 
+def fetch_m_cloud_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "m-cloud.io" not in parsed.netloc.lower() and "careers.remitly.com" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
+def fetch_hirebridge_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "hirebridge.com" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
+def fetch_successfactors_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if "successfactors.com" not in parsed.netloc.lower() and "careers.qualitestgroup.com" not in parsed.netloc.lower():
+        return None
+    return html_to_text(fetch_url(url))
+
+
 def infer_role_from_url(url: str) -> str:
     path = urllib.parse.urlparse(url).path
     parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
@@ -2132,6 +2408,9 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_amazon_job_text,
         fetch_google_job_text,
         fetch_meta_job_text,
+        fetch_m_cloud_job_text,
+        fetch_hirebridge_job_text,
+        fetch_successfactors_job_text,
         fetch_workday_job_text,
     ]:
         try:
@@ -2565,6 +2844,39 @@ def source_from_phenom_url(company: str, url: str) -> dict[str, Any]:
     }
 
 
+def source_from_m_cloud_page(company: str, url: str, raw: str) -> dict[str, Any] | None:
+    api_match = re.search(r'"api"\s*:\s*"([^"]*m-cloud\.io\\/api\\/?)"', raw)
+    org_match = re.search(r'"org"\s*:\s*"([^"]+)"', raw)
+    if not api_match or not org_match:
+        return None
+    api_url = html.unescape(api_match.group(1)).replace("\\/", "/")
+    organization = html.unescape(org_match.group(1)).replace("\\/", "/")
+    return {
+        "company": company or urllib.parse.urlparse(url).netloc,
+        "platform": "m_cloud",
+        "url": url,
+        "api_url": api_url.rstrip("/"),
+        "company_name": organization,
+        "page_size": 25,
+        "max_pages": 5,
+        "keywords": DEFAULT_WORKDAY_KEYWORDS,
+    }
+
+
+def source_from_hirebridge_page(company: str, url: str, raw: str) -> dict[str, Any] | None:
+    client_match = re.search(r"hirebridge_client\s*=\s*['\"]([^'\"]+)['\"]", raw)
+    if not client_match:
+        return None
+    client_id = html.unescape(client_match.group(1))
+    return {
+        "company": company or urllib.parse.urlparse(url).netloc,
+        "platform": "hirebridge",
+        "url": url,
+        "client_id": client_id,
+        "feed_url": f"https://rss.hirebridge.com/{urllib.parse.quote(client_id)}.json",
+    }
+
+
 def classify_source(source: dict[str, Any]) -> dict[str, Any]:
     company = str(source.get("company", "")).strip()
     url = str(source.get("url", "")).strip()
@@ -2599,6 +2911,16 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
             result["detected_platform"] = "phenom"
             result["detected_url"] = url
             result["notes"] = "Phenom detected."
+        if not result["detected_platform"] and re.search(r"jobsapi-[a-z-]*\.m-cloud\.io/api", raw, flags=re.I):
+            result["detected_platform"] = "m_cloud"
+            result["detected_url"] = url
+            result["source"] = source_from_m_cloud_page(company, url, raw)
+            result["notes"] = "m-cloud detected." if result["source"] else "m-cloud detected but config could not be parsed."
+        if not result["detected_platform"] and re.search(r"hirebridge_client|hirebridge\.com/assets/portal", raw, flags=re.I):
+            result["detected_platform"] = "hirebridge"
+            result["detected_url"] = url
+            result["source"] = source_from_hirebridge_page(company, url, raw)
+            result["notes"] = "Hirebridge detected." if result["source"] else "Hirebridge detected but client id could not be parsed."
 
     detected_url = str(result.get("detected_url") or "")
     platform = str(result.get("detected_platform") or "")
@@ -2621,6 +2943,10 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = source_from_workday_url(company, detected_url)
     elif platform == "phenom":
         result["source"] = source_from_phenom_url(company, detected_url)
+    elif platform == "m_cloud" and not result.get("source"):
+        result["notes"] = result.get("notes") or "m-cloud detected but config could not be parsed."
+    elif platform == "hirebridge" and not result.get("source"):
+        result["notes"] = result.get("notes") or "Hirebridge detected but client id could not be parsed."
     return result
 
 
@@ -2662,6 +2988,9 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "gem",
         "workday",
         "phenom",
+        "m_cloud",
+        "hirebridge",
+        "successfactors",
         "microsoft_jobs",
         "amazon_jobs",
         "google_jobs",
