@@ -22,6 +22,7 @@ import http.cookiejar
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import textwrap
@@ -183,6 +184,30 @@ ATS_SEARCH_SITES = [
 
 class SearchRateLimited(RuntimeError):
     """Raised when a search provider asks us to stop sending requests."""
+
+
+class SourceTimeout(RuntimeError):
+    """Raised when one discovery source exceeds its time budget."""
+
+
+@contextlib.contextmanager
+def source_timeout(seconds: float | None):
+    if not seconds or seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(_signum: int, _frame: Any) -> None:
+        raise SourceTimeout(f"source discovery exceeded {seconds:g}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def today() -> str:
@@ -4857,7 +4882,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         try:
             warning_buffer = io.StringIO()
             with contextlib.redirect_stderr(warning_buffer):
-                candidates = discover_source_jobs(source)
+                with source_timeout(float(getattr(args, "source_timeout_seconds", 45) or 0)):
+                    candidates = discover_source_jobs(source)
             source_report["warnings"] = warning_buffer.getvalue().strip()
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.
             failed_sources += 1
@@ -5532,6 +5558,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
+    discover.add_argument(
+        "--source-timeout-seconds",
+        type=float,
+        default=45,
+        help="Maximum seconds to spend on one source before marking it failed. Use 0 to disable.",
+    )
     discover.add_argument(
         "--source-company",
         action="append",
