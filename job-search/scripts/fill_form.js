@@ -889,12 +889,12 @@ async function main() {
     writeCsv(selected.dir, tracker);
     console.log(`Filled conservative fields and stopped before submit. Screenshot: ${screenshotPath}`);
   } finally {
-    if (args["keep-open"]) {
+    if (args["close-when-done"]) {
+      console.log("Browser closed because --close-when-done was passed.");
+      await context.close();
+    } else {
       console.log("Browser is staying open for your manual review. Press Ctrl+C in this terminal after you finish.");
       await new Promise(() => {});
-    } else {
-      console.log("Browser remains visible only during this run; rerun if you need another pass.");
-      await context.close();
     }
   }
 }
