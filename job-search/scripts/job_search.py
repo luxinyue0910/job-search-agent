@@ -419,6 +419,12 @@ def detect_platform(url: str) -> str:
         return "workable"
     if "bamboohr.com" in host:
         return "bamboohr"
+    if "ycombinator.com" in host and path.startswith("/jobs"):
+        return "yc_job_board"
+    if "ycombinator.com" in host and "/companies/" in path and "/jobs" in path:
+        return "yc_jobs"
+    if "jibecdn.com" in host or "jibeapply.com" in host or "careers.costco.com" in host:
+        return "jibe"
     return "custom"
 
 
@@ -897,12 +903,33 @@ def parse_workday_posted_on(value: Any, now: dt.datetime | None = None) -> str:
         return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     if "yesterday" in text:
         return (now - dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(an?|one)\s+hours?\b", text)
+    if match:
+        return (now - dt.timedelta(hours=1)).replace(microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(an?|one)\s+days?\b", text)
+    if match:
+        return (now - dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     match = re.search(r"(\d+)\+?\s+days?\s+ago", text)
     if match:
         return (now - dt.timedelta(days=int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     match = re.search(r"(\d+)\+?\s+hours?\s+ago", text)
     if match:
         return (now - dt.timedelta(hours=int(match.group(1)))).replace(microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(\d+)\+?\s+days?\b", text)
+    if match:
+        return (now - dt.timedelta(days=int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(\d+)\+?\s+hours?\b", text)
+    if match:
+        return (now - dt.timedelta(hours=int(match.group(1)))).replace(microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(\d+)\+?\s+weeks?\b", text)
+    if match:
+        return (now - dt.timedelta(days=7 * int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(\d+)\+?\s+months?\b", text)
+    if match:
+        return (now - dt.timedelta(days=30 * int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    match = re.search(r"(?:about|approximately|around)?\s*(\d+)\+?\s+years?\b", text)
+    if match:
+        return (now - dt.timedelta(days=365 * int(match.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     raw = re.sub(r"^posted\s+(on\s+)?", "", raw, flags=re.I).strip()
     return normalize_datetime(raw)
 
@@ -2378,6 +2405,192 @@ def discover_bamboohr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def yc_page_job_postings(url: str, company: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    raw = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = fetch_url(url, timeout=30)
+            break
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            if attempt == 0:
+                time.sleep(1)
+    if not raw:
+        print(f"Could not fetch YC jobs for {company} at {url}: {last_error}", file=sys.stderr)
+        return {}, []
+    match = re.search(r'data-page=["\']([^"\']+)["\']', raw, flags=re.I | re.S)
+    if not match:
+        return {}, []
+    try:
+        page = json.loads(html.unescape(match.group(1)))
+    except json.JSONDecodeError as error:
+        print(f"Could not parse YC job payload for {company}: {error}", file=sys.stderr)
+        return {}, []
+    props = page.get("props", {}) if isinstance(page, dict) else {}
+    jobs = props.get("jobPostings") or []
+    if not isinstance(jobs, list):
+        jobs = []
+    return props, [job for job in jobs if isinstance(job, dict)]
+
+
+def yc_candidate_from_posting(job: dict[str, Any], source_url: str, company: str, platform: str, note: str) -> dict[str, Any] | None:
+    job_id = str(job.get("id") or "").strip()
+    title = str(job.get("title") or infer_role_from_url(str(job.get("url") or job_id))).strip()
+    job_url = normalize_job_url(urllib.parse.urljoin(source_url, str(job.get("url") or "")))
+    if not job_url:
+        return None
+    created_at = parse_workday_posted_on(str(job.get("createdAt") or ""))
+    last_active = parse_workday_posted_on(str(job.get("lastActive") or ""))
+    skills = job.get("skills") if isinstance(job.get("skills"), list) else []
+    details = [
+        f"YC role={job.get('role', '')}",
+        f"role_type={job.get('roleSpecificType', '')}",
+        f"min_experience={job.get('minExperience', '')}",
+        f"visa={job.get('visa', '')}",
+        f"skills={', '.join(str(skill) for skill in skills)}" if skills else "",
+        note,
+    ]
+    return {
+        "company": str(job.get("companyName") or company),
+        "role": title,
+        "url": job_url,
+        "platform": platform,
+        "location": compact_location_text(job.get("location")),
+        "job_number": job_id,
+        "external_job_id": job_id,
+        "posted_at": created_at,
+        "updated_at": last_active,
+        "source": source_url,
+        "source_query": str(job.get("role") or ""),
+        "freshness_source": "official_relative_posted_at" if created_at else "unknown",
+        "notes": "; ".join(item for item in details if item),
+    }
+
+
+def discover_yc_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    props, jobs = yc_page_job_postings(source_url, str(company))
+    company_data = props.get("company", {}) if isinstance(props.get("company"), dict) else {}
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        candidate = yc_candidate_from_posting(
+            job,
+            source_url,
+            str(job.get("companyName") or company_data.get("name") or company),
+            "yc_jobs",
+            "Y Combinator Work at a Startup company jobs adapter.",
+        )
+        if not candidate:
+            continue
+        candidates[candidate["url"]] = candidate
+    return list(candidates.values())
+
+
+def discover_yc_job_board_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Y Combinator Jobs")
+    urls = source.get("urls") or source.get("url") or "https://www.ycombinator.com/jobs"
+    if isinstance(urls, str):
+        urls = [urls]
+    candidates: dict[str, dict[str, Any]] = {}
+    for source_url in [str(item).strip() for item in urls if str(item).strip()]:
+        _, jobs = yc_page_job_postings(source_url, str(company))
+        for job in jobs:
+            if source.get("role") and str(job.get("role") or "") != str(source["role"]):
+                continue
+            candidate = yc_candidate_from_posting(
+                job,
+                source_url,
+                str(job.get("companyName") or company),
+                "yc_job_board",
+                "Y Combinator Work at a Startup job board adapter.",
+            )
+            if not candidate:
+                continue
+            candidates[candidate["url"]] = candidate
+    return list(candidates.values())
+
+
+def jibe_api_url(source: dict[str, Any]) -> str:
+    if source.get("api_url"):
+        return str(source["api_url"]).strip()
+    source_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(source_url)
+    if parsed.scheme and parsed.netloc:
+        return urllib.parse.urljoin(f"{parsed.scheme}://{parsed.netloc}", "/api/jobs")
+    return ""
+
+
+def discover_jibe_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    api_url = jibe_api_url(source)
+    if not api_url:
+        return []
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    categories = source.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        params = {
+            "keywords": keyword,
+            "sortBy": "posted_date",
+            "numRows": int(source.get("page_size", 100)),
+        }
+        if categories:
+            params["categories"] = "|".join(str(item) for item in categories if str(item).strip())
+        try:
+            data = fetch_json(f"{api_url}?{urllib.parse.urlencode(params)}")
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Jibe API for {company}: {error}", file=sys.stderr)
+            continue
+        jobs = data.get("jobs") if isinstance(data, dict) else []
+        if not isinstance(jobs, list):
+            continue
+        for wrapper in jobs:
+            job = wrapper.get("data") if isinstance(wrapper, dict) else wrapper
+            if not isinstance(job, dict):
+                continue
+            title = str(job.get("title") or infer_role_from_url(str(job.get("slug") or ""))).strip()
+            job_url = str(job.get("meta_data", {}).get("canonical_url") if isinstance(job.get("meta_data"), dict) else "")
+            if not job_url:
+                source_url = str(source.get("url") or api_url)
+                job_url = urllib.parse.urljoin(source_url, f"/jobs/{urllib.parse.quote(str(job.get('slug') or job.get('req_id') or ''))}")
+            job_url = normalize_job_url(job_url)
+            location = compact_location_text(
+                {
+                    "city": job.get("city"),
+                    "state": job.get("state"),
+                    "country": job.get("country"),
+                    "name": job.get("location_name"),
+                }
+            )
+            job_id = str(job.get("req_id") or job.get("slug") or "").strip()
+            meta_data = job.get("meta_data", {}) if isinstance(job.get("meta_data"), dict) else {}
+            icims_meta = meta_data.get("icims", {}) if isinstance(meta_data.get("icims"), dict) else {}
+            candidates[job_url] = {
+                "company": company,
+                "role": title,
+                "url": job_url,
+                "platform": "jibe",
+                "location": location or compact_location_text(job.get("locations")),
+                "job_number": job_id,
+                "external_job_id": str(icims_meta.get("uuid") or job_id),
+                "posted_at": normalize_datetime(job.get("posted_date") or job.get("create_date")),
+                "updated_at": normalize_datetime(job.get("update_date") or meta_data.get("last_mod")),
+                "source": source.get("url", api_url),
+                "source_query": keyword,
+                "notes": "Jibe/iCIMS hosted careers API adapter.",
+                "_jd_text": html_to_text(str(job.get("description") or "")),
+            }
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -2426,6 +2639,12 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_workable_jobs(source)
     if platform == "bamboohr":
         return discover_bamboohr_jobs(source)
+    if platform == "yc_jobs":
+        return discover_yc_jobs(source)
+    if platform == "yc_job_board":
+        return discover_yc_job_board_jobs(source)
+    if platform == "jibe":
+        return discover_jibe_jobs(source)
     return find_links_for_source(source)
 
 
@@ -2595,6 +2814,34 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
     value = str(location or "").strip().lower()
     if not value:
         return True
+    foreign_markers = [
+        "canada",
+        "remote (ca)",
+        "edmonton",
+        "toronto",
+        "vancouver",
+        "montreal",
+        "calgary",
+        "india",
+        "argentina",
+        "colombia",
+        "mexico",
+        "spain",
+        "germany",
+        "poland",
+        "egypt",
+        "japan",
+        "latam",
+        "europe",
+        "united kingdom",
+    ]
+    if any(marker in value for marker in foreign_markers) and not re.search(
+        r"\b(united states|usa|u\.s\.|us|remote \(us|california|san francisco|san jose|palo alto|mountain view|sunnyvale|los angeles|wa|washington|seattle|bellevue|redmond|kirkland)\b",
+        value,
+    ):
+        return False
+    if re.search(r"\b(ab|bc|on|qc),\s*ca\b", value) and not re.search(r"\b(united states|usa|u\.s\.|us|california)\b", value):
+        return False
     if re.search(r"\b(remote|us based|us-based)\b", value):
         return True
     if re.fullmatch(r"(united states|usa|u\.s\.|us|united states of america)", value):
@@ -3112,7 +3359,7 @@ def fetch_providence_job_text(url: str) -> str | None:
 
 def fetch_direct_platform_job_text(url: str) -> str | None:
     platform = detect_platform(url)
-    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr"}:
+    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe"}:
         return None
     return html_to_text(fetch_url(url))
 
@@ -3942,6 +4189,9 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "jobvite",
         "workable",
         "bamboohr",
+        "yc_jobs",
+        "yc_job_board",
+        "jibe",
     }
     if direct_platform in directly_classifiable:
         result["detected_platform"] = direct_platform
@@ -4024,6 +4274,12 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company, "platform": "workable", "account": workable_account({"company": company, "url": detected_url}), "url": detected_url}
     elif platform == "bamboohr":
         result["source"] = {"company": company, "platform": "bamboohr", "subdomain": bamboohr_subdomain({"company": company, "url": detected_url}), "url": detected_url}
+    elif platform == "yc_jobs":
+        result["source"] = {"company": company, "platform": "yc_jobs", "url": detected_url}
+    elif platform == "yc_job_board":
+        result["source"] = {"company": company or "Y Combinator Jobs", "platform": "yc_job_board", "url": detected_url, "role": "eng"}
+    elif platform == "jibe":
+        result["source"] = {"company": company, "platform": "jibe", "url": detected_url, "api_url": jibe_api_url({"url": detected_url}), "keywords": DEFAULT_WORKDAY_KEYWORDS}
     return result
 
 
@@ -4082,6 +4338,9 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "jobvite",
         "workable",
         "bamboohr",
+        "yc_jobs",
+        "yc_job_board",
+        "jibe",
     }
     direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
     print(f"Sources: {len(sources)} total")
