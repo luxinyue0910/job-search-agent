@@ -423,6 +423,8 @@ def detect_platform(url: str) -> str:
         return "yc_job_board"
     if "ycombinator.com" in host and "/companies/" in path and "/jobs" in path:
         return "yc_jobs"
+    if "news.ycombinator.com" in host or "hn.algolia.com" in host:
+        return "hn_who_is_hiring"
     if "jibecdn.com" in host or "jibeapply.com" in host or "careers.costco.com" in host:
         return "jibe"
     return "custom"
@@ -2514,6 +2516,179 @@ def discover_yc_job_board_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def hn_latest_who_is_hiring_story() -> dict[str, Any] | None:
+    params = urllib.parse.urlencode(
+        {
+            "query": "Ask HN: Who is hiring?",
+            "tags": "story",
+            "hitsPerPage": 10,
+        }
+    )
+    data = fetch_json(f"https://hn.algolia.com/api/v1/search_by_date?{params}")
+    hits = data.get("hits", []) if isinstance(data, dict) else []
+    for hit in hits:
+        title = str(hit.get("title") or "")
+        if re.match(r"Ask HN:\s*Who is hiring\?\s*\([^)]+\)", title, flags=re.I):
+            return hit
+    return None
+
+
+def hn_story_id_from_source(source: dict[str, Any]) -> str:
+    if source.get("story_id"):
+        return str(source["story_id"]).strip()
+    url = str(source.get("url") or "").strip()
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    item_id = str((query.get("id") or [""])[0]).strip()
+    if item_id.isdigit():
+        return item_id
+    latest = hn_latest_who_is_hiring_story()
+    return str(latest.get("objectID") or "").strip() if latest else ""
+
+
+def hn_comment_url(comment_id: str) -> str:
+    return f"https://news.ycombinator.com/item?id={urllib.parse.quote(comment_id)}"
+
+
+def hn_comment_text(raw_html: str) -> str:
+    with_breaks = re.sub(r"(?i)<p\s*/?>|<br\s*/?>|</p>", "\n", raw_html)
+    with_breaks = re.sub(r"(?is)<a\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", r"\2 (\1)", with_breaks)
+    with_breaks = re.sub(r"(?is)<script.*?</script>", " ", with_breaks)
+    with_breaks = re.sub(r"(?is)<style.*?</style>", " ", with_breaks)
+    with_breaks = re.sub(r"(?s)<[^>]+>", " ", with_breaks)
+    with_breaks = html.unescape(with_breaks)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in with_breaks.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def hn_comment_links(raw_html: str) -> list[str]:
+    links: list[str] = []
+    for href in re.findall(r'href=["\']([^"\']+)["\']', raw_html, flags=re.I):
+        href = html.unescape(href)
+        if href.startswith("item?"):
+            continue
+        if href.startswith("//"):
+            href = f"https:{href}"
+        if not href.startswith(("http://", "https://")):
+            continue
+        parsed = urllib.parse.urlparse(href)
+        if parsed.netloc.lower() in {"news.ycombinator.com", "www.ycombinator.com"} and parsed.path in {"", "/item"}:
+            continue
+        if re.search(r"(?:unsubscribe|mailto:)", href, flags=re.I):
+            continue
+        links.append(normalize_job_url(href))
+    return list(dict.fromkeys(links))
+
+
+def hn_probable_apply_url(links: list[str]) -> str:
+    priority_patterns = [
+        r"(?:greenhouse\.io|lever\.co|ashbyhq\.com|jobs\.gem\.com|workdayjobs\.com|workdaysite\.com)",
+        r"(?:/careers?|/jobs?|/apply|/positions?|/openings?)",
+    ]
+    for pattern in priority_patterns:
+        for link in links:
+            if re.search(pattern, link, flags=re.I):
+                return link
+    return links[0] if links else ""
+
+
+def hn_company_and_roles(text: str) -> tuple[str, list[str], str]:
+    lines = [line.strip(" -\t") for line in text.splitlines() if line.strip()]
+    first_line = lines[0] if lines else ""
+    segments = [segment.strip() for segment in re.split(r"\s+\|\s+|\s+[-–]\s+", first_line) if segment.strip()]
+    company = segments[0] if segments else "HN Who is Hiring"
+    company = re.sub(r"\s+https?://\S+", "", company).strip()
+    company = re.sub(r"\s*\([^)]*\)\s*$", "", company).strip() or "HN Who is Hiring"
+    title_terms = DEFAULT_DISCOVERY_TITLE_KEYWORDS + ["sdet", "qa", "quality", "founding engineer", "engineer"]
+    roles: list[str] = []
+    for segment in segments[1:]:
+        if any(re.search(rf"\b{re.escape(term)}\b", segment, flags=re.I) for term in title_terms):
+            roles.append(segment)
+    if not roles:
+        for line in lines[:6]:
+            for title in re.findall(
+                r"\b(?:Senior |Staff |Junior |Founding |Backend |Frontend |Full[- ]Stack |AI |ML |Platform |DevOps |QA |SDET |Mobile )?(?:Software Engineer|Backend Engineer|Frontend Engineer|Full[- ]Stack Engineer|AI Engineer|ML Engineer|Machine Learning Engineer|Platform Engineer|DevOps Engineer|QA Engineer|SDET|Mobile Engineer)\b",
+                line,
+                flags=re.I,
+            ):
+                roles.append(title)
+    roles = list(dict.fromkeys(role.strip() for role in roles if role.strip()))
+    if not roles:
+        roles = ["Software Engineer / Engineering Roles"]
+    location = ""
+    for segment in segments[1:]:
+        if re.search(r"\b(remote|seattle|bellevue|washington|wa|san francisco|sf|bay area|california|ca|los angeles|la|nyc|new york)\b", segment, flags=re.I):
+            location = segment
+            break
+    return company, roles[:4], location
+
+
+def hn_comment_is_hiring_post(hit: dict[str, Any], story_id: str, text: str) -> bool:
+    if str(hit.get("parent_id") or "") != story_id:
+        return False
+    lowered = text.lower()
+    reject_patterns = [
+        r"\bi['’]?d like to apply\b",
+        r"\binterested in applying\b",
+        r"\bto anyone who considers applying\b",
+        r"\bhow do i apply\b",
+    ]
+    if any(re.search(pattern, lowered) for pattern in reject_patterns):
+        return False
+    return bool(re.search(r"\b(hiring|we are looking|we're looking|join us|careers?|roles?|engineer|developer|remote|onsite|visa)\b", lowered))
+
+
+def discover_hn_who_is_hiring_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    story_id = hn_story_id_from_source(source)
+    if not story_id:
+        print("Could not locate latest HN Who is Hiring story.", file=sys.stderr)
+        return []
+    max_pages = int(source.get("max_pages", 8))
+    hits_per_page = min(max(int(source.get("page_size", 100)), 1), 100)
+    candidates: dict[str, dict[str, Any]] = {}
+    for page in range(max_pages):
+        params = urllib.parse.urlencode(
+            {
+                "tags": f"comment,story_{story_id}",
+                "hitsPerPage": hits_per_page,
+                "page": page,
+            }
+        )
+        data = fetch_json(f"https://hn.algolia.com/api/v1/search_by_date?{params}")
+        hits = data.get("hits", []) if isinstance(data, dict) else []
+        if not hits:
+            break
+        for hit in hits:
+            raw_comment = str(hit.get("comment_text") or "")
+            text = hn_comment_text(raw_comment)
+            if not hn_comment_is_hiring_post(hit, story_id, text):
+                continue
+            comment_id = str(hit.get("objectID") or "").strip()
+            company, roles, location = hn_company_and_roles(text)
+            links = hn_comment_links(raw_comment)
+            apply_url = hn_probable_apply_url(links) or hn_comment_url(comment_id)
+            created_at = normalize_datetime(hit.get("created_at") or hit.get("created_at_i"))
+            for role in roles:
+                url = apply_url
+                if len(roles) > 1 and apply_url == hn_comment_url(comment_id):
+                    url = f"{apply_url}&role={urllib.parse.quote(slugify(role))}"
+                normalized_url = normalize_job_url(url)
+                candidates[normalized_url] = {
+                    "company": company,
+                    "role": role,
+                    "url": normalized_url,
+                    "platform": detect_platform(normalized_url) if apply_url != hn_comment_url(comment_id) else "hn_who_is_hiring",
+                    "location": location,
+                    "posted_at": created_at,
+                    "updated_at": created_at,
+                    "source": hn_comment_url(comment_id),
+                    "source_query": str(hit.get("story_title") or "Ask HN: Who is hiring?"),
+                    "freshness_source": "hn_comment_created_at",
+                    "external_job_id": comment_id,
+                    "notes": f"HN Who is Hiring comment; story_id={story_id}. Review original comment for exact role/location. {text[:500]}",
+                }
+    return list(candidates.values())
+
+
 def jibe_api_url(source: dict[str, Any]) -> str:
     if source.get("api_url"):
         return str(source["api_url"]).strip()
@@ -2643,6 +2818,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_yc_jobs(source)
     if platform == "yc_job_board":
         return discover_yc_job_board_jobs(source)
+    if platform == "hn_who_is_hiring":
+        return discover_hn_who_is_hiring_jobs(source)
     if platform == "jibe":
         return discover_jibe_jobs(source)
     return find_links_for_source(source)
@@ -2790,7 +2967,7 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
     if not role:
         return False
     combined = f"{candidate.get('role', '')} {candidate.get('url', '')}".lower()
-    if re.search(r"\b(senior|sr\.?|staff|principal|manager|director|lead|intern|internship)\b", combined):
+    if re.search(r"\b(senior|sr\.?|staff|principal|distinguished|manager|director|lead|head|vp|chief|cto|intern|internship)\b", combined):
         return False
     if re.search(r"\b(canada|france|india|united kingdom|uk|london|paris|toronto|vancouver)\b", combined):
         return False
@@ -4191,6 +4368,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "bamboohr",
         "yc_jobs",
         "yc_job_board",
+        "hn_who_is_hiring",
         "jibe",
     }
     if direct_platform in directly_classifiable:
@@ -4278,6 +4456,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company, "platform": "yc_jobs", "url": detected_url}
     elif platform == "yc_job_board":
         result["source"] = {"company": company or "Y Combinator Jobs", "platform": "yc_job_board", "url": detected_url, "role": "eng"}
+    elif platform == "hn_who_is_hiring":
+        result["source"] = {"company": company or "Hacker News Who is Hiring", "platform": "hn_who_is_hiring", "url": detected_url}
     elif platform == "jibe":
         result["source"] = {"company": company, "platform": "jibe", "url": detected_url, "api_url": jibe_api_url({"url": detected_url}), "keywords": DEFAULT_WORKDAY_KEYWORDS}
     return result
@@ -4340,6 +4520,7 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "bamboohr",
         "yc_jobs",
         "yc_job_board",
+        "hn_who_is_hiring",
         "jibe",
     }
     direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
