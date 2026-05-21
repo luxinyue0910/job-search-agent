@@ -576,6 +576,16 @@ def discovery_cutoff(args: argparse.Namespace) -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc) - delta
 
 
+def source_discovery_cutoff(source: dict[str, Any], default_cutoff: dt.datetime) -> dt.datetime | None:
+    if source.get("ignore_posted_cutoff"):
+        return None
+    if source.get("posted_cutoff_days") not in (None, ""):
+        return dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=float(source["posted_cutoff_days"]))
+    if source.get("posted_cutoff_hours") not in (None, ""):
+        return dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=float(source["posted_cutoff_hours"]))
+    return default_cutoff
+
+
 def source_platform(source: dict[str, Any]) -> str:
     return str(source.get("platform") or source.get("type") or detect_platform(source.get("url", ""))).lower()
 
@@ -2615,11 +2625,24 @@ def hn_company_and_roles(text: str) -> tuple[str, list[str], str]:
     if not roles:
         roles = ["Software Engineer / Engineering Roles"]
     location = ""
-    for segment in segments[1:]:
+    for segment in segments[1:] + lines[:8]:
+        if re.search(r"\b(contact|email|mailto|apply)\b|@|https?://", segment, flags=re.I):
+            continue
         if re.search(r"\b(remote|seattle|bellevue|washington|wa|san francisco|sf|bay area|california|ca|los angeles|la|nyc|new york)\b", segment, flags=re.I):
             location = segment
             break
     return company, roles[:4], location
+
+
+def hn_comment_has_job_shape(text: str) -> bool:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    segments = [segment.strip() for segment in re.split(r"\s+\|\s+|\s+[-–]\s+", first_line) if segment.strip()]
+    if len(segments) >= 3:
+        roleish = any(re.search(r"\b(engineer|developer|devops|sdet|qa|machine learning|ml|ai|backend|frontend|full.?stack)\b", segment, flags=re.I) for segment in segments[1:])
+        locationish = any(re.search(r"\b(remote|onsite|hybrid|seattle|bellevue|wa|washington|sf|san francisco|bay area|ca|california|usa|us)\b", segment, flags=re.I) for segment in segments[1:])
+        if roleish and locationish:
+            return True
+    return bool(re.search(r"\b(we(?:'re| are) hiring|is hiring|now hiring|apply here|apply at|careers?|job openings?|open roles?|we(?:'re| are) looking for)\b", text, flags=re.I))
 
 
 def hn_comment_is_hiring_post(hit: dict[str, Any], story_id: str, text: str) -> bool:
@@ -2631,10 +2654,18 @@ def hn_comment_is_hiring_post(hit: dict[str, Any], story_id: str, text: str) -> 
         r"\binterested in applying\b",
         r"\bto anyone who considers applying\b",
         r"\bhow do i apply\b",
+        r"\bseeking work\b",
+        r"\blooking for work\b",
+        r"\bavailable for hire\b",
+        r"\bnot hiring\b",
+        r"\bnot currently hiring\b",
+        r"\bgreat thread\b",
+        r"\bhere are the listings\b",
+        r"\bi['’]?m a\b.*\bdeveloper\b",
     ]
     if any(re.search(pattern, lowered) for pattern in reject_patterns):
         return False
-    return bool(re.search(r"\b(hiring|we are looking|we're looking|join us|careers?|roles?|engineer|developer|remote|onsite|visa)\b", lowered))
+    return hn_comment_has_job_shape(text)
 
 
 def discover_hn_who_is_hiring_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2653,7 +2684,11 @@ def discover_hn_who_is_hiring_jobs(source: dict[str, Any]) -> list[dict[str, Any
                 "page": page,
             }
         )
-        data = fetch_json(f"https://hn.algolia.com/api/v1/search_by_date?{params}")
+        try:
+            data = fetch_json(f"https://hn.algolia.com/api/v1/search_by_date?{params}", timeout=30)
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch HN Who is Hiring page {page} for story {story_id}: {error}", file=sys.stderr)
+            break
         hits = data.get("hits", []) if isinstance(data, dict) else []
         if not hits:
             break
@@ -2677,7 +2712,7 @@ def discover_hn_who_is_hiring_jobs(source: dict[str, Any]) -> list[dict[str, Any
                     "role": role,
                     "url": normalized_url,
                     "platform": detect_platform(normalized_url) if apply_url != hn_comment_url(comment_id) else "hn_who_is_hiring",
-                    "location": location,
+                    "location": location or "Unknown (HN)",
                     "posted_at": created_at,
                     "updated_at": created_at,
                     "source": hn_comment_url(comment_id),
@@ -2967,7 +3002,7 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
     if not role:
         return False
     combined = f"{candidate.get('role', '')} {candidate.get('url', '')}".lower()
-    if re.search(r"\b(senior|sr\.?|staff|principal|distinguished|manager|director|lead|head|vp|chief|cto|intern|internship)\b", combined):
+    if re.search(r"\b(senior|sr\.?|staff|principal|distinguished|manager|director|lead|head|vp|chief|cto|faculty|professor|intern|internship)\b", combined):
         return False
     if re.search(r"\b(canada|france|india|united kingdom|uk|london|paris|toronto|vancouver)\b", combined):
         return False
@@ -3010,6 +3045,8 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
         "japan",
         "latam",
         "europe",
+        "worldwide",
+        "global",
         "united kingdom",
     ]
     if any(marker in value for marker in foreign_markers) and not re.search(
@@ -3043,6 +3080,147 @@ def location_allowed(location: str, profile: dict[str, Any]) -> bool:
     return False
 
 
+def hn_review_decision(app: dict[str, Any]) -> tuple[str, int, list[str]]:
+    text = " ".join(str(app.get(key, "")) for key in ["company", "role", "location", "url"]).lower()
+    role_text = " ".join(str(app.get(key, "")) for key in ["company", "role"]).lower()
+    location = str(app.get("location", "")).lower()
+    reasons: list[str] = []
+    score = 0
+
+    explicit_allowed_location = re.search(
+        r"\b(remote \(us|remote us|remote usa|remote \(usa|us only|usa|united states|us-based|us based|seattle|bellevue|washington|"
+        r"san francisco|sf|bay area|palo alto|sunnyvale|san carlos|san jose|california|ca\b)",
+        location,
+    )
+    ca_wa_location = re.search(
+        r"\b(seattle|bellevue|redmond|kirkland|washington|wa\b|san francisco|sf|bay area|palo alto|sunnyvale|san carlos|san jose|california|ca\b)",
+        location,
+    )
+    remote_unspecified = bool(re.search(r"\bremote\b", location)) and not explicit_allowed_location
+    foreign_or_ambiguous = [
+        "eu only",
+        "europe",
+        "emea",
+        "apac",
+        "aus/nz",
+        "australia",
+        "new zealand",
+        "uk",
+        "london",
+        "paris",
+        "berlin",
+        "germany",
+        "poland",
+        "cest",
+        "cet",
+        "canada",
+        "worldwide",
+        "world",
+        "anywhere",
+    ]
+    if any(marker in location for marker in foreign_or_ambiguous) and not explicit_allowed_location:
+        reasons.append("location outside WA/CA/Remote US preference")
+        return "skip", -10, reasons
+    if "unknown (hn)" in location or not location.strip():
+        reasons.append("HN location is unknown")
+        return "review", -1, reasons
+    if explicit_allowed_location:
+        score += 5
+        reasons.append("location matches WA/CA/Remote US")
+    elif remote_unspecified:
+        score += 1
+        reasons.append("remote is unspecified; verify US eligibility")
+    elif not ca_wa_location:
+        reasons.append("location needs manual verification")
+        return "review", 0, reasons
+
+    bad_role_markers = [
+        "seeking work",
+        "seeking freelancer",
+        "freelancer",
+        "faculty",
+        "professor",
+        "developer advocate",
+    ]
+    if any(marker in role_text for marker in bad_role_markers):
+        reasons.append("role type is outside target")
+        return "skip", score - 5, reasons
+    if re.search(r"\b(senior|staff|principal|lead|manager|director|head|vp|chief|cto)\b", role_text):
+        reasons.append("senior/leadership signal")
+        score -= 3
+
+    strong_terms = [
+        "software engineer",
+        "backend",
+        "full stack",
+        "full-stack",
+        "ai engineer",
+        "applied ai",
+        "platform",
+        "infra",
+        "infrastructure",
+        "devops",
+        "sre",
+        "mobile",
+    ]
+    if any(term in text for term in strong_terms):
+        score += 3
+        reasons.append("role matches target engineering keywords")
+    else:
+        reasons.append("role fit needs review")
+        return "review", score, reasons
+
+    return ("keep" if score >= 5 else "review"), score, reasons
+
+
+def command_review_hn(args: argparse.Namespace) -> None:
+    require_person_files()
+    tracker = load_tracker()
+    apps = tracker.get("applications", [])
+    target_statuses = set(args.status or ["found", "needs_review", "scored"])
+    rows: list[tuple[str, int, list[str], dict[str, Any]]] = []
+    for app in apps:
+        if app.get("source_query") != "Ask HN: Who is hiring? (May 2026)":
+            continue
+        if app.get("status") not in target_statuses:
+            continue
+        decision, score, reasons = hn_review_decision(app)
+        rows.append((decision, score, reasons, app))
+
+    order = {"keep": 0, "review": 1, "skip": 2}
+    rows.sort(key=lambda item: (order[item[0]], -item[1], str(item[3].get("company", "")).lower()))
+    print(f"HN review candidates: {len(rows)}")
+    print(f"Keep: {sum(1 for row in rows if row[0] == 'keep')}")
+    print(f"Review: {sum(1 for row in rows if row[0] == 'review')}")
+    print(f"Skip: {sum(1 for row in rows if row[0] == 'skip')}")
+
+    if args.apply:
+        changed = 0
+        for decision, _score, reasons, app in rows:
+            if decision != "skip":
+                continue
+            note = f"Skipped by HN review: {'; '.join(reasons)}."
+            app["status"] = "skipped"
+            existing_notes = str(app.get("notes", "")).strip()
+            app["notes"] = f"{existing_notes}; {note}" if existing_notes else note
+            changed += 1
+        if changed:
+            save_tracker(tracker)
+        print(f"Applied skips: {changed}")
+
+    limit = args.limit
+    for group in ["keep", "review", "skip"]:
+        group_rows = [row for row in rows if row[0] == group]
+        print(f"\n=== {group.upper()} ({len(group_rows)}) ===")
+        for index, (_decision, score, reasons, app) in enumerate(group_rows[:limit], 1):
+            print(f"{index:02d}. [{score:+}] {app.get('company')} — {app.get('role')}")
+            print(f"    loc: {app.get('location') or 'Unknown'}")
+            print(f"    url: {app.get('url')}")
+            print(f"    why: {'; '.join(reasons)}")
+        if len(group_rows) > limit:
+            print(f"    ... {len(group_rows) - limit} more")
+
+
 def empty_discovery_stats() -> dict[str, int]:
     return {
         "discovered": 0,
@@ -3061,7 +3239,7 @@ def process_discovered_candidates(
     args: argparse.Namespace,
     profile: dict[str, Any],
     seen: dict[str, Any],
-    cutoff: dt.datetime,
+    cutoff: dt.datetime | None,
     current_seen_at: str,
 ) -> dict[str, int]:
     stats = empty_discovery_stats()
@@ -3119,7 +3297,7 @@ def process_discovered_candidates(
             if not args.include_unknown_posted_date:
                 stats["skipped_unknown_date"] += 1
                 continue
-        elif posted_at < cutoff:
+        elif cutoff and posted_at < cutoff:
             stats["skipped_old"] += 1
             continue
         if not args.no_role_filter and not discovery_title_matches(candidate, profile):
@@ -4622,7 +4800,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             print(f"Could not discover {source.get('company', source.get('url', 'source'))}: {error}", file=sys.stderr)
             continue
 
-        source_stats = process_discovered_candidates(candidates, args, profile, seen, cutoff, current_seen_at)
+        effective_cutoff = source_discovery_cutoff(source, cutoff)
+        source_report["cutoff"] = effective_cutoff.replace(microsecond=0).isoformat() if effective_cutoff else ""
+        source_stats = process_discovered_candidates(candidates, args, profile, seen, effective_cutoff, current_seen_at)
         source_report["candidates_returned"] = len(candidates)
         source_report["stats"] = source_stats
         source_report["status"] = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
@@ -5388,6 +5568,10 @@ def build_parser() -> argparse.ArgumentParser:
     discovery_summary.add_argument("--latest", action="store_true", help="Summarize the most recent discovery run report.")
     discovery_summary.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
     discovery_summary.add_argument("--limit", type=int, default=8, help="Maximum rows to show in each grouped section.")
+    review_hn = subcommands.add_parser("review-hn", help="Review HN Who is Hiring tracker entries and optionally skip bad fits.")
+    review_hn.add_argument("--apply", action="store_true", help="Mark obvious skip entries as skipped in the tracker.")
+    review_hn.add_argument("--limit", type=int, default=20, help="Maximum rows to print per group.")
+    review_hn.add_argument("--status", action="append", help="Only review applications with this status. Repeatable.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
 
@@ -5409,6 +5593,8 @@ def main() -> None:
         command_audit_sources(args)
     elif args.command == "discovery-summary":
         command_discovery_summary(args)
+    elif args.command == "review-hn":
+        command_review_hn(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":
