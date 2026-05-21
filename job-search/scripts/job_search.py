@@ -2787,6 +2787,119 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
     return json_path
 
 
+def latest_discovery_run_path() -> Path:
+    if not DISCOVERY_RUNS_DIR.exists():
+        raise SystemExit(f"No discovery run reports found at {DISCOVERY_RUNS_DIR}")
+    paths = sorted(DISCOVERY_RUNS_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not paths:
+        raise SystemExit(f"No discovery run reports found at {DISCOVERY_RUNS_DIR}")
+    return paths[0]
+
+
+def discovery_run_path(run_id: str) -> Path:
+    value = str(run_id or "").strip()
+    if not value:
+        return latest_discovery_run_path()
+    path = Path(value).expanduser()
+    if path.exists():
+        return path
+    candidate = DISCOVERY_RUNS_DIR / f"{value.removesuffix('.json')}.json"
+    if candidate.exists():
+        return candidate
+    raise SystemExit(f"Discovery run report not found: {value}")
+
+
+def top_sources_by_filter(sources: list[dict[str, Any]], key: str, limit: int = 8) -> list[dict[str, Any]]:
+    return sorted(
+        [source for source in sources if source.get("stats", {}).get(key, 0) > 0],
+        key=lambda source: source.get("stats", {}).get(key, 0),
+        reverse=True,
+    )[:limit]
+
+
+def print_source_rows(title: str, rows: list[dict[str, Any]], limit: int = 12) -> None:
+    print(f"\n{title}")
+    if not rows:
+        print("- None")
+        return
+    for source in rows[:limit]:
+        stats = source.get("stats", {})
+        details = (
+            f"candidates={source.get('candidates_returned', 0)}, "
+            f"added={stats.get('added', 0)}, existing={stats.get('existing', 0)}, "
+            f"old={stats.get('skipped_old', 0)}, title={stats.get('skipped_title', 0)}, "
+            f"location={stats.get('skipped_location', 0)}"
+        )
+        reason = source.get("error") or source.get("warnings") or ""
+        suffix = f" | {reason.strip()[:160]}" if reason else ""
+        print(f"- {source.get('company', 'Unknown')} ({source.get('platform', '')}): {source.get('status', '')}; {details}{suffix}")
+
+
+def command_discovery_summary(args: argparse.Namespace) -> None:
+    require_person_files()
+    path = latest_discovery_run_path() if args.latest or not args.run_id else discovery_run_path(args.run_id)
+    report = load_json(path)
+    sources = report.get("sources", [])
+    totals = report.get("totals", {})
+    failed = [source for source in sources if source.get("status") == "failed"]
+    partial = [source for source in sources if source.get("status") == "partial_success"]
+    added = [source for source in sources if source.get("stats", {}).get("added", 0) > 0]
+    no_jobs = [source for source in sources if source.get("status") == "searched_no_jobs_returned"]
+    no_new = [source for source in sources if source.get("status") == "searched_no_new_matches"]
+    attempted = int(totals.get("sources_attempted", 0))
+    planned = int(totals.get("sources_planned", 0))
+
+    print(f"Discovery Summary: {report.get('run_id', path.stem)}")
+    print(f"- Report: {path}")
+    print(f"- Started: {report.get('started_at', '')}")
+    print(f"- Finished: {report.get('finished_at', '')}")
+    print(f"- Track: {report.get('track') or 'default'}")
+    print(f"- Cutoff: {report.get('cutoff', '')}")
+    print(f"- Sources attempted: {attempted} / {planned}")
+    print(f"- Failed sources: {len(failed)}")
+    print(f"- Partial success sources: {len(partial)}")
+    print(f"- Candidates returned: {totals.get('discovered', 0)}")
+    print(f"- Added: {totals.get('added', 0)}")
+    print(f"- Existing: {totals.get('existing', 0)}")
+    print(
+        "- Filtered: "
+        f"old={totals.get('skipped_old', 0)}, "
+        f"unknown_date={totals.get('skipped_unknown_date', 0)}, "
+        f"title={totals.get('skipped_title', 0)}, "
+        f"location={totals.get('skipped_location', 0)}"
+    )
+
+    if planned and attempted < planned:
+        print(f"\nCoverage warning: {planned - attempted} configured sources were not attempted.")
+    elif planned:
+        print("\nCoverage: every selected source was attempted.")
+
+    print_source_rows("Failures", failed + partial)
+    print_source_rows("Sources With New Jobs Added", sorted(added, key=lambda s: s.get("stats", {}).get("added", 0), reverse=True))
+    print_source_rows("No Jobs Returned", no_jobs)
+
+    print("\nTop Filter Reasons")
+    old_rows = top_sources_by_filter(sources, "skipped_old", args.limit)
+    title_rows = top_sources_by_filter(sources, "skipped_title", args.limit)
+    location_rows = top_sources_by_filter(sources, "skipped_location", args.limit)
+    unknown_rows = top_sources_by_filter(sources, "skipped_unknown_date", args.limit)
+    print_source_rows("Old Postings", old_rows, args.limit)
+    print_source_rows("Title Mismatch", title_rows, args.limit)
+    print_source_rows("Location Mismatch", location_rows, args.limit)
+    print_source_rows("Unknown Posted Date", unknown_rows, args.limit)
+
+    print_source_rows("Sample Searched With No New Matches", no_new, args.limit)
+
+    if failed:
+        print("\nRecommendation: fix failed sources first; these are crawler or platform issues.")
+    elif totals.get("added", 0):
+        print("\nRecommendation: review newly added jobs and prepare applications for the highest scores.")
+    elif totals.get("discovered", 0):
+        print("\nRecommendation: search ran successfully; most candidates were already seen or filtered out.")
+    else:
+        print("\nRecommendation: if this was a broad run, expand or repair sources because no candidates were returned.")
+
+
 def fetch_ashby_job_text(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -4831,6 +4944,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--send-outlook", action="store_true")
 
     subcommands.add_parser("audit-sources", help="Summarize configured sources by platform and confidence.")
+    discovery_summary = subcommands.add_parser("discovery-summary", help="Summarize a discovery run report.")
+    discovery_summary.add_argument("--latest", action="store_true", help="Summarize the most recent discovery run report.")
+    discovery_summary.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
+    discovery_summary.add_argument("--limit", type=int, default=8, help="Maximum rows to show in each grouped section.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
 
@@ -4850,6 +4967,8 @@ def main() -> None:
         command_classify_sources(args)
     elif args.command == "audit-sources":
         command_audit_sources(args)
+    elif args.command == "discovery-summary":
+        command_discovery_summary(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":
