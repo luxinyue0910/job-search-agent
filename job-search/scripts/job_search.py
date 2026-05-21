@@ -437,6 +437,8 @@ def detect_platform(url: str) -> str:
         return "smartrecruiters"
     if "icims.com" in host:
         return "icims"
+    if host == "careers.bankofamerica.com":
+        return "boa_careers"
     if ("oraclecloud.com" in host and ("/candidateexperience/" in path or "/cx_" in path)) or "/sites/cx_" in path:
         return "oracle_cx"
     if "jobvite.com" in host:
@@ -2226,11 +2228,21 @@ def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     for keyword in [str(item) for item in keywords if str(item).strip()]:
         for page_index in range(max_pages):
-            params = {
-                "onlyData": "true",
+            find_params = {
+                "siteNumber": site_number,
                 "limit": str(limit),
                 "offset": str(page_index * limit),
-                "finder": f"KeywordSearch;keyword={keyword},siteNumber={site_number}",
+                "keyword": keyword,
+            }
+            finder = "findReqs;" + ",".join(f"{key}={value}" for key, value in find_params.items())
+            params = {
+                "onlyData": "true",
+                "expand": (
+                    "requisitionList.workLocation,requisitionList.otherWorkLocations,"
+                    "requisitionList.secondaryLocations,flexFieldsFacet.values,"
+                    "requisitionList.requisitionFlexFields"
+                ),
+                "finder": finder,
             }
             api_url = f"{endpoint}?{urllib.parse.urlencode(params)}"
             try:
@@ -2238,7 +2250,12 @@ def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             except Exception as error:  # noqa: BLE001
                 print(f"Could not fetch Oracle CX API for {company}: {error}", file=sys.stderr)
                 break
-            jobs = data.get("items", []) if isinstance(data, dict) else []
+            items = data.get("items", []) if isinstance(data, dict) else []
+            jobs = []
+            if items and isinstance(items[0], dict) and isinstance(items[0].get("requisitionList"), list):
+                jobs = items[0].get("requisitionList", [])
+            elif isinstance(items, list):
+                jobs = items
             if not jobs:
                 break
             for job in jobs:
@@ -2266,6 +2283,60 @@ def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "notes": f"Oracle Candidate Experience adapter; site_number={site_number}",
                 }
             if len(jobs) < limit:
+                break
+    return list(candidates.values())
+
+
+def discover_boa_careers_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Bank of America")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    max_pages = int(source.get("max_pages", 1))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        slug = urllib.parse.quote(keyword.lower().replace(" ", "-"))
+        for page_index in range(max_pages):
+            page_suffix = f"/{page_index + 1}" if page_index else ""
+            url = f"https://careers.bankofamerica.com/en-us/job-search/q-{slug}{page_suffix}"
+            try:
+                raw = fetch_url(url, timeout=20)
+            except urllib.error.HTTPError as error:
+                if error.code == 404 and page_index > 0:
+                    break
+                print(f"Could not fetch Bank of America careers page for {keyword}: {error}", file=sys.stderr)
+                break
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Bank of America careers page for {keyword}: {error}", file=sys.stderr)
+                break
+            matches = list(re.finditer(r'href=["\'](?P<href>[^"\']*/job-detail/[^"\']+)["\'][^>]*>(?P<title>.*?)</a>', raw, flags=re.I | re.S))
+            if not matches:
+                break
+            for index, match in enumerate(matches):
+                next_start = matches[index + 1].start() if index + 1 < len(matches) else min(len(raw), match.end() + 2500)
+                block = html_to_text(raw[match.start():next_start])
+                detail_url = normalize_job_url(urllib.parse.urljoin(url, html.unescape(match.group("href"))))
+                title = html_to_text(match.group("title")).strip() or infer_role_from_url(detail_url)
+                location_match = re.search(r"\bLocation\s+(.+?)(?:\s+Date\s+Posted|\s+Travel:|\s+Shift:|$)", block, flags=re.I | re.S)
+                date_match = re.search(r"\bDate\s+Posted\s+(\d{1,2}/\d{1,2}/\d{4})", block, flags=re.I)
+                location = re.sub(r"\s+", " ", location_match.group(1)).strip() if location_match else ""
+                posted_at = ""
+                if date_match:
+                    with contextlib.suppress(ValueError):
+                        posted_at = dt.datetime.strptime(date_match.group(1), "%m/%d/%Y").replace(tzinfo=dt.timezone.utc).isoformat()
+                candidates[detail_url] = {
+                    "company": company,
+                    "role": title,
+                    "url": detail_url,
+                    "platform": "boa_careers",
+                    "location": location,
+                    "posted_at": posted_at,
+                    "updated_at": "",
+                    "source": source.get("url", "https://careers.bankofamerica.com/en-us/job-search"),
+                    "source_query": keyword,
+                    "notes": "Bank of America careers page adapter.",
+                }
+            if len(matches) < int(source.get("page_size", 20)):
                 break
     return list(candidates.values())
 
@@ -2931,6 +3002,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_icims_jobs(source)
     if platform == "oracle_cx":
         return discover_oracle_cx_jobs(source)
+    if platform == "boa_careers":
+        return discover_boa_careers_jobs(source)
     if platform == "jobvite":
         return discover_jobvite_jobs(source)
     if platform == "workable":
