@@ -30,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -425,6 +426,8 @@ def detect_platform(url: str) -> str:
         return "yc_jobs"
     if "news.ycombinator.com" in host or "hn.algolia.com" in host:
         return "hn_who_is_hiring"
+    if path.endswith(".xml") or "/services/rss/" in path:
+        return "rss"
     if "jibecdn.com" in host or "jibeapply.com" in host or "careers.costco.com" in host:
         return "jibe"
     return "custom"
@@ -2724,6 +2727,66 @@ def discover_hn_who_is_hiring_jobs(source: dict[str, Any]) -> list[dict[str, Any
     return list(candidates.values())
 
 
+def rss_feed_url(source: dict[str, Any]) -> str:
+    return str(source.get("feed_url") or source.get("url") or "").strip()
+
+
+def parse_rss_title(title: str) -> tuple[str, str]:
+    cleaned = title.strip()
+    match = re.search(r"\(([^()]+)\)\s*$", cleaned)
+    if not match:
+        return cleaned, ""
+    location = match.group(1).strip()
+    role = cleaned[: match.start()].strip()
+    return role or cleaned, location
+
+
+def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    feed_url = rss_feed_url(source)
+    if not feed_url:
+        return []
+    try:
+        raw = fetch_url(feed_url, timeout=30)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch RSS feed for {company}: {error}", file=sys.stderr)
+        return []
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as error:
+        print(f"Could not parse RSS feed for {company}: {error}", file=sys.stderr)
+        return []
+    channel = root.find("channel")
+    items = channel.findall("item") if channel is not None else root.findall(".//item")
+    candidates: dict[str, dict[str, Any]] = {}
+    for item in items:
+        title = str(item.findtext("title") or "").strip()
+        link = str(item.findtext("link") or item.findtext("guid") or "").strip()
+        if not title or not link:
+            continue
+        role, location = parse_rss_title(title)
+        description = html_to_text(str(item.findtext("description") or ""))
+        url = normalize_job_url(link)
+        job_id_match = re.search(r"/(\d+)/(?:$|[?#])", link)
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": source.get("target_platform") or detect_platform(url),
+            "location": location,
+            "posted_at": normalize_datetime(item.findtext("pubDate")),
+            "updated_at": "",
+            "source": source.get("url", feed_url),
+            "source_query": source.get("category", ""),
+            "freshness_source": "rss_pubDate" if item.findtext("pubDate") else "unknown",
+            "job_number": job_id_match.group(1) if job_id_match else "",
+            "external_job_id": job_id_match.group(1) if job_id_match else normalize_job_url(str(item.findtext("guid") or link)),
+            "_jd_text": "\n\n".join(block for block in [role, location, description] if block),
+            "notes": f"RSS feed adapter; feed={feed_url}",
+        }
+    return list(candidates.values())
+
+
 def jibe_api_url(source: dict[str, Any]) -> str:
     if source.get("api_url"):
         return str(source["api_url"]).strip()
@@ -2855,6 +2918,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_yc_job_board_jobs(source)
     if platform == "hn_who_is_hiring":
         return discover_hn_who_is_hiring_jobs(source)
+    if platform == "rss":
+        return discover_rss_jobs(source)
     if platform == "jibe":
         return discover_jibe_jobs(source)
     return find_links_for_source(source)
@@ -4547,6 +4612,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "yc_jobs",
         "yc_job_board",
         "hn_who_is_hiring",
+        "rss",
         "jibe",
     }
     if direct_platform in directly_classifiable:
@@ -4636,6 +4702,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company or "Y Combinator Jobs", "platform": "yc_job_board", "url": detected_url, "role": "eng"}
     elif platform == "hn_who_is_hiring":
         result["source"] = {"company": company or "Hacker News Who is Hiring", "platform": "hn_who_is_hiring", "url": detected_url}
+    elif platform == "rss":
+        result["source"] = {"company": company, "platform": "rss", "url": detected_url, "feed_url": detected_url}
     elif platform == "jibe":
         result["source"] = {"company": company, "platform": "jibe", "url": detected_url, "api_url": jibe_api_url({"url": detected_url}), "keywords": DEFAULT_WORKDAY_KEYWORDS}
     return result
@@ -4699,6 +4767,7 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         "yc_jobs",
         "yc_job_board",
         "hn_who_is_hiring",
+        "rss",
         "jibe",
     }
     direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
