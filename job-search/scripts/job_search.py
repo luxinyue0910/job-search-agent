@@ -5625,13 +5625,105 @@ def command_find_jobs(args: argparse.Namespace) -> None:
     print(f"Found {new_count} new jobs. {review_count} jobs are ready for scoring.")
 
 
+def source_report_base(source: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "company": source.get("company", ""),
+        "platform": source_platform(source),
+        "url": source.get("url", ""),
+        "status": "started",
+        "started_at": now_utc_iso(),
+        "finished_at": "",
+        "duration_seconds": 0,
+        "candidates_returned": 0,
+        "stats": empty_discovery_stats(),
+        "warnings": "",
+        "error": "",
+    }
+
+
+def source_candidates_subprocess(
+    source_index: int,
+    args: argparse.Namespace,
+    timeout_seconds: float | None,
+) -> tuple[list[dict[str, Any]], str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--person",
+        getattr(args, "person", PERSON),
+        "discover-source-candidates",
+        "--source-index",
+        str(source_index),
+    ]
+    if getattr(args, "track", None):
+        command.extend(["--track", str(args.track)])
+
+    timeout = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise SourceTimeout(f"source subprocess exceeded {timeout_seconds:g}s") from error
+
+    if completed.returncode != 0:
+        output = "\n".join(part for part in [completed.stderr.strip(), completed.stdout.strip()] if part)
+        raise RuntimeError(output or f"source subprocess exited with {completed.returncode}")
+
+    payload_line = ""
+    for line in reversed(completed.stdout.splitlines()):
+        if line.strip().startswith("{"):
+            payload_line = line.strip()
+            break
+    if not payload_line:
+        raise RuntimeError((completed.stderr or completed.stdout or "source subprocess produced no JSON").strip())
+    try:
+        payload = json.loads(payload_line)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"source subprocess produced invalid JSON: {error}") from error
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise RuntimeError("source subprocess returned non-list candidates")
+    warnings = "\n".join(part for part in [payload.get("warnings", ""), completed.stderr.strip()] if str(part).strip())
+    return candidates, warnings
+
+
+def command_discover_source_candidates(args: argparse.Namespace) -> None:
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    try:
+        source = sources[int(args.source_index)]
+    except (IndexError, ValueError) as error:
+        raise SystemExit(f"Invalid source index: {args.source_index}") from error
+    track = load_track(getattr(args, "track", None))
+    source = source_for_track(source, str(track.get("id", "")).strip())
+    warning_buffer = io.StringIO()
+    with contextlib.redirect_stderr(warning_buffer):
+        candidates = discover_source_jobs(source)
+    print(
+        json.dumps(
+            {
+                "company": source.get("company", ""),
+                "platform": source_platform(source),
+                "url": source.get("url", ""),
+                "warnings": warning_buffer.getvalue().strip(),
+                "candidates": candidates,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+
+
 def command_discover_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     profile = profile_for_track(getattr(args, "track", None))
-    sources = load_json(SOURCES_PATH).get("sources", [])
+    all_sources = load_json(SOURCES_PATH).get("sources", [])
     source_company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
+    source_pairs = list(enumerate(all_sources))
     if source_company_filters:
-        sources = [source for source in sources if str(source.get("company", "")).lower() in source_company_filters]
+        source_pairs = [
+            (index, source)
+            for index, source in source_pairs
+            if str(source.get("company", "")).lower() in source_company_filters
+        ]
     seen = load_seen_jobs()
     cutoff = discovery_cutoff(args)
     stats = empty_discovery_stats()
@@ -5648,7 +5740,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
         "totals": {
-            "sources_planned": len(sources),
+            "sources_planned": len(source_pairs),
             "sources_attempted": 0,
             "failed_sources": 0,
             **empty_discovery_stats(),
@@ -5657,29 +5749,20 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     }
 
     track_id = profile.get("_track", {}).get("id")
-    for source in sources:
+    timeout_seconds = float(getattr(args, "source_timeout_seconds", 45) or 0)
+    for ordinal, (source_index, source) in enumerate(source_pairs, 1):
         source = source_for_track(source, track_id)
         source_started = time.time()
-        source_report = {
-            "company": source.get("company", ""),
-            "platform": source_platform(source),
-            "url": source.get("url", ""),
-            "status": "started",
-            "started_at": now_utc_iso(),
-            "finished_at": "",
-            "duration_seconds": 0,
-            "candidates_returned": 0,
-            "stats": empty_discovery_stats(),
-            "warnings": "",
-            "error": "",
-        }
+        source_report = source_report_base(source)
+        print(
+            f"[{ordinal}/{len(source_pairs)}] {source.get('company', 'Unknown Company')} "
+            f"({source_platform(source)}) ...",
+            flush=True,
+        )
         report["totals"]["sources_attempted"] += 1
         try:
-            warning_buffer = io.StringIO()
-            with contextlib.redirect_stderr(warning_buffer):
-                with source_timeout(float(getattr(args, "source_timeout_seconds", 45) or 0)):
-                    candidates = discover_source_jobs(source)
-            source_report["warnings"] = warning_buffer.getvalue().strip()
+            candidates, warnings = source_candidates_subprocess(source_index, args, timeout_seconds)
+            source_report["warnings"] = warnings.strip()
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.
             failed_sources += 1
             source_report["status"] = "failed"
@@ -5687,7 +5770,11 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["finished_at"] = now_utc_iso()
             source_report["duration_seconds"] = round(time.time() - source_started, 2)
             report["sources"].append(source_report)
-            print(f"Could not discover {source.get('company', source.get('url', 'source'))}: {error}", file=sys.stderr)
+            print(
+                f"    failed after {source_report['duration_seconds']}s: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
 
         effective_cutoff = source_discovery_cutoff(source, cutoff)
@@ -5700,6 +5787,14 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         source_report["duration_seconds"] = round(time.time() - source_started, 2)
         report["sources"].append(source_report)
         add_stats(stats, source_stats)
+        print(
+            f"    {source_report['status']}: candidates={len(candidates)} "
+            f"added={source_stats['added']} existing={source_stats['existing']} "
+            f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
+            f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
+            f"({source_report['duration_seconds']}s)",
+            flush=True,
+        )
 
     save_seen_jobs(seen)
     report["finished_at"] = now_utc_iso()
@@ -6365,6 +6460,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only run discovery for a specific source company. Repeat for multiple companies.",
     )
 
+    discover_source = subcommands.add_parser("discover-source-candidates", help=argparse.SUPPRESS)
+    discover_source.add_argument("--source-index", required=True)
+    discover_source.add_argument("--track", help=argparse.SUPPRESS)
+
     classify = subcommands.add_parser("classify-sources", help="Detect direct ATS platforms behind configured sources.")
     classify.add_argument("--apply", action="store_true", help="Rewrite detected sources in sources.json.")
     classify.add_argument("--custom-only", action="store_true", help="Only classify sources currently marked custom.")
@@ -6483,6 +6582,8 @@ def main() -> None:
         command_find_jobs(args)
     elif args.command == "discover-jobs":
         command_discover_jobs(args)
+    elif args.command == "discover-source-candidates":
+        command_discover_source_candidates(args)
     elif args.command == "classify-sources":
         command_classify_sources(args)
     elif args.command == "audit-sources":
