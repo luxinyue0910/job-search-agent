@@ -411,6 +411,12 @@ def detect_platform(url: str) -> str:
         return "gem"
     if "myworkdayjobs.com" in host or "myworkdaysite.com" in host:
         return "workday"
+    if "joinbytedance.com" in host or "jobs.bytedance.com" in host:
+        return "bytedance_jobs"
+    if "careers.shein.com" in host:
+        return "shein_jobs"
+    if "we.dji.com" in host:
+        return "dji_jobs"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -1038,6 +1044,250 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "notes": "",
                 }
             if len(postings) < limit:
+                break
+    return list(candidates.values())
+
+
+def bytedance_location_text(city_info: Any) -> str:
+    parts: list[str] = []
+    current = city_info if isinstance(city_info, dict) else None
+    while current:
+        name = str(current.get("en_name") or current.get("i18n_name") or current.get("name") or "").strip()
+        if name:
+            parts.append(name)
+        parent = current.get("parent")
+        current = parent if isinstance(parent, dict) else None
+    return ", ".join(parts)
+
+
+def discover_bytedance_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "ByteDance / TikTok")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    endpoint = str(source.get("api_url") or "https://jobs.bytedance.com/api/v1/public/supplier/search/job/posts")
+    limit = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    candidates: dict[str, dict[str, Any]] = {}
+    headers = {
+        "Content-Type": "application/json",
+        "accept-language": "en-US",
+        "website-path": str(source.get("website_path") or "en"),
+        "origin": "https://joinbytedance.com",
+    }
+    if source.get("x_tt_env", "boe_epam_api"):
+        headers["x-tt-env"] = str(source.get("x_tt_env", "boe_epam_api"))
+    opener = urllib.request.build_opener()
+
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            payload = {
+                "keyword": keyword,
+                "limit": limit,
+                "offset": page_index * limit,
+                "recruitment_id_list": source.get("recruitment_id_list", []),
+                "subject_id_list": source.get("subject_id_list", []),
+                "job_category_id_list": source.get("job_category_id_list", []),
+                "location_code_list": source.get("location_code_list", []),
+                "tag_id_list": source.get("tag_id_list", []),
+            }
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with opener.open(request, timeout=20) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch ByteDance jobs API for {company}: {error}", file=sys.stderr)
+                break
+            if data.get("code") not in (0, "0", None):
+                print(f"Could not fetch ByteDance jobs API for {company}: {data.get('message') or data}", file=sys.stderr)
+                break
+            body = data.get("data") or {}
+            jobs = body.get("job_post_list") or body.get("jobs") or []
+            if not jobs:
+                break
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("id") or "").strip()
+                if not job_id:
+                    continue
+                url = normalize_job_url(f"https://joinbytedance.com/search/{urllib.parse.quote(job_id)}")
+                description = "\n\n".join(
+                    item for item in [str(job.get("description") or "").strip(), str(job.get("requirement") or "").strip()] if item
+                )
+                candidates[url] = {
+                    "company": company,
+                    "role": str(job.get("title") or "").strip(),
+                    "url": url,
+                    "platform": "bytedance_jobs",
+                    "location": bytedance_location_text(job.get("city_info")),
+                    "posted_at": normalize_datetime(job.get("publish_time") or job.get("created_at") or job.get("updated_at")),
+                    "updated_at": normalize_datetime(job.get("update_time") or job.get("updated_at")),
+                    "source": source.get("url", "https://joinbytedance.com/search"),
+                    "source_query": keyword,
+                    "external_job_id": job_id,
+                    "job_number": str(job.get("code") or job_id),
+                    "description": description,
+                    "notes": "ByteDance/TikTok official careers API adapter; API currently does not always expose posted_at.",
+                    "freshness_source": "official_posted_at" if job.get("publish_time") or job.get("created_at") else "unknown",
+                }
+            total = int(body.get("count") or body.get("total") or 0)
+            if len(jobs) < limit or (total and (page_index + 1) * limit >= total):
+                break
+    return list(candidates.values())
+
+
+def shein_location_text(job: dict[str, Any]) -> str:
+    city_infos = job.get("cityInfos") if isinstance(job.get("cityInfos"), list) else []
+    cities = [str(item.get("cityName") or "").strip() for item in city_infos if isinstance(item, dict)]
+    parts = [item for item in cities if item]
+    country = str(job.get("countryName") or job.get("countryId") or "").strip()
+    if country:
+        parts.append(country)
+    return ", ".join(dict.fromkeys(parts))
+
+
+def discover_shein_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "SHEIN")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    endpoint = str(source.get("api_url") or "https://careers.shein.com/api/v1/open/grw/front/jobPage")
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            payload = {
+                "current": page,
+                "size": page_size,
+                "key": keyword,
+                "langCode": str(source.get("lang_code") or "EN"),
+            }
+            try:
+                data = fetch_json_post(endpoint, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch SHEIN careers API for {company}: {error}", file=sys.stderr)
+                break
+            if data.get("code") not in (0, "0", None):
+                print(f"Could not fetch SHEIN careers API for {company}: {data.get('msg') or data}", file=sys.stderr)
+                break
+            body = data.get("info") or data.get("data") or {}
+            records = body.get("records") or []
+            if not records:
+                break
+            for job in records:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("jobId") or "").strip()
+                role = str(job.get("jobTitle") or "").strip()
+                if not job_id or not role:
+                    continue
+                detail_url = str(job.get("jobDetailUrl") or "").strip()
+                url = detail_url or f"https://careers.shein.com/Recruit?id={urllib.parse.quote(job_id)}"
+                url = normalize_job_url(url)
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "shein_jobs",
+                    "location": shein_location_text(job),
+                    "posted_at": normalize_datetime(job.get("releaseDate")),
+                    "updated_at": normalize_datetime(job.get("updateDate") or job.get("releaseDate")),
+                    "source": source.get("url", "https://careers.shein.com/All-Jobs"),
+                    "source_query": keyword,
+                    "external_job_id": job_id,
+                    "job_number": job_id,
+                    "description": html_to_text(str(job.get("description") or "")),
+                    "notes": "SHEIN official careers API adapter.",
+                    "freshness_source": "official_posted_at" if job.get("releaseDate") else "unknown",
+                }
+            total = int(body.get("total") or 0)
+            if len(records) < page_size or (total and page * page_size >= total):
+                break
+    return list(candidates.values())
+
+
+def dji_location_text(job: dict[str, Any]) -> str:
+    parts = [
+        str(job.get("locationEnDescription") or job.get("locationDescription") or "").strip(),
+        str(job.get("positionEnRegion") or job.get("positionRegion") or "").strip(),
+    ]
+    return ", ".join(dict.fromkeys(part for part in parts if part))
+
+
+def discover_dji_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "DJI")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    endpoint = str(source.get("api_url") or "https://we.dji.com/hire_front/api/common/position/queryUsingAndOldPositionVoList")
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            payload = {
+                "showStatus": str(source.get("show_status") or "en"),
+                "keyWord": keyword,
+                "locationList": source.get("location_list", [None]),
+                "currentPage": page,
+                "pageSize": page_size,
+            }
+            try:
+                data = fetch_json_post(endpoint, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch DJI careers API for {company}: {error}", file=sys.stderr)
+                break
+            if data.get("success") is False:
+                print(f"Could not fetch DJI careers API for {company}: {data.get('message') or data}", file=sys.stderr)
+                break
+            body = data.get("data") or {}
+            records = body.get("datas") or body.get("records") or []
+            if not records:
+                break
+            for job in records:
+                if not isinstance(job, dict):
+                    continue
+                position_id = str(job.get("positionId") or job.get("jobId") or "").strip()
+                role = str(job.get("jobTitle") or "").strip()
+                if not position_id or not role:
+                    continue
+                url = normalize_job_url(f"https://we.dji.com/detail_en.html?positionId={urllib.parse.quote(position_id)}")
+                description = "\n\n".join(
+                    item
+                    for item in [
+                        str(job.get("duty") or "").strip(),
+                        str(job.get("requirement") or "").strip(),
+                    ]
+                    if item
+                )
+                posted_raw = job.get("postdate") or job.get("createdate") or job.get("approveTime")
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "dji_jobs",
+                    "location": dji_location_text(job),
+                    "posted_at": normalize_datetime(posted_raw),
+                    "updated_at": normalize_datetime(job.get("modifiedate") or job.get("approveTime") or posted_raw),
+                    "source": source.get("url", "https://we.dji.com/jobs_en.html"),
+                    "source_query": keyword,
+                    "external_job_id": position_id,
+                    "job_number": position_id,
+                    "description": html_to_text(description),
+                    "notes": "DJI official careers API adapter.",
+                    "freshness_source": "official_posted_at" if posted_raw else "unknown",
+                }
+            total = int(body.get("totalCount") or body.get("total") or 0)
+            if len(records) < page_size or (total and page * page_size >= total):
                 break
     return list(candidates.values())
 
@@ -2972,6 +3222,12 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_gem_jobs(source)
     if platform == "workday":
         return discover_workday_jobs(source)
+    if platform == "bytedance_jobs":
+        return discover_bytedance_jobs(source)
+    if platform == "shein_jobs":
+        return discover_shein_jobs(source)
+    if platform == "dji_jobs":
+        return discover_dji_jobs(source)
     if platform == "phenom":
         return discover_phenom_jobs(source)
     if platform == "m_cloud":
