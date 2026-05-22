@@ -409,6 +409,8 @@ def detect_platform(url: str) -> str:
         return "ashby"
     if "jobs.gem.com" in host:
         return "gem"
+    if "ats.rippling.com" in host:
+        return "rippling_jobs"
     if "myworkdayjobs.com" in host or "myworkdaysite.com" in host:
         return "workday"
     if "joinbytedance.com" in host or "jobs.bytedance.com" in host:
@@ -942,6 +944,102 @@ def discover_gem_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return candidates
+
+
+def rippling_slug_from_source(source: dict[str, Any]) -> str:
+    if source.get("slug"):
+        return str(source["slug"]).strip("/")
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else ""
+
+
+def rippling_next_data(raw_html: str) -> dict[str, Any]:
+    match = re.search(r'<script\s+id=["\']__NEXT_DATA__["\']\s+type=["\']application/json["\']>(.*?)</script>', raw_html, flags=re.I | re.S)
+    if not match:
+        return {}
+    try:
+        data = json.loads(html.unescape(match.group(1)))
+    except json.JSONDecodeError:
+        return {}
+    return data.get("props", {}).get("pageProps", {}).get("apiData", {}) if isinstance(data, dict) else {}
+
+
+def rippling_detail_job(source: dict[str, Any], slug: str, job_id: str, summary: dict[str, str]) -> dict[str, Any] | None:
+    url = normalize_job_url(f"https://ats.rippling.com/{urllib.parse.quote(slug)}/jobs/{urllib.parse.quote(job_id)}")
+    try:
+        raw = fetch_url(url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Rippling job detail for {source.get('company', slug)}: {error}", file=sys.stderr)
+        return None
+    api_data = rippling_next_data(raw)
+    job_post = api_data.get("jobPost") if isinstance(api_data.get("jobPost"), dict) else {}
+    department = api_data.get("department") if isinstance(api_data.get("department"), dict) else {}
+    descriptions = job_post.get("description") if isinstance(job_post.get("description"), dict) else {}
+    description = "\n\n".join(html_to_text(str(value)) for value in descriptions.values() if str(value).strip())
+    locations = api_data.get("workLocations") if isinstance(api_data.get("workLocations"), list) else []
+    location = ", ".join(str(item).strip() for item in locations if str(item).strip()) or summary.get("location", "")
+    role = str(job_post.get("name") or summary.get("role") or infer_role_from_url(url)).strip()
+    posted_raw = job_post.get("postedAt") or job_post.get("createdAt")
+    return {
+        "company": source.get("company", "Unknown Company"),
+        "role": role,
+        "url": url,
+        "platform": "rippling_jobs",
+        "location": location,
+        "posted_at": normalize_datetime(posted_raw),
+        "updated_at": normalize_datetime(job_post.get("updatedAt")),
+        "source": source.get("url", f"https://ats.rippling.com/{slug}/jobs"),
+        "source_query": "",
+        "external_job_id": str(job_post.get("uuid") or job_id),
+        "job_number": str(job_post.get("uuid") or job_id),
+        "description": description,
+        "_jd_text": "\n\n".join(block for block in [role, location, description] if block),
+        "department": str(department.get("name") or summary.get("department") or ""),
+        "notes": "Rippling public job board adapter. Rippling does not always expose posted_at in the rendered payload, so first_seen may be the freshness fallback.",
+        "freshness_source": "official_posted_at" if posted_raw else "unknown",
+    }
+
+
+def discover_rippling_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    slug = rippling_slug_from_source(source)
+    if not slug:
+        return find_links_for_source(source)
+    board_url = str(source.get("url") or f"https://ats.rippling.com/{slug}/jobs")
+    if "ats.rippling.com" not in urllib.parse.urlparse(board_url).netloc.lower():
+        board_url = f"https://ats.rippling.com/{slug}/jobs"
+    try:
+        raw = fetch_url(board_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Rippling board for {source.get('company', slug)}: {error}", file=sys.stderr)
+        return []
+
+    summaries: dict[str, dict[str, str]] = {}
+    pattern = re.compile(
+        rf'<a[^>]+href=["\']/(?P<path>{re.escape(slug)}/jobs/(?P<id>[0-9a-f-]{{36}}))["\'][^>]*>(?P<title>.*?)</a>'
+        r'(?P<body>.*?)(?=<a[^>]+href=["\']/[^/]+/jobs/[0-9a-f-]{36}["\']|</script>)',
+        flags=re.I | re.S,
+    )
+    for match in pattern.finditer(raw):
+        job_id = match.group("id")
+        body = match.group("body")
+        metadata = re.findall(r'<p[^>]*class=["\'][^"\']*css-kcy3vt[^"\']*["\'][^>]*>(.*?)</p>', body, flags=re.I | re.S)
+        summaries[job_id] = {
+            "role": html_to_text(match.group("title")),
+            "department": html_to_text(metadata[0]) if metadata else "",
+            "location": html_to_text(metadata[-1]) if metadata else "",
+        }
+
+    if not summaries:
+        for job_id in sorted(set(re.findall(rf'/{re.escape(slug)}/jobs/([0-9a-f-]{{36}})', raw, flags=re.I))):
+            summaries[job_id] = {"role": "", "department": "", "location": ""}
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for job_id, summary in summaries.items():
+        detail = rippling_detail_job(source, slug, job_id, summary)
+        if detail:
+            candidates[detail["url"]] = detail
+    return list(candidates.values())
 
 
 def parse_workday_posted_on(value: Any, now: dt.datetime | None = None) -> str:
@@ -3409,6 +3507,34 @@ def parse_rss_title(title: str) -> tuple[str, str]:
     return role or cleaned, location
 
 
+def rss_block_text(block: str, tag: str) -> str:
+    pattern = rf"<{re.escape(tag)}(?:\s[^>]*)?>(.*?)</{re.escape(tag)}>"
+    match = re.search(pattern, block, flags=re.I | re.S)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    cdata = re.fullmatch(r"<!\[CDATA\[(.*)\]\]>", value, flags=re.S)
+    if cdata:
+        value = cdata.group(1)
+    return html.unescape(value).strip()
+
+
+def rss_items_from_regex(raw: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for block in re.findall(r"<item\b[^>]*>(.*?)</item>", raw, flags=re.I | re.S):
+        description = rss_block_text(block, "description") or rss_block_text(block, "content:encoded")
+        items.append(
+            {
+                "title": rss_block_text(block, "title"),
+                "link": rss_block_text(block, "link") or rss_block_text(block, "guid"),
+                "guid": rss_block_text(block, "guid"),
+                "description": description,
+                "pubDate": rss_block_text(block, "pubDate"),
+            }
+        )
+    return items
+
+
 def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     feed_url = rss_feed_url(source)
@@ -3421,19 +3547,29 @@ def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     try:
         root = ET.fromstring(raw)
-    except ET.ParseError as error:
-        print(f"Could not parse RSS feed for {company}: {error}", file=sys.stderr)
-        return []
-    channel = root.find("channel")
-    items = channel.findall("item") if channel is not None else root.findall(".//item")
+        channel = root.find("channel")
+        items: list[Any] = channel.findall("item") if channel is not None else root.findall(".//item")
+    except (ET.ParseError, ImportError) as error:
+        print(f"Could not parse RSS feed for {company} with XML parser, using fallback: {error}", file=sys.stderr)
+        items = rss_items_from_regex(raw)
     candidates: dict[str, dict[str, Any]] = {}
     for item in items:
-        title = str(item.findtext("title") or "").strip()
-        link = str(item.findtext("link") or item.findtext("guid") or "").strip()
+        if isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            link = str(item.get("link") or item.get("guid") or "").strip()
+            description_raw = str(item.get("description") or "")
+            pub_date = str(item.get("pubDate") or "")
+            guid = str(item.get("guid") or link)
+        else:
+            title = str(item.findtext("title") or "").strip()
+            link = str(item.findtext("link") or item.findtext("guid") or "").strip()
+            description_raw = str(item.findtext("description") or "")
+            pub_date = str(item.findtext("pubDate") or "")
+            guid = str(item.findtext("guid") or link)
         if not title or not link:
             continue
         role, location = parse_rss_title(title)
-        description = html_to_text(str(item.findtext("description") or ""))
+        description = html_to_text(description_raw)
         url = normalize_job_url(link)
         job_id_match = re.search(r"/(\d+)/(?:$|[?#])", link)
         candidates[url] = {
@@ -3442,13 +3578,13 @@ def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             "url": url,
             "platform": source.get("target_platform") or detect_platform(url),
             "location": location,
-            "posted_at": normalize_datetime(item.findtext("pubDate")),
+            "posted_at": normalize_datetime(pub_date),
             "updated_at": "",
             "source": source.get("url", feed_url),
             "source_query": source.get("category", ""),
-            "freshness_source": "rss_pubDate" if item.findtext("pubDate") else "unknown",
+            "freshness_source": "rss_pubDate" if pub_date else "unknown",
             "job_number": job_id_match.group(1) if job_id_match else "",
-            "external_job_id": job_id_match.group(1) if job_id_match else normalize_job_url(str(item.findtext("guid") or link)),
+            "external_job_id": job_id_match.group(1) if job_id_match else normalize_job_url(guid),
             "_jd_text": "\n\n".join(block for block in [role, location, description] if block),
             "notes": f"RSS feed adapter; feed={feed_url}",
         }
@@ -3542,6 +3678,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_ashby_jobs(source)
     if platform == "gem":
         return discover_gem_jobs(source)
+    if platform == "rippling_jobs":
+        return discover_rippling_jobs(source)
     if platform == "workday":
         return discover_workday_jobs(source)
     if platform == "bytedance_jobs":
