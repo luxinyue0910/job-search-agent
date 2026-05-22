@@ -421,6 +421,8 @@ def detect_platform(url: str) -> str:
         return "alibaba_jobs"
     if "careers.pddglobalhr.com" in host:
         return "pdd_globalhr_jobs"
+    if "career.huawei.com" in host:
+        return "huawei_jobs"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -1511,6 +1513,103 @@ def discover_pdd_globalhr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             total = int(body.get("total") or 0)
             if len(records) < page_size or (total and page * page_size >= total):
+                break
+    return list(candidates.values())
+
+
+def huawei_title_allowed(role: str, source_query: str, source: dict[str, Any]) -> bool:
+    forced_terms = source.get("title_keywords") or DEFAULT_DISCOVERY_TITLE_KEYWORDS + ["sdet", "qa", "quality", "engineer"]
+    role_lower = role.lower()
+    if any(re.search(rf"\b{re.escape(str(term).lower())}\b", role_lower) for term in forced_terms):
+        return True
+    query = str(source_query or "").lower()
+    if re.search(r"\b(software|backend|frontend|engineer|sdet|qa|cloud|ai|machine|platform|devops)\b", query):
+        return keyword_matches_title(query, role)
+    return False
+
+
+def discover_huawei_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Huawei")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    base_url = str(source.get("url") or "https://career.huawei.com/reccampportal/portal5/social-recruitment.html?v=20241208")
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    endpoint_base = str(source.get("api_base") or "https://career.huawei.com/reccampportal/services/portal/portalpub/getJob/newHr/page")
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            params = {
+                "jobType": source.get("job_type", "1"),
+                "orderBy": source.get("order_by", "P_COUNT_DESC"),
+                "searchText": keyword,
+                "language": source.get("language", "en_US"),
+            }
+            url = f"{endpoint_base.rstrip('/')}/{page_size}/{page}?{urllib.parse.urlencode(params)}"
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": base_url,
+                    "Cookie": f"locale={source.get('language', 'en_US')}",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    data = json.loads(response.read().decode(charset, errors="replace"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Huawei careers API for {company}: {error}", file=sys.stderr)
+                break
+            records = data.get("result") or []
+            if not records:
+                break
+            for job in records:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("jobId") or "").strip()
+                role = str(job.get("nameEn") or job.get("jobname") or "").strip()
+                if not job_id or not role or not huawei_title_allowed(role, keyword, source):
+                    continue
+                location = str(job.get("jobAddress") or job.get("jobArea") or "").strip()
+                if not pdd_location_allowed(location, source):
+                    continue
+                data_source = str(job.get("dataSource") or "1")
+                detail_url = normalize_job_url(
+                    f"https://career.huawei.com/reccampportal/portal5/social-recruitment-detail.html?jobId={urllib.parse.quote(job_id)}&dataSource={urllib.parse.quote(data_source)}"
+                )
+                description = "\n\n".join(
+                    item
+                    for item in [
+                        str(job.get("mainBusinessEn") or job.get("mainBusiness") or "").strip(),
+                        str(job.get("jobRequireEn") or job.get("jobRequire") or "").strip(),
+                    ]
+                    if item
+                )
+                posted_raw = job.get("releaseDate") or job.get("creationDate")
+                candidates[detail_url] = {
+                    "company": company,
+                    "role": role,
+                    "url": detail_url,
+                    "platform": "huawei_jobs",
+                    "location": location.replace("\\", "/"),
+                    "posted_at": normalize_datetime(posted_raw),
+                    "updated_at": normalize_datetime(job.get("lastUpdateDate") or posted_raw),
+                    "source": base_url,
+                    "source_query": keyword,
+                    "external_job_id": job_id,
+                    "job_number": str(job.get("advertisementCode") or job_id),
+                    "description": html_to_text(description),
+                    "minimum_years_experience": job.get("workYear", ""),
+                    "notes": "Huawei official careers API adapter. Source uses US-location and title guards because Huawei global search returns many unrelated international roles.",
+                    "freshness_source": "official_posted_at" if posted_raw else "unknown",
+                }
+            page_info = data.get("pageVO") or {}
+            total_pages = int(page_info.get("totalPages") or 0)
+            if len(records) < page_size or (total_pages and page >= total_pages):
                 break
     return list(candidates.values())
 
@@ -3455,6 +3554,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_alibaba_jobs(source)
     if platform == "pdd_globalhr_jobs":
         return discover_pdd_globalhr_jobs(source)
+    if platform == "huawei_jobs":
+        return discover_huawei_jobs(source)
     if platform == "phenom":
         return discover_phenom_jobs(source)
     if platform == "m_cloud":
