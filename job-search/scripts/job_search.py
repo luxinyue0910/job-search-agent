@@ -419,6 +419,8 @@ def detect_platform(url: str) -> str:
         return "dji_jobs"
     if "talent.alibaba.com" in host:
         return "alibaba_jobs"
+    if "careers.pddglobalhr.com" in host:
+        return "pdd_globalhr_jobs"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -1409,6 +1411,105 @@ def discover_alibaba_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "freshness_source": "official_posted_at" if job.get("publishTime") else "unknown",
                 }
             total = int(body.get("totalCount") or 0)
+            if len(records) < page_size or (total and page * page_size >= total):
+                break
+    return list(candidates.values())
+
+
+def pdd_location_allowed(location: str, source: dict[str, Any]) -> bool:
+    allowed = source.get("allowed_location_keywords") or source.get("locations") or []
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    allowed = [str(item).strip().lower() for item in allowed if str(item).strip()]
+    if not allowed:
+        return True
+    value = str(location or "").strip().lower()
+    return any(item in value for item in allowed)
+
+
+def discover_pdd_globalhr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "PDD / Temu")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    endpoint = str(source.get("api_url") or "https://careers.pddglobalhr.com/api/careers/api/recruit/position/list")
+    referer = str(source.get("url") or "https://careers.pddglobalhr.com/jobs")
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            payload = {
+                "job": source.get("job", ""),
+                "page": page,
+                "pageSize": page_size,
+                "name": keyword,
+                "workLocationList": source.get("work_location_list", []),
+            }
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "Origin": "https://careers.pddglobalhr.com",
+                    "Referer": referer,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    data = json.loads(response.read().decode(charset, errors="replace"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch PDD Global HR API for {company}: {error}", file=sys.stderr)
+                break
+            if not data.get("success"):
+                print(f"Could not fetch PDD Global HR API for {company}: {data.get('errorMsg') or data}", file=sys.stderr)
+                break
+            body = data.get("result") or {}
+            records = body.get("list") or []
+            if not records:
+                break
+            for job in records:
+                if not isinstance(job, dict):
+                    continue
+                code = str(job.get("code") or job.get("id") or "").strip()
+                role = str(job.get("name") or "").strip()
+                if not code or not role:
+                    continue
+                location = str(job.get("workLocationName") or job.get("workLocation") or "").strip()
+                if not pdd_location_allowed(location, source):
+                    continue
+                url = normalize_job_url(f"https://careers.pddglobalhr.com/jobs/detail?code={urllib.parse.quote(code)}")
+                description = "\n\n".join(
+                    item
+                    for item in [
+                        str(job.get("jobDuty") or "").strip(),
+                        str(job.get("serveRequirement") or job.get("jobRequirement") or "").strip(),
+                    ]
+                    if item
+                )
+                posted_raw = job.get("releaseTime") or job.get("updateTime")
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "pdd_globalhr_jobs",
+                    "location": location,
+                    "posted_at": normalize_datetime(posted_raw),
+                    "updated_at": normalize_datetime(job.get("updateTime") or posted_raw),
+                    "source": referer,
+                    "source_query": keyword,
+                    "external_job_id": str(job.get("id") or code),
+                    "job_number": code,
+                    "description": html_to_text(description),
+                    "notes": "PDD Global HR official careers API adapter. Temu public careers page currently redirects to LinkedIn, so this source uses the PDD group job board.",
+                    "freshness_source": "official_posted_at" if posted_raw else "unknown",
+                }
+            total = int(body.get("total") or 0)
             if len(records) < page_size or (total and page * page_size >= total):
                 break
     return list(candidates.values())
@@ -3352,6 +3453,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_dji_jobs(source)
     if platform == "alibaba_jobs":
         return discover_alibaba_jobs(source)
+    if platform == "pdd_globalhr_jobs":
+        return discover_pdd_globalhr_jobs(source)
     if platform == "phenom":
         return discover_phenom_jobs(source)
     if platform == "m_cloud":
