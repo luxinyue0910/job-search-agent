@@ -417,6 +417,8 @@ def detect_platform(url: str) -> str:
         return "shein_jobs"
     if "we.dji.com" in host:
         return "dji_jobs"
+    if "talent.alibaba.com" in host:
+        return "alibaba_jobs"
     if "amazon.jobs" in host:
         return "amazon_jobs"
     if "google.com" in host and "/about/careers/applications" in path:
@@ -1287,6 +1289,126 @@ def discover_dji_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "freshness_source": "official_posted_at" if posted_raw else "unknown",
                 }
             total = int(body.get("totalCount") or body.get("total") or 0)
+            if len(records) < page_size or (total and page * page_size >= total):
+                break
+    return list(candidates.values())
+
+
+def alibaba_search_token(raw_html: str) -> str:
+    match = re.search(r'__token__\s*:\s*"([^"]+)"', raw_html)
+    return match.group(1) if match else ""
+
+
+def discover_alibaba_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Alibaba Cloud / Alibaba Group")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    landing_url = str(source.get("url") or "https://talent.alibaba.com/off-campus/position-list?lang=en")
+    search_url = str(source.get("api_url") or "https://talent.alibaba.com/position/search")
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 5))
+    language = str(source.get("language") or "en")
+    channel = str(source.get("channel") or "group_overseas_official_site")
+    candidates: dict[str, dict[str, Any]] = {}
+
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    try:
+        request = urllib.request.Request(
+            landing_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with opener.open(request, timeout=20) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            token = alibaba_search_token(response.read().decode(charset, errors="replace"))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Alibaba careers page for {company}: {error}", file=sys.stderr)
+        return []
+    if not token:
+        for cookie in cookie_jar:
+            if cookie.name == "XSRF-TOKEN":
+                token = cookie.value
+                break
+    if not token:
+        print(f"Could not fetch Alibaba careers API for {company}: missing XSRF token", file=sys.stderr)
+        return []
+
+    endpoint = f"{search_url}?_csrf={urllib.parse.quote(token)}"
+    for keyword in [str(item).strip() for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            payload = {
+                "channel": channel,
+                "language": language,
+                "batchId": source.get("batch_id", ""),
+                "categories": source.get("categories", ""),
+                "deptCodes": source.get("dept_codes", []),
+                "key": keyword,
+                "pageIndex": page,
+                "pageSize": page_size,
+                "regions": source.get("regions", ""),
+                "subCategories": source.get("sub_categories", ""),
+            }
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "Origin": "https://talent.alibaba.com",
+                    "Referer": landing_url,
+                    "Bx-V": "2.5.31",
+                },
+                method="POST",
+            )
+            try:
+                with opener.open(request, timeout=20) as response:
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    data = json.loads(response.read().decode(charset, errors="replace"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Alibaba careers API for {company}: {error}", file=sys.stderr)
+                break
+            if not data.get("success"):
+                print(f"Could not fetch Alibaba careers API for {company}: {data.get('errorMsg') or data}", file=sys.stderr)
+                break
+            body = data.get("content") or {}
+            records = body.get("datas") or []
+            if not records:
+                break
+            for job in records:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("id") or "").strip()
+                role = str(job.get("name") or "").strip()
+                if not job_id or not role:
+                    continue
+                url = normalize_job_url(f"https://talent.alibaba.com/en/off-campus/position-detail?positionId={urllib.parse.quote(job_id)}")
+                description = "\n\n".join(
+                    item for item in [str(job.get("description") or "").strip(), str(job.get("requirement") or "").strip()] if item
+                )
+                experience = job.get("experience") if isinstance(job.get("experience"), dict) else {}
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "alibaba_jobs",
+                    "location": ", ".join(str(item).strip() for item in (job.get("workLocations") or []) if str(item).strip()),
+                    "posted_at": normalize_datetime(job.get("publishTime")),
+                    "updated_at": normalize_datetime(job.get("modifyTime") or job.get("publishTime")),
+                    "source": landing_url,
+                    "source_query": keyword,
+                    "external_job_id": job_id,
+                    "job_number": str(job.get("code") or job_id),
+                    "description": html_to_text(description),
+                    "minimum_years_experience": experience.get("from", ""),
+                    "notes": "Alibaba official careers API adapter.",
+                    "freshness_source": "official_posted_at" if job.get("publishTime") else "unknown",
+                }
+            total = int(body.get("totalCount") or 0)
             if len(records) < page_size or (total and page * page_size >= total):
                 break
     return list(candidates.values())
@@ -3228,6 +3350,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_shein_jobs(source)
     if platform == "dji_jobs":
         return discover_dji_jobs(source)
+    if platform == "alibaba_jobs":
+        return discover_alibaba_jobs(source)
     if platform == "phenom":
         return discover_phenom_jobs(source)
     if platform == "m_cloud":
