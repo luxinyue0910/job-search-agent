@@ -411,6 +411,8 @@ def detect_platform(url: str) -> str:
         return "gem"
     if "ats.rippling.com" in host:
         return "rippling_jobs"
+    if "ripplehire.com" in host and "/candidate" in path:
+        return "ripplehire"
     if "myworkdayjobs.com" in host or "myworkdaysite.com" in host:
         return "workday"
     if "joinbytedance.com" in host or "jobs.bytedance.com" in host:
@@ -447,6 +449,8 @@ def detect_platform(url: str) -> str:
         return "providence_jobs"
     if "careers.salesforce.com" in host:
         return "salesforce_jobs"
+    if host == "careers.zoom.us":
+        return "zoom_careers"
     if "smartrecruiters.com" in host:
         return "smartrecruiters"
     if "icims.com" in host:
@@ -513,6 +517,22 @@ def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any
             "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
             "Accept": "application/json,*/*;q=0.8",
             "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
+def fetch_json_form_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any:
+    request = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(payload).encode("utf-8"),
+        headers={
+            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "Accept": "application/json,*/*;q=0.8",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
         },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -607,7 +627,10 @@ def normalize_job_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url.strip())
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     query = [(key, value) for key, value in query if not key.lower().startswith("utm_")]
-    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query), fragment="")).rstrip("/")
+    fragment = ""
+    if "ripplehire.com" in parsed.netloc.lower() and re.search(r"(?:detail|apply)/job/[^/?#]+", urllib.parse.unquote(parsed.fragment or "")):
+        fragment = parsed.fragment
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query), fragment=fragment)).rstrip("/")
 
 
 def discovery_cutoff(args: argparse.Namespace) -> dt.datetime:
@@ -2690,6 +2713,141 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
     return list(candidates.values())
 
 
+def ripplehire_base_url(source: dict[str, Any]) -> str:
+    base_url = str(source.get("url") or "").strip() or "https://usource.ripplehire.com/candidate/"
+    parsed = urllib.parse.urlparse(base_url)
+    if not parsed.scheme:
+        base_url = f"https://{base_url}"
+        parsed = urllib.parse.urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/candidate"):
+        if "/candidate/" in path:
+            path = path.split("/candidate/", 1)[0].rstrip("/") + "/candidate"
+        elif not path.endswith("/candidate"):
+            path = path.rstrip("/") + "/candidate"
+    return urllib.parse.urlunparse(parsed._replace(path=path + "/", params="", query="", fragment=""))
+
+
+def ripplehire_source_name(source: dict[str, Any]) -> str:
+    return str(source.get("ripplehire_source") or source.get("ats_source") or "CAREERSITE").strip() or "CAREERSITE"
+
+
+def ripplehire_job_url(base_url: str, token: str, source_name: str, job_seq: str) -> str:
+    query = urllib.parse.urlencode({"token": token, "source": source_name})
+    return f"{base_url}?{query}#detail/job/{urllib.parse.quote(job_seq)}"
+
+
+def ripplehire_posted_at(value: Any) -> str:
+    if isinstance(value, str):
+        value = value.replace("-", " ")
+    return normalize_datetime(value)
+
+
+def ripplehire_detail(source: dict[str, Any], job_seq: str) -> dict[str, Any] | None:
+    base_url = ripplehire_base_url(source)
+    token = str(source.get("token") or "").strip()
+    source_name = ripplehire_source_name(source)
+    if not token or not job_seq:
+        return None
+    params = {
+        "token": token,
+        "jobSeq": job_seq,
+        "source": source_name,
+        "lang": str(source.get("lang") or "en"),
+    }
+    detail_url = urllib.parse.urljoin(base_url, "candidatejobdetail") + "?" + urllib.parse.urlencode(params)
+    data = fetch_json(detail_url)
+    if isinstance(data, dict):
+        job = data.get("jobVO") or data.get("jobVo") or data.get("job")
+        if isinstance(job, dict):
+            return job
+    return data if isinstance(data, dict) else None
+
+
+def ripplehire_job_text(job: dict[str, Any]) -> str:
+    parts = [
+        str(job.get("jobTitle") or ""),
+        compact_location_text(job.get("locations") or job.get("jobLocation")),
+        str(job.get("jobReqExp") or ""),
+        str(job.get("jobTypeCustom3") or ""),
+    ]
+    if job.get("jobMinExp") not in (None, "") or job.get("jobMaxExp") not in (None, ""):
+        parts.append(f"Experience: {job.get('jobMinExp') or ''}-{job.get('jobMaxExp') or ''} years")
+    parts.extend([html_to_text(str(job.get("jobDesc") or "")), html_to_text(str(job.get("jobSkills") or ""))])
+    return "\n\n".join(part for part in parts if str(part).strip())
+
+
+def discover_ripplehire_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    base_url = ripplehire_base_url(source)
+    token = str(source.get("token") or "").strip()
+    if not token:
+        print(f"Could not fetch RippleHire API for {company}: missing token", file=sys.stderr)
+        return []
+    source_name = ripplehire_source_name(source)
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    max_pages = int(source.get("max_pages", 3))
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            search_params = {
+                "token": token,
+                "source": source_name,
+                "search": keyword,
+                "page": str(page_index),
+            }
+            payload = {
+                "careerSiteUrlParams": json.dumps(search_params, separators=(",", ":")),
+                "lang": str(source.get("lang") or "en"),
+            }
+            api_url = urllib.parse.urljoin(base_url, "candidatejobsearch")
+            try:
+                data = fetch_json_form_post(api_url, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch RippleHire API for {company}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("jobVoList", []) if isinstance(data, dict) else []
+            if not jobs:
+                break
+            for summary in jobs:
+                if not isinstance(summary, dict):
+                    continue
+                job_seq = str(summary.get("jobSeq") or summary.get("jobId") or "").strip()
+                role = str(summary.get("jobTitle") or infer_role_from_url(job_seq)).strip()
+                if not job_seq or not role or not keyword_matches_title(keyword, role):
+                    continue
+                try:
+                    detail = ripplehire_detail(source, job_seq) or {}
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch RippleHire detail for {company} job {job_seq}: {error}", file=sys.stderr)
+                    detail = {}
+                job = {**summary, **detail}
+                url = ripplehire_job_url(base_url, token, source_name, job_seq)
+                location = compact_location_text(job.get("locations") or job.get("jobLocation"))
+                candidates[url] = {
+                    "company": company,
+                    "role": role,
+                    "url": url,
+                    "platform": "ripplehire",
+                    "location": location,
+                    "job_number": str(job.get("jobCode") or job_seq),
+                    "external_job_id": job_seq,
+                    "posted_at": ripplehire_posted_at(
+                        job.get("jobPostingDate") or job.get("careerSiteDate") or job.get("openDate") or job.get("createDttm")
+                    ),
+                    "updated_at": ripplehire_posted_at(job.get("updatedDate") or job.get("modifiedDttm")),
+                    "source": source.get("url", base_url),
+                    "source_query": keyword,
+                    "notes": f"RippleHire/USource adapter; source={source_name}",
+                    "_jd_text": ripplehire_job_text(job),
+                }
+            if len(jobs) < int(source.get("page_size", 10)):
+                break
+    return list(candidates.values())
+
+
 def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unknown Company") -> list[dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     for match in re.finditer(r'<script[^>]+type=["\']application/(?:ld\+json|ld&#x2B;json)["\'][^>]*>(.*?)</script>', raw, flags=re.I | re.S):
@@ -3535,6 +3693,114 @@ def rss_items_from_regex(raw: str) -> list[dict[str, str]]:
     return items
 
 
+def sitemap_entries_from_regex(raw: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for block in re.findall(r"<url\b[^>]*>(.*?)</url>", raw, flags=re.I | re.S):
+        entries.append(
+            {
+                "loc": rss_block_text(block, "loc"),
+                "lastmod": rss_block_text(block, "lastmod"),
+            }
+        )
+    return entries
+
+
+def sitemap_pretty_phrase(value: str) -> str:
+    acronyms = {
+        "ai": "AI",
+        "api": "API",
+        "apis": "APIs",
+        "aws": "AWS",
+        "ciso": "CISO",
+        "cx": "CX",
+        "devops": "DevOps",
+        "fp": "FP",
+        "gtm": "GTM",
+        "ml": "ML",
+        "qa": "QA",
+        "rag": "RAG",
+        "sde": "SDE",
+        "sre": "SRE",
+        "ui": "UI",
+        "ux": "UX",
+        "zp3": "ZP3",
+    }
+    words = [word for word in re.split(r"[-_\s]+", value.strip()) if word]
+    return " ".join(acronyms.get(word.lower(), word.capitalize()) for word in words)
+
+
+def sitemap_role_location_from_url(source: dict[str, Any], url: str) -> tuple[str, str]:
+    slug = urllib.parse.urlparse(url).path.rstrip("/").split("/")[-1]
+    slug = re.sub(r"-?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", "", slug, flags=re.I)
+    location_slug = ""
+    for marker in source.get("location_markers", []):
+        marker_slug = slugify(str(marker))
+        index = slug.find(f"-{marker_slug}")
+        if index >= 0:
+            location_slug = slug[index + 1 :]
+            slug = slug[:index]
+            break
+    role = sitemap_pretty_phrase(slug) or infer_role_from_url(url)
+    location = sitemap_pretty_phrase(location_slug)
+    return role, location
+
+
+def discover_sitemap_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    sitemap_url = str(source.get("sitemap_url") or source.get("url") or "").strip()
+    if not sitemap_url:
+        return []
+    try:
+        raw = fetch_url(sitemap_url, timeout=30)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch sitemap for {company}: {error}", file=sys.stderr)
+        return []
+    try:
+        root = ET.fromstring(raw)
+        entries = [
+            {
+                "loc": str((url_node.findtext("{*}loc") or url_node.findtext("loc") or "")).strip(),
+                "lastmod": str((url_node.findtext("{*}lastmod") or url_node.findtext("lastmod") or "")).strip(),
+            }
+            for url_node in root.findall(".//{*}url")
+        ]
+    except (ET.ParseError, ImportError) as error:
+        print(f"Could not parse sitemap for {company} with XML parser, using fallback: {error}", file=sys.stderr)
+        entries = sitemap_entries_from_regex(raw)
+    include_regex = str(source.get("include_url_regex") or "")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    keyword_values = [str(item) for item in keywords if str(item).strip()]
+    candidates: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        url = normalize_job_url(str(entry.get("loc") or ""))
+        if not url:
+            continue
+        if include_regex and not re.search(include_regex, url):
+            continue
+        role, location = sitemap_role_location_from_url(source, url)
+        if keyword_values and not any(keyword_matches_title(keyword, role) for keyword in keyword_values):
+            continue
+        lastmod = str(entry.get("lastmod") or "")
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": source.get("target_platform") or detect_platform(url),
+            "location": location,
+            "posted_at": normalize_datetime(lastmod),
+            "updated_at": normalize_datetime(lastmod),
+            "source": sitemap_url,
+            "source_query": "sitemap",
+            "freshness_source": "sitemap_lastmod" if lastmod else "unknown",
+            "external_job_id": slugify(url),
+            "_jd_text": "\n\n".join(block for block in [role, location] if block),
+            "notes": f"Sitemap adapter; lastmod is used as freshness proxy. sitemap={sitemap_url}",
+        }
+    return list(candidates.values())
+
+
 def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     feed_url = rss_feed_url(source)
@@ -3680,6 +3946,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_gem_jobs(source)
     if platform == "rippling_jobs":
         return discover_rippling_jobs(source)
+    if platform == "ripplehire":
+        return discover_ripplehire_jobs(source)
     if platform == "workday":
         return discover_workday_jobs(source)
     if platform == "bytedance_jobs":
@@ -3738,6 +4006,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_yc_job_board_jobs(source)
     if platform == "hn_who_is_hiring":
         return discover_hn_who_is_hiring_jobs(source)
+    if platform == "sitemap":
+        return discover_sitemap_jobs(source)
     if platform == "rss":
         return discover_rss_jobs(source)
     if platform == "jibe":
@@ -3879,6 +4149,32 @@ def ats_candidate_from_url(url: str) -> dict[str, Any] | None:
         return ashby_candidate_from_url(url)
     if platform == "workday":
         return workday_candidate_from_url(url)
+    if platform == "ripplehire":
+        parsed = parse_ripplehire_url(url)
+        if not parsed:
+            return None
+        base_url, token, source_name, job_seq = parsed
+        try:
+            job = ripplehire_detail({"url": base_url, "token": token, "ripplehire_source": source_name}, job_seq)
+        except Exception:
+            return None
+        if not job:
+            return None
+        role = str(job.get("jobTitle") or infer_role_from_url(url)).strip()
+        company = "UST / USource" if "usource.ripplehire.com" in urllib.parse.urlparse(base_url).netloc.lower() else "Unknown Company"
+        return {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "ripplehire",
+            "location": compact_location_text(job.get("locations") or job.get("jobLocation")),
+            "job_number": str(job.get("jobCode") or job_seq),
+            "external_job_id": job_seq,
+            "posted_at": ripplehire_posted_at(job.get("jobPostingDate") or job.get("careerSiteDate")),
+            "updated_at": ripplehire_posted_at(job.get("updatedDate") or job.get("modifiedDttm")),
+            "notes": f"RippleHire/USource direct URL; source={source_name}",
+            "_jd_text": ripplehire_job_text(job),
+        }
     return None
 
 
@@ -4597,6 +4893,30 @@ def fetch_providence_job_text(url: str) -> str | None:
     return html_to_text(fetch_url(url))
 
 
+def parse_ripplehire_url(url: str) -> tuple[str, str, str] | None:
+    parsed = urllib.parse.urlparse(url)
+    if "ripplehire.com" not in parsed.netloc.lower() or "/candidate" not in parsed.path.lower():
+        return None
+    query = urllib.parse.parse_qs(parsed.query)
+    token = (query.get("token") or [""])[0].strip()
+    source_name = (query.get("source") or ["CAREERSITE"])[0].strip() or "CAREERSITE"
+    match = re.search(r"(?:detail|apply)/job/([^/?#]+)", urllib.parse.unquote(parsed.fragment or ""))
+    job_seq = match.group(1).strip() if match else ""
+    if not token or not job_seq:
+        return None
+    base_url = urllib.parse.urlunparse(parsed._replace(query="", fragment="", params=""))
+    return ripplehire_base_url({"url": base_url}), token, source_name, job_seq
+
+
+def fetch_ripplehire_job_text(url: str) -> str | None:
+    parsed = parse_ripplehire_url(url)
+    if not parsed:
+        return None
+    base_url, token, source_name, job_seq = parsed
+    job = ripplehire_detail({"url": base_url, "token": token, "ripplehire_source": source_name}, job_seq)
+    return ripplehire_job_text(job or {}) if job else None
+
+
 def fetch_direct_platform_job_text(url: str) -> str | None:
     platform = detect_platform(url)
     if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe"}:
@@ -4935,6 +5255,7 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_eightfold_job_text,
         fetch_apple_job_text,
         fetch_providence_job_text,
+        fetch_ripplehire_job_text,
         fetch_direct_platform_job_text,
         fetch_workday_job_text,
     ]:
