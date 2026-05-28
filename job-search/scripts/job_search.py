@@ -479,6 +479,10 @@ def detect_platform(url: str) -> str:
         return "talentbrew"
     if "careerpuck.com" in host:
         return "careerpuck"
+    if "pinpointhq.com" in host:
+        return "pinpoint"
+    if "brassring.com" in host:
+        return "brassring"
     return "custom"
 
 
@@ -743,11 +747,15 @@ def workday_source_parts(source: dict[str, Any]) -> tuple[str, str, str] | None:
     if "myworkdayjobs.com" not in host and "myworkdaysite.com" not in host:
         return None
     tenant = str(source.get("tenant") or "").strip()
+    parts = [part for part in parsed.path.split("/") if part]
+    if not tenant and "myworkdaysite.com" in host and len(parts) >= 3 and parts[0].lower() == "recruiting":
+        tenant = parts[1]
+        site = str(source.get("site") or parts[2]).strip()
+        return (host, tenant, site) if host and tenant and site else None
     if not tenant:
         match = re.match(r"([a-zA-Z0-9_-]+)\.wd\d+\.", host)
         if match:
             tenant = match.group(1)
-    parts = [part for part in parsed.path.split("/") if part]
     site = str(source.get("site") or "").strip()
     if not site and parts:
         site_candidates = [
@@ -4124,6 +4132,122 @@ def discover_careerpuck_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def pinpoint_jobs_url(source: dict[str, Any]) -> str:
+    if source.get("jobs_url"):
+        return str(source["jobs_url"]).strip()
+    source_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(source_url)
+    if parsed.scheme and parsed.netloc:
+        prefix = "/en"
+        match = re.match(r"^/(en|us|gb|au|ca)(?:/|$)", parsed.path, flags=re.I)
+        if match:
+            prefix = f"/{match.group(1)}"
+        return urllib.parse.urljoin(f"{parsed.scheme}://{parsed.netloc}", f"{prefix}/jobs.json")
+    return ""
+
+
+def discover_pinpoint_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    jobs_url = pinpoint_jobs_url(source)
+    if not jobs_url:
+        return []
+    try:
+        data = fetch_json(jobs_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Pinpoint API for {company}: {error}", file=sys.stderr)
+        return []
+    jobs = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(jobs, list):
+        return []
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        title = str(job.get("title") or "").strip()
+        if not title:
+            continue
+        url = normalize_job_url(str(job.get("url") or urllib.parse.urljoin(jobs_url, f"jobs/{job.get('id')}")))
+        location = compact_location_text(job.get("location"))
+        department = compact_location_text(job.get("department") or job.get("division"))
+        text_blocks = [
+            title,
+            location,
+            department,
+            html_to_text(str(job.get("description") or "")),
+            html_to_text(str(job.get("key_responsibilities") or "")),
+            html_to_text(str(job.get("skills_knowledge_expertise") or "")),
+            str(job.get("employment_type_text") or ""),
+            str(job.get("workplace_type_text") or ""),
+            str(job.get("compensation") or ""),
+        ]
+        candidates[url] = {
+            "company": company,
+            "role": title,
+            "url": url,
+            "platform": "pinpoint",
+            "location": location,
+            "job_number": str(job.get("requisition_id") or job.get("id") or ""),
+            "external_job_id": str(job.get("id") or ""),
+            "posted_at": normalize_datetime(job.get("posted_at") or job.get("published_at") or job.get("created_at")),
+            "updated_at": normalize_datetime(job.get("updated_at")),
+            "source": source.get("url", jobs_url),
+            "source_query": department,
+            "freshness_source": "pinpoint_posted_at" if job.get("posted_at") or job.get("published_at") or job.get("created_at") else "unknown",
+            "notes": "Pinpoint jobs.json adapter. Some Pinpoint boards do not expose official posted dates.",
+            "_jd_text": "\n\n".join(block for block in text_blocks if block),
+        }
+    return list(candidates.values())
+
+
+def brassring_detail_from_url(url: str, company: str = "Unknown Company") -> dict[str, Any]:
+    try:
+        raw = fetch_url(url, timeout=20)
+    except Exception:
+        return {}
+    title = html_attr(r'<meta(?=[^>]+(?:property|name)=["\']og:title["\'])(?=[^>]+content=["\']([^"\']+)["\'])[^>]*>', raw)
+    if not title:
+        title = html_attr(r"<title[^>]*>(.*?)</title>", raw)
+    if title:
+        title = re.sub(r"\s+(?:at|\|)\s+.*$", "", title, flags=re.I).strip()
+        title = re.sub(r"\s+-\s+.*?-\s+Job Details\s*$", "", title, flags=re.I).strip()
+    description = html_attr(r'<meta(?=[^>]+(?:property|name)=["\']og:description["\'])(?=[^>]+content=["\']([^"\']+)["\'])[^>]*>', raw)
+    req_id = html_attr(r'<meta(?=[^>]+name=["\']gtm_reqid["\'])(?=[^>]+content=["\']([^"\']+)["\'])[^>]*>', raw)
+    posted_at = extract_first_datetime(
+        raw,
+        [
+            r'"datePosted"\s*:\s*"([^"]+)"',
+        ],
+    )
+    return {
+        "company": company,
+        "role": title or infer_role_from_url(url),
+        "url": normalize_job_url(url),
+        "platform": "brassring",
+        "location": extract_location(raw),
+        "job_number": req_id,
+        "external_job_id": req_id or urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("jobid", [""])[0],
+        "posted_at": posted_at,
+        "updated_at": "",
+        "source": url,
+        "freshness_source": "brassring_meta_date" if posted_at else "unknown",
+        "notes": "BrassRing detail parser. Prefer upstream ATS/source for broad discovery when available.",
+        "_jd_text": "\n\n".join(block for block in [title, description, html_to_text(raw)] if block),
+    }
+
+
+def discover_brassring_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    urls = source.get("job_urls") or source.get("urls") or []
+    if isinstance(urls, str):
+        urls = [urls]
+    candidates = {}
+    for url in urls:
+        detail = brassring_detail_from_url(str(url), str(source.get("company") or "Unknown Company"))
+        if detail:
+            detail["source"] = source.get("url", str(url))
+            candidates[detail["url"]] = detail
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -4206,6 +4330,10 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_talentbrew_jobs(source)
     if platform == "careerpuck":
         return discover_careerpuck_jobs(source)
+    if platform == "pinpoint":
+        return discover_pinpoint_jobs(source)
+    if platform == "brassring":
+        return discover_brassring_jobs(source)
     return find_links_for_source(source)
 
 
@@ -5113,7 +5241,7 @@ def fetch_ripplehire_job_text(url: str) -> str | None:
 
 def fetch_direct_platform_job_text(url: str) -> str | None:
     platform = detect_platform(url)
-    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe", "talentbrew", "careerpuck"}:
+    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe", "talentbrew", "careerpuck", "pinpoint", "brassring"}:
         return None
     return html_to_text(fetch_url(url))
 
@@ -5978,6 +6106,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "jibe",
         "talentbrew",
         "careerpuck",
+        "pinpoint",
+        "brassring",
     }
     if direct_platform in directly_classifiable:
         result["detected_platform"] = direct_platform
@@ -6087,6 +6217,10 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = source_from_talentbrew_url(company, detected_url)
     elif platform == "careerpuck":
         result["source"] = source_from_careerpuck_url(company, detected_url)
+    elif platform == "pinpoint":
+        result["source"] = {"company": company, "platform": "pinpoint", "url": detected_url, "jobs_url": pinpoint_jobs_url({"url": detected_url})}
+    elif platform == "brassring":
+        result["source"] = {"company": company, "platform": "brassring", "url": detected_url, "job_urls": [detected_url]}
     return result
 
 
