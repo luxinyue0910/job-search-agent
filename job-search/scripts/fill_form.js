@@ -4,6 +4,7 @@ const path = require("path");
 
 const FILL_TIMEOUT = 900;
 const NAVIGATION_TIMEOUT = 5000;
+const DEFAULT_FILL_RETRIES = 1;
 const DEFAULT_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 function parseArgs(argv) {
@@ -26,6 +27,12 @@ function parseArgs(argv) {
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function intArg(value, fallback) {
+  if (value === true || value === undefined || value === null || value === "") return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function personRoot(root, person) {
@@ -802,7 +809,9 @@ async function main() {
     console.log(`Using ${applicationSurface === page ? "main page" : "embedded application frame"} for form filling.`);
     const visibleText = await combinedVisibleText(page, applicationSurface);
 
-    if (/captcha|verify you are human|sign in|log in|create account|e-signature|signature/.test(visibleText)) {
+    const hasApplicationForm = await applicationSurface.locator('input, textarea, select, button').count().catch(() => 0) > 0
+      && /first name|last name|email|resume|cover letter|apply for this job/i.test(visibleText);
+    if (/captcha|verify you are human|e-signature|signature/.test(visibleText) || (!hasApplicationForm && /sign in|log in|create account/.test(visibleText))) {
       actionItems.add("Browser stopped for login/CAPTCHA/account/signature step.");
       await page.screenshot({ path: screenshotPath, fullPage: true });
       updateApp(tracker, app.id, { status: "needs_review", screenshot_path: screenshotPath, action_items: [...actionItems] });
@@ -833,51 +842,21 @@ async function main() {
       actionItems.add("Microsoft Careers portal matched the target role, but final job identity and submit still require manual review.");
     }
 
-    const personal = profile.personal || {};
-    const links = profile.links || {};
-    const defaults = profile.application_defaults || {};
-    console.log("Filling contact fields...");
-    await fillFirst(applicationSurface, ['input[name="first_name"]', 'input[id="first_name"]'], firstName(personal.legal_name || personal.name));
-    await fillFirst(applicationSurface, ['input[name*="last" i]', 'input[aria-label*="last" i]', 'input[id*="last" i]'], lastName(personal.name));
-    await fillFirst(applicationSurface, ['input[name*="preferred" i]', 'input[aria-label*="preferred" i]', 'input[id*="preferred" i]'], firstName(personal.name));
-    await fillFirst(applicationSurface, ['input[type="email"]', 'input[name*="email" i]', 'input[aria-label*="email" i]'], personal.email);
-    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
-    await fillFirst(applicationSurface, ['input[name*="location" i]', 'input[aria-label*="location" i]', 'input[id*="location" i]'], personal.location);
-    await fillFirst(applicationSurface, ['input[name*="linkedin" i]', 'input[aria-label*="linkedin" i]', 'input[id*="linkedin" i]'], links.linkedin);
-    await fillFirst(applicationSurface, ['input[name*="github" i]', 'input[aria-label*="github" i]', 'input[id*="github" i]', 'input[placeholder*="github" i]'], links.github);
-    await fillByLabel(applicationSurface, /github/i, links.github);
-    await fillFirst(applicationSurface, ['input[name*="website" i]', 'input[aria-label*="website" i]', 'input[id*="website" i]', 'input[name*="portfolio" i]', 'input[aria-label*="portfolio" i]'], links.website);
-    await chooseCountry(applicationSurface, personal.country || "United States");
-
-    console.log("Uploading resume...");
-    const resumePath = resolveWorkspacePath(root, selected.dir, app.resume_file || profile.resume_file || app.resume_path || "");
-    if (resumePath && fs.existsSync(resumePath)) {
-      const fileInputs = await applicationSurface.locator('input[type="file"]').all();
-      if (fileInputs.length > 0) {
-        await fileInputs[0].setInputFiles(resumePath);
+    const maxRetries = intArg(args["fill-retries"], DEFAULT_FILL_RETRIES);
+    let requiredIssues = [];
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (attempt > 0) {
+        console.log(`Retrying incomplete fields (${attempt}/${maxRetries})...`);
       }
-    } else {
-      actionItems.add("Resume upload skipped because app.resume_file, profile.resume_file, or app.resume_path did not point to an existing file.");
+      await fillApplicationOnce(applicationSurface, page, root, selected, profile, app, actionItems);
+      await scrollToSubmitOrBottom(page, applicationSurface);
+      requiredIssues = await requiredIssueSummary(applicationSurface);
+      if (!requiredIssues.length) break;
     }
-
-    console.log("Uploading cover letter and filling structured questions...");
-    const coverLetter = coverLetterText(app.cover_letter_path, root);
-    const coverLetterUploaded = await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
-    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
-    const coverLetterFilled = await fillCoverLetterFields(applicationSurface, coverLetter);
-    if (coverLetter && !coverLetterFilled && !coverLetterUploaded) {
-      actionItems.add("Cover letter was generated but no compatible cover letter field or upload control was confirmed.");
+    if (requiredIssues.length) {
+      actionItems.add(`Autofill stopped after ${maxRetries + 1} attempt(s). Manually review required fields: ${requiredIssues.join("; ")}.`);
+      console.log(`Autofill stopped with required fields still flagged: ${requiredIssues.join("; ")}`);
     }
-    await fillFirst(applicationSurface, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
-    await fillFirst(applicationSurface, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
-    if (applicationSurface === page) {
-      await fillStructuredApplicationFields(applicationSurface, profile, app, actionItems);
-      await fillAshbyCommonFields(applicationSurface, profile, app, actionItems);
-    } else {
-      actionItems.add("Embedded application form detected; review EEO, authorization, sponsorship, and screening fields manually.");
-    }
-    await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
-    await fillAshbyDataPathText(applicationSurface, "1c1690a4-cce6-4e38-99cb-71dc879c5164", personal.phone);
 
     await scrollToSubmitOrBottom(page, applicationSurface);
     console.log("Capturing pre-submit screenshot...");
@@ -992,6 +971,84 @@ async function uploadCoverLetter(page, relativePath, root) {
     // Fall back to manual review.
   }
   return false;
+}
+
+async function fillApplicationOnce(applicationSurface, page, root, selected, profile, app, actionItems) {
+  const personal = profile.personal || {};
+  const links = profile.links || {};
+  const defaults = profile.application_defaults || {};
+  console.log("Filling contact fields...");
+  await fillFirst(applicationSurface, ['input[name="first_name"]', 'input[id="first_name"]'], firstName(personal.legal_name || personal.name));
+  await fillFirst(applicationSurface, ['input[name*="last" i]', 'input[aria-label*="last" i]', 'input[id*="last" i]'], lastName(personal.name));
+  await fillFirst(applicationSurface, ['input[name*="preferred" i]', 'input[aria-label*="preferred" i]', 'input[id*="preferred" i]'], firstName(personal.name));
+  await fillFirst(applicationSurface, ['input[type="email"]', 'input[name*="email" i]', 'input[aria-label*="email" i]'], personal.email);
+  await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
+  await fillFirst(applicationSurface, ['input[name*="location" i]', 'input[aria-label*="location" i]', 'input[id*="location" i]'], personal.location);
+  await fillFirst(applicationSurface, ['input[name*="linkedin" i]', 'input[aria-label*="linkedin" i]', 'input[id*="linkedin" i]'], links.linkedin);
+  await fillFirst(applicationSurface, ['input[name*="github" i]', 'input[aria-label*="github" i]', 'input[id*="github" i]', 'input[placeholder*="github" i]'], links.github);
+  await fillByLabel(applicationSurface, /github/i, links.github);
+  await fillFirst(applicationSurface, ['input[name*="website" i]', 'input[aria-label*="website" i]', 'input[id*="website" i]', 'input[name*="portfolio" i]', 'input[aria-label*="portfolio" i]'], links.website);
+  await chooseCountry(applicationSurface, personal.country || "United States");
+
+  console.log("Uploading resume...");
+  const resumePath = resolveWorkspacePath(root, selected.dir, app.resume_file || profile.resume_file || app.resume_path || "");
+  if (resumePath && fs.existsSync(resumePath)) {
+    const fileInputs = await applicationSurface.locator('input[type="file"]').all();
+    if (fileInputs.length > 0) {
+      await fileInputs[0].setInputFiles(resumePath);
+    }
+  } else {
+    actionItems.add("Resume upload skipped because app.resume_file, profile.resume_file, or app.resume_path did not point to an existing file.");
+  }
+
+  console.log("Uploading cover letter and filling structured questions...");
+  const coverLetter = coverLetterText(app.cover_letter_path, root);
+  const coverLetterUploaded = await uploadCoverLetter(applicationSurface, app.cover_letter_path, root);
+  await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
+  const coverLetterFilled = await fillCoverLetterFields(applicationSurface, coverLetter);
+  if (coverLetter && !coverLetterFilled && !coverLetterUploaded) {
+    actionItems.add("Cover letter was generated but no compatible cover letter field or upload control was confirmed.");
+  }
+  await fillFirst(applicationSurface, ['input[name*="authorized" i]', 'textarea[name*="authorized" i]'], defaults.authorized_to_work);
+  await fillFirst(applicationSurface, ['input[name*="sponsor" i]', 'textarea[name*="sponsor" i]'], defaults.requires_sponsorship);
+  if (applicationSurface === page) {
+    await fillStructuredApplicationFields(applicationSurface, profile, app, actionItems);
+    await fillAshbyCommonFields(applicationSurface, profile, app, actionItems);
+  } else {
+    actionItems.add("Embedded application form detected; review EEO, authorization, sponsorship, and screening fields manually.");
+  }
+  await fillFirst(applicationSurface, ['input[type="tel"]', 'input[name*="phone" i]', 'input[aria-label*="phone" i]'], personal.phone);
+  await fillAshbyDataPathText(applicationSurface, "1c1690a4-cce6-4e38-99cb-71dc879c5164", personal.phone);
+}
+
+async function requiredIssueSummary(page) {
+  try {
+    return await page.evaluate(() => {
+      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const issues = new Set();
+      const errorNodes = [...document.querySelectorAll("body *")].filter((node) => {
+        const text = clean(node.textContent);
+        return /^This field is required\.?$/i.test(text) || /^Please enter your location$/i.test(text);
+      });
+      for (const node of errorNodes) {
+        const container = node.closest("fieldset, .field, [data-qa], div") || node.parentElement;
+        const label = container?.querySelector("label, legend") || node.closest("div")?.querySelector("label, legend");
+        const labelText = clean(label?.textContent).replace(/\*$/, "").trim();
+        issues.add(labelText || clean(node.textContent));
+      }
+      const invalidFields = [...document.querySelectorAll('[aria-invalid="true"], input:invalid, textarea:invalid, select:invalid')];
+      for (const field of invalidFields) {
+        if (field.type === "hidden" || field.offsetParent === null) continue;
+        const id = field.id ? CSS.escape(field.id) : "";
+        const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+        const labelText = clean(label?.textContent || field.getAttribute("aria-label") || field.name || field.id);
+        if (labelText) issues.add(labelText.replace(/\*$/, "").trim());
+      }
+      return [...issues].filter(Boolean).slice(0, 10);
+    });
+  } catch (_error) {
+    return [];
+  }
 }
 
 async function fillCoverLetterFields(page, value) {
