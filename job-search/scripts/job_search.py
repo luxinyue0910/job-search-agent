@@ -483,6 +483,8 @@ def detect_platform(url: str) -> str:
         return "pinpoint"
     if "brassring.com" in host:
         return "brassring"
+    if "careers.kula.ai" in host:
+        return "kula"
     return "custom"
 
 
@@ -4253,6 +4255,57 @@ def discover_brassring_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def discover_kula_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    try:
+        raw = fetch_url(source_url, timeout=25)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Kula careers page for {company}: {error}", file=sys.stderr)
+        return []
+    candidates: dict[str, dict[str, Any]] = {}
+    for link_match in re.finditer(r'href=["\'](/[^"\']+/\d+/\?jobs=true)["\']', raw, flags=re.I):
+        card_start = raw.rfind('<div class="chakra-card', 0, link_match.start())
+        card = raw[card_start : link_match.end()] if card_start >= 0 else raw[max(0, link_match.start() - 2500) : link_match.end()]
+        title_match = re.search(r'<p\b[^>]*class=["\'][^"\']*css-f8zk62[^"\']*["\'][^>]*>(.*?)</p>', card, flags=re.I | re.S)
+        role = html_to_text(title_match.group(1)) if title_match else infer_role_from_url(link_match.group(1))
+        department_match = re.search(r'<span\b[^>]*class=["\'][^"\']*css-ypynmf[^"\']*["\'][^>]*>(.*?)</span>', card, flags=re.I | re.S)
+        department = html_to_text(department_match.group(1)) if department_match else ""
+        text_values = [
+            html_to_text(match.group(1))
+            for match in re.finditer(r'<p\b[^>]*class=["\'][^"\']*css-de2tee[^"\']*["\'][^>]*>(.*?)</p>', card, flags=re.I | re.S)
+        ]
+        location = ""
+        for value in text_values:
+            normalized = value.lower()
+            if not value or normalized in {"usd", "full time", "part time", "contract", "remote", "hybrid", "on-site"}:
+                continue
+            if re.fullmatch(r"[\d,]+(?:-[\d,]+)?\s*/\s*year", value, flags=re.I):
+                continue
+            location = value
+            break
+        url = normalize_job_url(urllib.parse.urljoin(source_url, html.unescape(link_match.group(1))))
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "kula",
+            "location": location,
+            "job_number": re.search(r"/(\d+)/", link_match.group(1)).group(1) if re.search(r"/(\d+)/", link_match.group(1)) else "",
+            "external_job_id": re.search(r"/(\d+)/", link_match.group(1)).group(1) if re.search(r"/(\d+)/", link_match.group(1)) else "",
+            "posted_at": "",
+            "updated_at": "",
+            "source": source_url,
+            "source_query": department,
+            "freshness_source": "unknown",
+            "notes": "Kula careers page adapter. Kula pages often do not expose official posted dates; use first_seen for freshness.",
+            "_jd_text": html_to_text(card),
+        }
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -4339,6 +4392,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_pinpoint_jobs(source)
     if platform == "brassring":
         return discover_brassring_jobs(source)
+    if platform == "kula":
+        return discover_kula_jobs(source)
     return find_links_for_source(source)
 
 
