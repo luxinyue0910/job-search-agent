@@ -6311,44 +6311,104 @@ def command_classify_sources(args: argparse.Namespace) -> None:
         print(f"Updated {changed} sources in {SOURCES_PATH}.")
 
 
-def command_audit_sources(_: argparse.Namespace) -> None:
-    require_person_files()
-    sources = load_json(SOURCES_PATH).get("sources", [])
-    platforms = collections.Counter(source_platform(source) for source in sources)
-    direct_platforms = {
+def source_quality(source: dict[str, Any]) -> tuple[str, str]:
+    platform = source_platform(source)
+    api_good = {
         "greenhouse",
         "lever",
         "ashby",
-        "gem",
         "workday",
-        "phenom",
-        "m_cloud",
-        "hirebridge",
-        "successfactors",
         "microsoft_jobs",
         "amazon_jobs",
         "google_jobs",
         "meta_jobs",
         "eightfold",
-        "apple_jobs",
-        "providence_jobs",
-        "salesforce_jobs",
-        "smartrecruiters",
-        "icims",
         "oracle_cx",
-        "jobvite",
+        "smartrecruiters",
         "workable",
         "bamboohr",
+        "jobvite",
+    }
+    api_ok = {
+        "phenom",
+        "m_cloud",
+        "hirebridge",
+        "successfactors",
+        "icims",
+        "jibe",
+        "talentbrew",
+        "careerpuck",
+        "pinpoint",
+        "rss",
+        "sitemap",
         "yc_jobs",
         "yc_job_board",
         "hn_who_is_hiring",
-        "rss",
-        "jibe",
+        "kula",
     }
-    direct_count = sum(count for platform, count in platforms.items() if platform in direct_platforms)
+    official_posted_at = {
+        "greenhouse",
+        "lever",
+        "ashby",
+        "workday",
+        "microsoft_jobs",
+        "amazon_jobs",
+        "google_jobs",
+        "eightfold",
+        "oracle_cx",
+        "phenom",
+        "successfactors",
+        "talentbrew",
+        "smartrecruiters",
+        "jobvite",
+        "workable",
+        "bamboohr",
+        "careerpuck",
+    }
+    if platform in api_good:
+        quality = "api_good"
+    elif platform in api_ok:
+        quality = "api_ok"
+    elif platform == "custom":
+        quality = "custom_weak"
+    else:
+        quality = "manual_only"
+    if platform in official_posted_at:
+        posted = "official"
+    elif platform in {"sitemap", "rss"}:
+        posted = "updated_proxy"
+    elif platform in {"kula", "custom", "pinpoint", "brassring"}:
+        posted = "first_seen_only" if platform == "kula" else "unknown"
+    else:
+        posted = "unknown"
+    return quality, posted
+
+
+def command_audit_sources(args: argparse.Namespace) -> None:
+    require_person_files()
+    data = load_json(SOURCES_PATH)
+    sources = data.get("sources", [])
+    platforms = collections.Counter(source_platform(source) for source in sources)
+    qualities = collections.Counter()
+    posted_qualities = collections.Counter()
+    for source in sources:
+        quality, posted = source_quality(source)
+        qualities[quality] += 1
+        posted_qualities[posted] += 1
+        if getattr(args, "write_quality", False):
+            source["source_quality"] = quality
+            source["posted_at_quality"] = posted
+    if getattr(args, "write_quality", False):
+        write_json(SOURCES_PATH, data)
     print(f"Sources: {len(sources)} total")
-    print(f"Direct/API-backed: {direct_count}")
+    print(f"Direct/API-backed: {qualities.get('api_good', 0) + qualities.get('api_ok', 0)}")
     print(f"Custom/low-confidence: {platforms.get('custom', 0)}")
+    print("By source quality:")
+    for quality, count in sorted(qualities.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {quality}: {count}")
+    print("By posted_at quality:")
+    for quality, count in sorted(posted_qualities.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {quality}: {count}")
     print("By platform:")
     for platform, count in sorted(platforms.items(), key=lambda item: (-item[1], item[0])):
         print(f"  {platform}: {count}")
@@ -6357,6 +6417,8 @@ def command_audit_sources(_: argparse.Namespace) -> None:
         print("Custom companies:")
         for source in sorted(custom_sources, key=lambda item: str(item.get("company", "")).lower()):
             print(f"  {source.get('company', 'Unknown Company')}: {source.get('url', '')}")
+    if getattr(args, "write_quality", False):
+        print(f"Wrote source_quality and posted_at_quality to {SOURCES_PATH}.")
 
 
 def command_find_jobs(args: argparse.Namespace) -> None:
@@ -7313,7 +7375,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--send-gmail", action="store_true")
     run.add_argument("--send-outlook", action="store_true")
 
-    subcommands.add_parser("audit-sources", help="Summarize configured sources by platform and confidence.")
+    audit = subcommands.add_parser("audit-sources", help="Summarize configured sources by platform and confidence.")
+    audit.add_argument("--write-quality", action="store_true", help="Write source_quality and posted_at_quality fields to sources.json.")
     discovery_summary = subcommands.add_parser("discovery-summary", help="Summarize a discovery run report.")
     discovery_summary.add_argument("--latest", action="store_true", help="Summarize the most recent discovery run report.")
     discovery_summary.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
