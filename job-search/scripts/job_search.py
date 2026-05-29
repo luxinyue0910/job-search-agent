@@ -610,7 +610,7 @@ def parse_datetime(value: Any) -> dt.datetime | None:
         except (TypeError, ValueError):
             parsed = None
     if parsed is None:
-        for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%m/%d/%Y"):
             try:
                 parsed = dt.datetime.strptime(raw, fmt)
                 break
@@ -4029,7 +4029,10 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             if pages_match:
                 total_pages = min(max_pages, int(pages_match.group(1)))
             found_this_page = 0
-            for item_match in re.finditer(r'<li\b[^>]*class=["\'][^"\']*branded-list__list-item[^"\']*["\'][^>]*>(.*?)</li>', result_html, flags=re.I | re.S):
+            item_matches = list(re.finditer(r'<li\b[^>]*class=["\'][^"\']*branded-list__list-item[^"\']*["\'][^>]*>(.*?)</li>', result_html, flags=re.I | re.S))
+            if not item_matches:
+                item_matches = list(re.finditer(r"<li\b[^>]*>(.*?)</li>", result_html, flags=re.I | re.S))
+            for item_match in item_matches:
                 item = item_match.group(1)
                 link_match = re.search(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*data-job-id=["\']([^"\']+)["\']', item, flags=re.I | re.S)
                 if not link_match:
@@ -4037,6 +4040,8 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 url = normalize_job_url(urllib.parse.urljoin(results_url, html.unescape(link_match.group(1))))
                 role = html_to_text(re.search(r"<h2\b[^>]*>(.*?)</h2>", item, flags=re.I | re.S).group(1)) if re.search(r"<h2\b[^>]*>(.*?)</h2>", item, flags=re.I | re.S) else infer_role_from_url(url)
                 location = html_to_text(re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S).group(1)) if re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S) else ""
+                list_posted_at_match = re.search(r'<span\b[^>]*class=["\'][^"\']*job-date-posted[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S)
+                list_posted_at = normalize_datetime(html_to_text(list_posted_at_match.group(1))) if list_posted_at_match else ""
                 fallback = {
                     "company": company,
                     "job_number": str(link_match.group(2)),
@@ -4051,11 +4056,11 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "location": location,
                     "job_number": detail.get("job_number") or fallback["job_number"],
                     "external_job_id": detail.get("external_job_id") or fallback["external_job_id"],
-                    "posted_at": detail.get("posted_at", ""),
+                    "posted_at": detail.get("posted_at", "") or list_posted_at,
                     "updated_at": detail.get("updated_at", ""),
                     "source": source.get("url", results_url),
                     "source_query": keyword,
-                    "freshness_source": "json_ld_datePosted" if detail.get("posted_at") else "unknown",
+                    "freshness_source": "json_ld_datePosted" if detail.get("posted_at") else ("talentbrew_result_date" if list_posted_at else "unknown"),
                     "notes": "TalentBrew search adapter; detail pages parsed for JobPosting JSON-LD.",
                     "_jd_text": detail.get("_jd_text", ""),
                 }
