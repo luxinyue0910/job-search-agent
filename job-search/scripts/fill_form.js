@@ -1108,9 +1108,10 @@ async function scrollToSubmitOrBottom(page, applicationSurface) {
 
 async function openApplicationSurface(page) {
   for (const locator of [
+    page.getByRole("button", { name: /^apply$/i }).first(),
     page.getByRole("button", { name: /apply now|application form/i }).first(),
     page.getByRole("link", { name: /apply now|apply/i }).first(),
-    page.locator('button[aria-label*="application" i], button:has-text("Apply Now"), a:has-text("Apply Now")').first(),
+    page.locator('button[aria-label*="application" i], button:has-text("Apply"), a:has-text("Apply")').first(),
   ]) {
     try {
       if (await locator.count()) {
@@ -1120,6 +1121,21 @@ async function openApplicationSurface(page) {
       }
     } catch (_error) {
       // Try the next apply control.
+    }
+  }
+
+  for (const locator of [
+    page.getByRole("button", { name: /^apply manually$/i }).first(),
+    page.locator('button:has-text("Apply Manually"), a:has-text("Apply Manually")').first(),
+  ]) {
+    try {
+      if (await locator.count()) {
+        await locator.click({ timeout: NAVIGATION_TIMEOUT });
+        await page.waitForTimeout(4000);
+        break;
+      }
+    } catch (_error) {
+      // Try the next Workday modal control.
     }
   }
 
