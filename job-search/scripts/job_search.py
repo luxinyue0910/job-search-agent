@@ -1806,8 +1806,10 @@ def discover_phenom_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     continue
                 url = phenom_job_url(source, job)
                 apply_url = normalize_job_url(str(job.get("applyUrl") or ""))
+                if source.get("prefer_apply_url") and apply_url:
+                    url = apply_url
                 # Prefer Workday detail URLs when available because they expose richer JD text.
-                if detect_platform(apply_url) == "workday":
+                elif detect_platform(apply_url) == "workday":
                     url = apply_url.removesuffix("/apply")
                 location_values = job.get("multi_location") if isinstance(job.get("multi_location"), list) else []
                 location = "; ".join(str(item) for item in location_values if item) or str(
