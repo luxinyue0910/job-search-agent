@@ -5516,6 +5516,17 @@ def update_application(app_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     raise SystemExit(f"No application found for {app_id}")
 
 
+def numeric_score(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def keyword_matches(text: str, keywords: list[str]) -> list[str]:
     lower = text.lower()
     return [keyword for keyword in keywords if re.search(rf"\b{re.escape(keyword.lower())}\b", lower)]
@@ -7116,6 +7127,130 @@ def render_screening_answers(template: str, app: dict[str, Any], profile: dict[s
     return result
 
 
+def command_application_backlog(args: argparse.Namespace) -> None:
+    statuses = set(args.status or ["prepared", "needs_review", "scored"])
+    tracker = load_tracker()
+    apps: list[dict[str, Any]] = []
+    for app in tracker.get("applications", []):
+        if app.get("status") not in statuses:
+            continue
+        if str(app.get("date_applied") or "").strip():
+            continue
+        if numeric_score(app.get("fit_score")) < args.min_fit:
+            continue
+        filter_text = application_filter_text(app)
+        if args.preferred_locations and not matches_preferred_location(filter_text):
+            continue
+        if args.exclude_years and has_year_requirement(filter_text, args.exclude_years):
+            continue
+        if args.hide_intern and re.search(r"\bintern(ship)?\b", filter_text):
+            continue
+        apps.append(app)
+
+    apps.sort(
+        key=lambda app: (
+            numeric_score(app.get("fit_score")),
+            numeric_score(app.get("ats_score")),
+            str(app.get("posted_at") or app.get("date_found") or ""),
+        ),
+        reverse=True,
+    )
+    if args.limit and args.limit > 0:
+        apps = apps[: args.limit]
+
+    rows = [
+        "| Fit | ATS | Status | Company | Role | Location | Posted/Found | ID |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | --- |",
+    ]
+    for app in apps:
+        posted = app.get("posted_at") or app.get("date_found") or ""
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    str(app.get("fit_score", "")),
+                    str(app.get("ats_score", "")),
+                    str(app.get("status", "")),
+                    str(app.get("company", "")).replace("|", "\\|"),
+                    str(app.get("role", "")).replace("|", "\\|"),
+                    str(app.get("location", "")).replace("|", "\\|"),
+                    str(posted).replace("|", "\\|"),
+                    str(app.get("id", "")).replace("|", "\\|"),
+                ]
+            )
+            + " |"
+        )
+
+    output = textwrap.dedent(
+        f"""\
+        # Application Backlog
+
+        - min_fit: {args.min_fit}
+        - statuses: {", ".join(sorted(statuses))}
+        - preferred_locations: {bool(args.preferred_locations)}
+        - exclude_years: {args.exclude_years or ""}
+        - hide_intern: {bool(args.hide_intern)}
+        - count: {len(apps)}
+
+        """
+    ) + "\n".join(rows) + "\n"
+    if args.output:
+        path = Path(args.output).expanduser()
+        if not path.is_absolute():
+            path = PRIVATE_BASE_ROOT / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output, encoding="utf-8")
+        print(f"Wrote backlog report to {path}")
+    else:
+        print(output)
+
+
+def application_filter_text(app: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for field in ["company", "role", "location", "notes", "posted_at", "date_found"]:
+        parts.append(str(app.get(field, "")))
+    for field in ["action_items", "dealbreakers", "matched_keywords", "missing_keywords"]:
+        value = app.get(field, [])
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        else:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def matches_preferred_location(text: str) -> bool:
+    patterns = [
+        r"\bwa\b",
+        r"\bwashington\b",
+        r"\bseattle\b",
+        r"\bbellevue\b",
+        r"\bredmond\b",
+        r"\bkirkland\b",
+        r"\bca\b",
+        r"\bcalifornia\b",
+        r"\bsan francisco\b",
+        r"\bbay area\b",
+        r"\bsan jose\b",
+        r"\bmountain view\b",
+        r"\bsunnyvale\b",
+        r"\bpalo alto\b",
+        r"\bremote\s*-\s*usa\b",
+        r"\bremote\s*-\s*us\b",
+        r"\bremote,\s*usa\b",
+        r"\bremote,\s*us\b",
+        r"\bremote us\b",
+        r"\bremote usa\b",
+        r"\bus remote\b",
+        r"\bunited states remote\b",
+        r"\bremote \(us\)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def has_year_requirement(text: str, minimum: int) -> bool:
+    return any(year >= minimum for year in extract_years(text))
+
+
 def command_notify(args: argparse.Namespace) -> None:
     summary_path = write_notification()
     print(f"Wrote notification summary to {summary_path}")
@@ -7385,6 +7520,29 @@ def build_parser() -> argparse.ArgumentParser:
     review_hn.add_argument("--apply", action="store_true", help="Mark obvious skip entries as skipped in the tracker.")
     review_hn.add_argument("--limit", type=int, default=20, help="Maximum rows to print per group.")
     review_hn.add_argument("--status", action="append", help="Only review applications with this status. Repeatable.")
+    backlog = subcommands.add_parser(
+        "application-backlog",
+        help="List high-fit unsubmitted applications that are prepared, needs_review, or scored.",
+    )
+    backlog.add_argument("--min-fit", type=float, default=8.0, help="Minimum fit score to include.")
+    backlog.add_argument(
+        "--status",
+        action="append",
+        help="Application status to include. Repeatable. Defaults to prepared, needs_review, and scored.",
+    )
+    backlog.add_argument("--limit", type=int, default=50, help="Maximum rows to print. Use 0 for no limit.")
+    backlog.add_argument(
+        "--preferred-locations",
+        action="store_true",
+        help="Only include WA, CA, or Remote US roles.",
+    )
+    backlog.add_argument(
+        "--exclude-years",
+        type=int,
+        help="Exclude jobs whose text mentions this many required years or more, e.g. --exclude-years 3.",
+    )
+    backlog.add_argument("--hide-intern", action="store_true", help="Hide internship/intern roles.")
+    backlog.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
 
@@ -7410,6 +7568,8 @@ def main() -> None:
         command_discovery_summary(args)
     elif args.command == "review-hn":
         command_review_hn(args)
+    elif args.command == "application-backlog":
+        command_application_backlog(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":
