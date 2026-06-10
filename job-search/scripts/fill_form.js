@@ -327,6 +327,16 @@ async function fillStructuredApplicationFields(page, profile, app, actionItems) 
     /full-stack application leveraging Agent logic/i,
     "I built Youmigo as a full-stack application with a Swift iOS frontend, backend services, database-backed user/profile state, and AI-driven matching and generation workflows. I connected user inputs, retrieval/context logic, APIs, and UI review flows so the agent-assisted results could be inspected and improved by users.",
   );
+  await fillGreenhouseQuestionByLabel(
+    page,
+    /LLM platforms.*production|Claude.*Gemini.*OpenAI|open-source-self-hosted/i,
+    "Primarily OpenAI, with Claude used heavily for AI-assisted development and evaluation workflows. My most substantial build was Youmigo's LLM-powered ingestion pipeline, where crawlers and backend workers used OpenAI GPT-family models to extract, normalize, deduplicate, and rank structured event content. I have used Gemini less and have not owned a self-hosted open-source LLM deployment end to end.",
+  );
+  await fillGreenhouseQuestionByLabel(
+    page,
+    /Describe something reusable.*non-engineers|component library.*template.*framework.*internal tool/i,
+    "At Youmigo, I built a reusable LLM ingestion workflow so non-engineers could add source URLs, run extraction, and review structured event results without asking engineering for one-off scripts. I made it self-serve with config files, prompt templates, validation/dedup rules, and reviewable output reports. I maintained it by tracking failed sources, duplicate rates, extraction quality, and recurring issues that became regression checks.",
+  );
   await answerDemographicQuestion(page, /bound by any agreements.*restrict.*work|non-compete|non-solicitation|confidentiality/i, ["No"]);
 
   await answerRelocationQuestions(page, app, preferences, defaults, actionItems);
