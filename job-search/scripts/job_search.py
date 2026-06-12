@@ -1997,6 +1997,9 @@ def discover_successfactors_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
                 "sortColumn": "referencedate",
                 "sortDirection": "desc",
             }
+            extra_params = source.get("search_params")
+            if isinstance(extra_params, dict):
+                params.update({str(key): str(value) for key, value in extra_params.items() if value not in (None, "")})
             if page_index:
                 params["startrow"] = str(page_index * page_size)
             search_url = urllib.parse.urljoin(base_url + "/", search_path.lstrip("/")) + "?" + urllib.parse.urlencode(params)
@@ -2406,11 +2409,73 @@ def eightfold_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
     base_url = str(source.get("base_url") or source.get("url") or "").rstrip("/")
     if not base_url:
         base_url = "https://jobs.nvidia.com" if str(source.get("domain") or "").lower() == "nvidia.com" else ""
-    position_url = str(job.get("positionUrl") or "").strip()
+    position_url = str(job.get("canonicalPositionUrl") or job.get("positionUrl") or "").strip()
     if position_url:
         return normalize_job_url(urllib.parse.urljoin(base_url + "/", position_url.lstrip("/")))
     job_id = str(job.get("id") or job.get("position_id") or "").strip()
     return normalize_job_url(urllib.parse.urljoin(base_url + "/", f"careers/job/{job_id}"))
+
+
+def eightfold_candidate_from_job(source: dict[str, Any], job: dict[str, Any], keyword: str = "", queried_location: str = "") -> dict[str, Any] | None:
+    company = source.get("company", "Unknown Company")
+    url = eightfold_job_url(source, job)
+    if not url:
+        return None
+    location_values = job.get("standardizedLocations") or job.get("locations") or job.get("location") or []
+    if isinstance(location_values, str):
+        location_text = location_values
+    else:
+        location_text = "; ".join(str(item) for item in location_values if item)
+    posted_raw = job.get("postedTs")
+    if not posted_raw:
+        posted_raw = job.get("t_create") or job.get("creationTs") or job.get("createdTs")
+    updated_raw = job.get("t_update") or job.get("updatedTs")
+    if not updated_raw:
+        updated_raw = job.get("creationTs")
+    notes = "Eightfold direct adapter."
+    if queried_location:
+        notes = f"Eightfold direct adapter; queried_location={queried_location}"
+    return {
+        "company": company,
+        "role": str(job.get("name") or job.get("posting_name") or job.get("displayJobTitle") or infer_role_from_url(url)).strip(),
+        "url": url,
+        "platform": "eightfold",
+        "location": location_text,
+        "job_number": str(job.get("displayJobId") or job.get("display_job_id") or job.get("atsJobId") or job.get("ats_job_id") or ""),
+        "external_job_id": str(job.get("id") or ""),
+        "posted_at": normalize_datetime(posted_raw),
+        "updated_at": normalize_datetime(updated_raw),
+        "source": source.get("url", ""),
+        "source_query": keyword,
+        "notes": notes,
+    }
+
+
+def discover_eightfold_html_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    base_url = str(source.get("url") or source.get("base_url") or "").strip()
+    if not base_url:
+        return []
+    try:
+        raw = html.unescape(fetch_url(base_url))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Eightfold careers page for {source.get('company', 'Unknown Company')}: {error}", file=sys.stderr)
+        return []
+    match = re.search(r'"positions"\s*:\s*', raw)
+    if not match:
+        return []
+    try:
+        positions, _ = json.JSONDecoder().raw_decode(raw[match.end() :])
+    except json.JSONDecodeError:
+        return []
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in positions if isinstance(positions, list) else []:
+        if not isinstance(job, dict):
+            continue
+        candidate = eightfold_candidate_from_job(source, job)
+        if candidate:
+            candidate["notes"] = "Eightfold HTML fallback; API was unavailable or blocked."
+            candidates[candidate["url"]] = candidate
+    return list(candidates.values())
 
 
 def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2450,6 +2515,8 @@ def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     data = fetch_json(api_url)
                 except Exception as error:  # noqa: BLE001
                     print(f"Could not fetch Eightfold API for {company}: {error}", file=sys.stderr)
+                    if not candidates:
+                        return discover_eightfold_html_jobs(source)
                     break
                 block = data.get("data", {}) if isinstance(data, dict) else {}
                 jobs = block.get("positions", []) if isinstance(block, dict) else []
@@ -2458,26 +2525,9 @@ def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 for job in jobs:
                     if not isinstance(job, dict):
                         continue
-                    url = eightfold_job_url(source, job)
-                    location_values = job.get("standardizedLocations") or job.get("locations") or []
-                    if isinstance(location_values, str):
-                        location_text = location_values
-                    else:
-                        location_text = "; ".join(str(item) for item in location_values if item)
-                    candidates[url] = {
-                        "company": company,
-                        "role": str(job.get("name") or job.get("displayJobTitle") or infer_role_from_url(url)).strip(),
-                        "url": url,
-                        "platform": "eightfold",
-                        "location": location_text,
-                        "job_number": str(job.get("displayJobId") or job.get("atsJobId") or ""),
-                        "external_job_id": str(job.get("id") or ""),
-                        "posted_at": normalize_datetime(job.get("postedTs")),
-                        "updated_at": normalize_datetime(job.get("creationTs")),
-                        "source": source.get("url", base_url),
-                        "source_query": keyword,
-                        "notes": f"Eightfold direct adapter; queried_location={location}",
-                    }
+                    candidate = eightfold_candidate_from_job(source, job, keyword=keyword, queried_location=location)
+                    if candidate:
+                        candidates[candidate["url"]] = candidate
                 if len(jobs) < page_size:
                     break
     return list(candidates.values())
