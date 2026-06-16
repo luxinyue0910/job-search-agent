@@ -190,6 +190,14 @@ class SourceTimeout(RuntimeError):
     """Raised when one discovery source exceeds its time budget."""
 
 
+class SourceDiscoveryFailed(RuntimeError):
+    """Raised after all attempts for one discovery source fail."""
+
+    def __init__(self, message: str, attempts: list[dict[str, Any]]):
+        super().__init__(message)
+        self.attempts = attempts
+
+
 @contextlib.contextmanager
 def source_timeout(seconds: float | None):
     if not seconds or seconds <= 0 or not hasattr(signal, "SIGALRM"):
@@ -4927,7 +4935,7 @@ def process_discovered_candidates(
             stats["added"] += 1
         else:
             stats["existing"] += 1
-        if args.score and app.get("status") == "found":
+        if args.score and app.get("status") in {"found", "needs_retry"}:
             try:
                 command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
             except Exception as error:  # noqa: BLE001
@@ -4973,20 +4981,25 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
         f"- Cutoff: {report.get('cutoff', '')}",
         f"- Sources attempted: {totals.get('sources_attempted', 0)} / {totals.get('sources_planned', 0)}",
         f"- Failed sources: {totals.get('failed_sources', 0)}",
+        f"- Retried sources: {totals.get('retried_sources', 0)}",
+        f"- Retry recovered sources: {totals.get('retry_recovered_sources', 0)}",
+        f"- Failed after retries: {totals.get('failed_after_retries', 0)}",
         f"- Discovered: {totals.get('discovered', 0)}",
         f"- Added: {totals.get('added', 0)}",
         f"- Existing: {totals.get('existing', 0)}",
         "",
-        "| Status | Company | Platform | Candidates | Added | Existing | Old | Unknown date | Title | Location | Error / warnings |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Status | Result | Attempts | Company | Platform | Candidates | Added | Existing | Old | Unknown date | Title | Location | Error / warnings |",
+        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for source in report.get("sources", []):
         stats = source.get("stats", {})
         warning = source.get("error") or source.get("warnings") or ""
         warning = " ".join(str(warning).split())[:180]
         lines.append(
-            "| {status} | {company} | {platform} | {candidates} | {added} | {existing} | {old} | {unknown} | {title} | {location} | {warning} |".format(
+            "| {status} | {result} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {old} | {unknown} | {title} | {location} | {warning} |".format(
                 status=source.get("status", ""),
+                result=source.get("result_status", ""),
+                attempts=len(source.get("attempts", [])) or 1,
                 company=str(source.get("company", "")).replace("|", "\\|"),
                 platform=source.get("platform", ""),
                 candidates=source.get("candidates_returned", 0),
@@ -6511,6 +6524,7 @@ def source_report_base(source: dict[str, Any]) -> dict[str, Any]:
         "platform": source_platform(source),
         "url": source.get("url", ""),
         "status": "started",
+        "result_status": "",
         "started_at": now_utc_iso(),
         "finished_at": "",
         "duration_seconds": 0,
@@ -6518,7 +6532,65 @@ def source_report_base(source: dict[str, Any]) -> dict[str, Any]:
         "stats": empty_discovery_stats(),
         "warnings": "",
         "error": "",
+        "attempts": [],
+        "retry_attempts": 0,
     }
+
+
+def source_retry_timeout_seconds(timeout_seconds: float | None, retry_timeout_seconds: float | None) -> float | None:
+    if retry_timeout_seconds and retry_timeout_seconds > 0:
+        if timeout_seconds and timeout_seconds > 0:
+            return max(timeout_seconds, retry_timeout_seconds)
+        return retry_timeout_seconds
+    if timeout_seconds and timeout_seconds > 0:
+        return timeout_seconds * 2
+    return timeout_seconds
+
+
+def discover_source_candidates_with_retries(
+    source_index: int,
+    args: argparse.Namespace,
+    timeout_seconds: float | None,
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
+    max_retries = max(0, int(getattr(args, "source_retries", 1) or 0))
+    retry_timeout = source_retry_timeout_seconds(
+        timeout_seconds,
+        float(getattr(args, "source_retry_timeout_seconds", 0) or 0),
+    )
+    attempts: list[dict[str, Any]] = []
+
+    for attempt_index in range(max_retries + 1):
+        attempt_number = attempt_index + 1
+        attempt_timeout = timeout_seconds if attempt_number == 1 else retry_timeout
+        attempt_started = time.time()
+        attempt_report = {
+            "attempt": attempt_number,
+            "timeout_seconds": attempt_timeout if attempt_timeout is not None else 0,
+            "started_at": now_utc_iso(),
+            "finished_at": "",
+            "duration_seconds": 0,
+            "status": "started",
+            "error": "",
+        }
+        try:
+            candidates, warnings = source_candidates_subprocess(source_index, args, attempt_timeout)
+        except Exception as error:  # noqa: BLE001 - retry/finalize per source, not per error type.
+            attempt_report["status"] = "failed"
+            attempt_report["error"] = str(error)
+            attempt_report["finished_at"] = now_utc_iso()
+            attempt_report["duration_seconds"] = round(time.time() - attempt_started, 2)
+            attempts.append(attempt_report)
+            if attempt_index >= max_retries:
+                raise SourceDiscoveryFailed(str(error), attempts) from error
+            continue
+
+        attempt_report["status"] = "success"
+        attempt_report["finished_at"] = now_utc_iso()
+        attempt_report["duration_seconds"] = round(time.time() - attempt_started, 2)
+        attempts.append(attempt_report)
+        return candidates, warnings, attempts
+
+    raise SourceDiscoveryFailed("source discovery failed without recording an attempt", attempts)
 
 
 def source_candidates_subprocess(
@@ -6608,6 +6680,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     cutoff = discovery_cutoff(args)
     stats = empty_discovery_stats()
     failed_sources = 0
+    retried_sources = 0
+    retry_recovered_sources = 0
+    failed_after_retries = 0
     current_seen_at = now_utc_iso()
     report = {
         "run_id": discovery_run_id(current_seen_at),
@@ -6623,6 +6698,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             "sources_planned": len(source_pairs),
             "sources_attempted": 0,
             "failed_sources": 0,
+            "retried_sources": 0,
+            "retry_recovered_sources": 0,
+            "failed_after_retries": 0,
             **empty_discovery_stats(),
         },
         "sources": [],
@@ -6641,8 +6719,28 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         )
         report["totals"]["sources_attempted"] += 1
         try:
-            candidates, warnings = source_candidates_subprocess(source_index, args, timeout_seconds)
+            candidates, warnings, attempts = discover_source_candidates_with_retries(source_index, args, timeout_seconds)
+            source_report["attempts"] = attempts
+            source_report["retry_attempts"] = max(0, len(attempts) - 1)
             source_report["warnings"] = warnings.strip()
+        except SourceDiscoveryFailed as error:
+            failed_sources += 1
+            source_report["attempts"] = error.attempts
+            source_report["retry_attempts"] = max(0, len(error.attempts) - 1)
+            if source_report["retry_attempts"]:
+                retried_sources += 1
+                failed_after_retries += 1
+            source_report["status"] = "failed_after_retries" if source_report["retry_attempts"] else "failed"
+            source_report["error"] = str(error)
+            source_report["finished_at"] = now_utc_iso()
+            source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            report["sources"].append(source_report)
+            print(
+                f"    failed after {source_report['duration_seconds']}s: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.
             failed_sources += 1
             source_report["status"] = "failed"
@@ -6662,23 +6760,36 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         source_stats = process_discovered_candidates(candidates, args, profile, seen, effective_cutoff, current_seen_at)
         source_report["candidates_returned"] = len(candidates)
         source_report["stats"] = source_stats
-        source_report["status"] = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
+        result_status = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
+        source_report["result_status"] = result_status
+        if source_report["retry_attempts"]:
+            retried_sources += 1
+            retry_recovered_sources += 1
+            source_report["status"] = "retry_success"
+        else:
+            source_report["status"] = result_status
         source_report["finished_at"] = now_utc_iso()
         source_report["duration_seconds"] = round(time.time() - source_started, 2)
         report["sources"].append(source_report)
         add_stats(stats, source_stats)
+        status_detail = source_report["status"]
+        if source_report["result_status"] and source_report["status"] != source_report["result_status"]:
+            status_detail = f"{source_report['status']} ({source_report['result_status']})"
         print(
-            f"    {source_report['status']}: candidates={len(candidates)} "
+            f"    {status_detail}: candidates={len(candidates)} "
             f"added={source_stats['added']} existing={source_stats['existing']} "
             f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
             f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
-            f"({source_report['duration_seconds']}s)",
+            f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
             flush=True,
         )
 
     save_seen_jobs(seen)
     report["finished_at"] = now_utc_iso()
     report["totals"]["failed_sources"] = failed_sources
+    report["totals"]["retried_sources"] = retried_sources
+    report["totals"]["retry_recovered_sources"] = retry_recovered_sources
+    report["totals"]["failed_after_retries"] = failed_after_retries
     for key, value in stats.items():
         report["totals"][key] = value
     report_path = write_discovery_run_report(report)
@@ -6688,7 +6799,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
-        f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}."
+        f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}. "
+        f"Retried sources: {retried_sources}. Retry recovered: {retry_recovered_sources}. "
+        f"Failed after retries: {failed_after_retries}."
     )
     print(f"Discovery run report: {report_path}")
 
@@ -6838,12 +6951,45 @@ def command_score_job(args: argparse.Namespace) -> None:
         if track_resume:
             app["resume_file"] = str(track_resume)
     jd_text = read_job_text(app, args.jd_file)
-    score = score_text(app, jd_text, profile)
     output_dir = app_output_dir(app)
     output_dir.mkdir(parents=True, exist_ok=True)
     jd_path = output_dir / "jd.md"
     report_path = output_dir / "score_report.md"
     jd_path.write_text(jd_text + "\n", encoding="utf-8")
+    fetch_failure_reason = job_text_fetch_failure_reason(jd_text)
+    if fetch_failure_reason:
+        report = render_fetch_failure_report(app, fetch_failure_reason)
+        report_path.write_text(report, encoding="utf-8")
+        failure_note = f"fetch_failed: {fetch_failure_reason}"
+        existing_notes = str(app.get("notes") or "").strip()
+        notes = existing_notes
+        if failure_note not in existing_notes:
+            notes = failure_note if not existing_notes else f"{existing_notes}\n{failure_note}"
+        update_application(
+            app["id"],
+            {
+                "fit_score": "",
+                "ats_score": "",
+                "status": "needs_retry",
+                "dealbreakers": [],
+                "action_items": [
+                    "Job description fetch failed; retry scoring after the ATS recovers or with a manual JD file."
+                ],
+                "matched_keywords": [],
+                "resume_keyword_matches": [],
+                "missing_keywords": [],
+                "jd_path": str(jd_path),
+                "score_report_path": str(report_path),
+                "target_track": app.get("target_track", ""),
+                "matched_tracks": app.get("matched_tracks", []),
+                "resume_file": app.get("resume_file", ""),
+                "notes": notes,
+            },
+        )
+        print(report)
+        return
+
+    score = score_text(app, jd_text, profile)
     report = render_score_report(app, score)
     report_path.write_text(report, encoding="utf-8")
     update_application(
@@ -6866,6 +7012,49 @@ def command_score_job(args: argparse.Namespace) -> None:
         },
     )
     print(report)
+
+
+def job_text_fetch_failure_reason(jd_text: str) -> str:
+    text = re.sub(r"\s+", " ", str(jd_text or "")).strip()
+    if not text:
+        return "empty job description"
+    lower = text.lower()
+    if lower.startswith("unable to fetch job description"):
+        return text[:240]
+    if re.fullmatch(r"internal server error\.?\s*(?:\(id:\s*[^)]*\))?", text, flags=re.I):
+        return "job board returned Internal Server Error"
+    if len(text) <= 300:
+        transient_markers = [
+            "workday is currently unavailable",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "temporarily unavailable",
+        ]
+        if any(marker in lower for marker in transient_markers):
+            return text[:240]
+    return ""
+
+
+def render_fetch_failure_report(app: dict[str, Any], reason: str) -> str:
+    return textwrap.dedent(
+        f"""\
+        # Score Report: {app.get('role', '')} at {app.get('company', '')}
+
+        - URL: {app.get('url', '')}
+        - Platform: {app.get('platform', '')}
+        - Status: needs_retry
+
+        ## Fetch Failure
+
+        {reason}
+
+        ## Action Items
+
+        - Retry scoring after the ATS recovers, or run `score-job --jd-file` with a manually saved JD.
+        - Do not use this record for ranking until a real job description is available.
+        """
+    )
 
 
 def render_score_report(app: dict[str, Any], score: dict[str, Any]) -> str:
@@ -7393,7 +7582,7 @@ def command_run(args: argparse.Namespace) -> None:
     command_find_jobs(args)
     tracker = load_tracker()
     for app in tracker.get("applications", []):
-        if app.get("status") == "found":
+        if app.get("status") in {"found", "needs_retry"}:
             try:
                 score_args = argparse.Namespace(id=app["id"], jd_file=None, track=getattr(args, "track", None))
                 command_score_job(score_args)
@@ -7457,6 +7646,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=45,
         help="Maximum seconds to spend on one source before marking it failed. Use 0 to disable.",
+    )
+    discover.add_argument(
+        "--source-retries",
+        type=int,
+        default=1,
+        help="Retry a failed source this many times before marking it failed_after_retries. Use 0 to disable.",
+    )
+    discover.add_argument(
+        "--source-retry-timeout-seconds",
+        type=float,
+        default=0,
+        help="Timeout for retry attempts. Defaults to twice --source-timeout-seconds.",
     )
     discover.add_argument(
         "--source-company",
