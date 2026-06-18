@@ -46,10 +46,15 @@ APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
 SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
 WATCHLIST_PATH = PRIVATE_BASE_ROOT / "data" / "company_watchlist.json"
 SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
+SEEN_JOBS_DIR = PRIVATE_BASE_ROOT / "data" / "seen_jobs"
+SEEN_JOBS_INDEX_PATH = SEEN_JOBS_DIR / "index.json"
+SEEN_JOBS_SHARDS_DIR = SEEN_JOBS_DIR / "shards"
 TRACKS_DIR = PRIVATE_BASE_ROOT / "tracks"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 DISCOVERY_RUNS_DIR = PRIVATE_BASE_ROOT / "data" / "discovery_runs"
+SEEN_JOBS_SHARD_COUNT = 256
+SEEN_JOBS_INTERNAL_KEYS = {"_seen_jobs_format"}
 
 CSV_FIELDS = [
     "id",
@@ -236,7 +241,7 @@ def configure_person(person: str) -> None:
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR, DISCOVERY_RUNS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, SEEN_JOBS_DIR, SEEN_JOBS_INDEX_PATH, SEEN_JOBS_SHARDS_DIR, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR, DISCOVERY_RUNS_DIR
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -250,6 +255,9 @@ def configure_person(person: str) -> None:
     SOURCES_PATH = PERSON_ROOT / "data" / "sources.json"
     WATCHLIST_PATH = PERSON_ROOT / "data" / "company_watchlist.json"
     SEEN_JOBS_PATH = PERSON_ROOT / "data" / "seen_jobs.json"
+    SEEN_JOBS_DIR = PERSON_ROOT / "data" / "seen_jobs"
+    SEEN_JOBS_INDEX_PATH = SEEN_JOBS_DIR / "index.json"
+    SEEN_JOBS_SHARDS_DIR = SEEN_JOBS_DIR / "shards"
     TRACKS_DIR = PERSON_ROOT / "tracks"
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
@@ -280,17 +288,136 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
         file.write("\n")
 
 
+def seen_jobs_shard_for_url(url: str) -> str:
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return f"{digest[:2]}.jsonl"
+
+
+def compact_seen_record(url: str, record: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {"url": record.get("url") or url}
+    preferred_fields = [
+        "company",
+        "role",
+        "platform",
+        "location",
+        "posted_at",
+        "updated_at",
+        "first_seen",
+        "last_seen",
+        "source",
+        "source_query",
+        "freshness_source",
+        "job_number",
+        "external_job_id",
+        "target_track",
+        "resume_file",
+        "matched_tracks",
+    ]
+    for field in preferred_fields:
+        value = record.get(field)
+        if value in ("", None, [], {}):
+            continue
+        compact[field] = value
+    for field in sorted(record):
+        if field in compact or field in preferred_fields or field in SEEN_JOBS_INTERNAL_KEYS:
+            continue
+        value = record.get(field)
+        if value in ("", None, [], {}):
+            continue
+        compact[field] = value
+    return compact
+
+
+def clean_seen_jobs_for_legacy_json(seen: dict[str, Any]) -> dict[str, Any]:
+    cleaned = {key: value for key, value in seen.items() if key not in SEEN_JOBS_INTERNAL_KEYS}
+    cleaned.setdefault("jobs", {})
+    return cleaned
+
+
+def load_sharded_seen_jobs() -> dict[str, Any]:
+    jobs: dict[str, Any] = {}
+    if SEEN_JOBS_SHARDS_DIR.exists():
+        for shard_path in sorted(SEEN_JOBS_SHARDS_DIR.glob("*.jsonl")):
+            with shard_path.open("r", encoding="utf-8") as file:
+                for line_number, line in enumerate(file, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    url = str(record.get("url", "")).strip()
+                    if not url:
+                        raise ValueError(f"Missing url in {shard_path}:{line_number}")
+                    jobs[url] = record
+    return {"jobs": jobs, "_seen_jobs_format": "sharded"}
+
+
+def write_sharded_seen_jobs(seen: dict[str, Any]) -> bool:
+    jobs = seen.setdefault("jobs", {})
+    SEEN_JOBS_SHARDS_DIR.mkdir(parents=True, exist_ok=True)
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = collections.defaultdict(list)
+    for url, record in jobs.items():
+        normalized_url = str(record.get("url") or url)
+        record["url"] = normalized_url
+        grouped[seen_jobs_shard_for_url(normalized_url)].append((normalized_url, record))
+
+    changed = False
+    shard_names = set(grouped) | {path.name for path in SEEN_JOBS_SHARDS_DIR.glob("*.jsonl")}
+    for shard_name in sorted(shard_names):
+        shard_path = SEEN_JOBS_SHARDS_DIR / shard_name
+        rows = grouped.get(shard_name, [])
+        if not rows:
+            if shard_path.exists():
+                shard_path.unlink()
+                changed = True
+            continue
+        lines = [
+            json.dumps(compact_seen_record(url, record), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for url, record in sorted(rows, key=lambda item: item[0])
+        ]
+        content = "\n".join(lines) + "\n"
+        if shard_path.exists() and shard_path.read_text(encoding="utf-8") == content:
+            continue
+        shard_path.write_text(content, encoding="utf-8")
+        changed = True
+
+    index = {
+        "version": 2,
+        "format": "jsonl-shards",
+        "shard_count": SEEN_JOBS_SHARD_COUNT,
+        "records": len(jobs),
+        "last_updated": now_utc_iso(),
+    }
+    existing_index = load_json(SEEN_JOBS_INDEX_PATH) if SEEN_JOBS_INDEX_PATH.exists() else {}
+    comparable_existing = {key: value for key, value in existing_index.items() if key != "last_updated"}
+    comparable_new = {key: value for key, value in index.items() if key != "last_updated"}
+    if changed or comparable_existing != comparable_new:
+        SEEN_JOBS_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SEEN_JOBS_INDEX_PATH.write_text(
+            json.dumps(index, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        changed = True
+    return changed
+
+
 def load_seen_jobs() -> dict[str, Any]:
+    if SEEN_JOBS_INDEX_PATH.exists() or SEEN_JOBS_SHARDS_DIR.exists():
+        return load_sharded_seen_jobs()
     if not SEEN_JOBS_PATH.exists():
-        return {"jobs": {}}
+        return {"jobs": {}, "_seen_jobs_format": "sharded"}
     data = load_json(SEEN_JOBS_PATH)
     data.setdefault("jobs", {})
+    data["_seen_jobs_format"] = "legacy"
     return data
 
 
 def save_seen_jobs(seen: dict[str, Any]) -> None:
-    seen["last_updated"] = now_utc_iso()
-    write_json(SEEN_JOBS_PATH, seen)
+    if seen.get("_seen_jobs_format") == "sharded" or SEEN_JOBS_INDEX_PATH.exists() or SEEN_JOBS_SHARDS_DIR.exists():
+        write_sharded_seen_jobs(seen)
+        return
+    cleaned = clean_seen_jobs_for_legacy_json(seen)
+    cleaned["last_updated"] = now_utc_iso()
+    write_json(SEEN_JOBS_PATH, cleaned)
 
 
 def load_profile() -> dict[str, Any]:
@@ -4879,31 +5006,32 @@ def process_discovered_candidates(
                 candidate["resume_file"] = str(track_resume)
         candidate["url"] = normalize_job_url(candidate["url"])
         key = candidate["url"]
-        seen_record = seen_jobs.setdefault(
-            key,
-            {
+        seen_record = seen_jobs.get(key)
+        if seen_record is None:
+            seen_record = {
                 "company": candidate.get("company", ""),
                 "role": candidate.get("role", ""),
                 "url": key,
                 "first_seen": current_seen_at,
-            },
-        )
-        seen_record.update(
-            {
-                "company": candidate.get("company", seen_record.get("company", "")),
-                "role": candidate.get("role", seen_record.get("role", "")),
-                "platform": candidate.get("platform", seen_record.get("platform", "")),
-                "location": candidate.get("location", seen_record.get("location", "")),
-                "posted_at": candidate.get("posted_at", seen_record.get("posted_at", "")),
-                "updated_at": candidate.get("updated_at", seen_record.get("updated_at", "")),
                 "last_seen": current_seen_at,
-                "source": candidate.get("source", seen_record.get("source", "")),
-                "source_query": candidate.get("source_query", seen_record.get("source_query", "")),
-                "freshness_source": candidate.get("freshness_source", seen_record.get("freshness_source", "")),
-                "job_number": candidate.get("job_number", seen_record.get("job_number", "")),
-                "external_job_id": candidate.get("external_job_id", seen_record.get("external_job_id", "")),
             }
-        )
+            seen_jobs[key] = seen_record
+        for field in [
+            "company",
+            "role",
+            "platform",
+            "location",
+            "posted_at",
+            "updated_at",
+            "source",
+            "source_query",
+            "freshness_source",
+            "job_number",
+            "external_job_id",
+        ]:
+            value = candidate.get(field)
+            if value and seen_record.get(field) != value:
+                seen_record[field] = value
         if track_id:
             seen_record["matched_tracks"] = merge_unique(seen_record.get("matched_tracks", []), [track_id])
             if not seen_record.get("target_track"):
@@ -7594,13 +7722,44 @@ def command_run(args: argparse.Namespace) -> None:
     print("Run complete.")
 
 
+def command_migrate_seen_jobs(args: argparse.Namespace) -> None:
+    if not SEEN_JOBS_PATH.exists() and (SEEN_JOBS_INDEX_PATH.exists() or SEEN_JOBS_SHARDS_DIR.exists()):
+        seen = load_seen_jobs()
+        print(f"Seen jobs already use sharded storage: {len(seen.get('jobs', {}))} records.")
+        return
+    if not SEEN_JOBS_PATH.exists():
+        seen = {"jobs": {}, "_seen_jobs_format": "sharded"}
+        write_sharded_seen_jobs(seen)
+        print(f"Initialized sharded seen jobs storage: {SEEN_JOBS_INDEX_PATH}")
+        return
+
+    legacy = load_json(SEEN_JOBS_PATH)
+    legacy_jobs = legacy.get("jobs", {})
+    if not isinstance(legacy_jobs, dict):
+        raise SystemExit(f"Invalid legacy seen jobs file: expected object at jobs in {SEEN_JOBS_PATH}")
+    seen = {"jobs": legacy_jobs, "_seen_jobs_format": "sharded"}
+    write_sharded_seen_jobs(seen)
+    migrated = load_sharded_seen_jobs()
+    migrated_count = len(migrated.get("jobs", {}))
+    legacy_count = len(legacy_jobs)
+    if migrated_count != legacy_count:
+        raise SystemExit(f"Migration count mismatch: legacy={legacy_count}, sharded={migrated_count}")
+    if not args.keep_legacy:
+        SEEN_JOBS_PATH.unlink()
+    action = "kept" if args.keep_legacy else "removed"
+    print(
+        f"Migrated {migrated_count} seen jobs to {SEEN_JOBS_DIR}. "
+        f"Legacy file {action}: {SEEN_JOBS_PATH}"
+    )
+
+
 def command_init_person(_args: argparse.Namespace) -> None:
     create_from_template(ROOT / "examples" / "profile.example.json", PROFILE_PATH)
     create_from_template(ROOT / "examples" / "sources.example.json", SOURCES_PATH)
     create_from_template(ROOT / "examples" / "company_watchlist.example.json", WATCHLIST_PATH)
     create_from_template(ROOT / "examples" / "applications.example.json", APPLICATIONS_JSON)
     create_from_template(ROOT / "examples" / "applications.example.csv", APPLICATIONS_CSV)
-    create_from_template(ROOT / "examples" / "seen_jobs.example.json", SEEN_JOBS_PATH)
+    save_seen_jobs({"jobs": {}, "_seen_jobs_format": "sharded"})
     create_from_template(ROOT / "examples" / "master_resume.example.md", PERSON_ROOT / "resume" / "master_resume.md")
     create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "track.json", TRACKS_DIR / "qa_engineer" / "track.json")
     create_from_template(ROOT / "examples" / "tracks" / "qa_engineer" / "master_resume.md", TRACKS_DIR / "qa_engineer" / "master_resume.md")
@@ -7773,6 +7932,15 @@ def build_parser() -> argparse.ArgumentParser:
     review_hn.add_argument("--apply", action="store_true", help="Mark obvious skip entries as skipped in the tracker.")
     review_hn.add_argument("--limit", type=int, default=20, help="Maximum rows to print per group.")
     review_hn.add_argument("--status", action="append", help="Only review applications with this status. Repeatable.")
+    migrate_seen = subcommands.add_parser(
+        "migrate-seen-jobs",
+        help="Migrate data/seen_jobs.json to sharded JSONL storage.",
+    )
+    migrate_seen.add_argument(
+        "--keep-legacy",
+        action="store_true",
+        help="Keep data/seen_jobs.json after writing data/seen_jobs/ shards.",
+    )
     backlog = subcommands.add_parser(
         "application-backlog",
         help="List high-fit unsubmitted applications that are prepared, needs_review, or scored.",
@@ -7821,6 +7989,8 @@ def main() -> None:
         command_discovery_summary(args)
     elif args.command == "review-hn":
         command_review_hn(args)
+    elif args.command == "migrate-seen-jobs":
+        command_migrate_seen_jobs(args)
     elif args.command == "application-backlog":
         command_application_backlog(args)
     elif args.command == "discover-web-jobs":
