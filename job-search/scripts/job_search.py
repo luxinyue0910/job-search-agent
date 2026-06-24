@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures
 import contextlib
 import csv
 import datetime as dt
@@ -7140,18 +7141,76 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
 
     track_id = profile.get("_track", {}).get("id")
     timeout_seconds = float(getattr(args, "source_timeout_seconds", 45) or 0)
+    worker_count = max(1, int(getattr(args, "workers", 1) or 1))
+    report["workers"] = worker_count
+    work_items = []
     for ordinal, (source_index, source) in enumerate(source_pairs, 1):
         source = source_for_track(source, track_id)
-        source_started = time.time()
-        source_report = source_report_base(source)
+        work_items.append(
+            {
+                "ordinal": ordinal,
+                "source_index": source_index,
+                "source": source,
+                "source_started": time.time(),
+                "source_report": source_report_base(source),
+            }
+        )
         print(
             f"[{ordinal}/{len(source_pairs)}] {source.get('company', 'Unknown Company')} "
             f"({source_platform(source)}) ...",
             flush=True,
         )
         report["totals"]["sources_attempted"] += 1
+
+    def fetch_source(work_item: dict[str, Any]) -> dict[str, Any]:
         try:
-            candidates, warnings, attempts = discover_source_candidates_with_retries(source_index, args, timeout_seconds)
+            candidates, warnings, attempts = discover_source_candidates_with_retries(
+                int(work_item["source_index"]),
+                args,
+                timeout_seconds,
+            )
+            return {
+                "ok": True,
+                "candidates": candidates,
+                "warnings": warnings,
+                "attempts": attempts,
+                "finished_at": now_utc_iso(),
+                "duration_seconds": round(time.time() - float(work_item["source_started"]), 2),
+            }
+        except Exception as error:  # noqa: BLE001 - one source should not stop the run.
+            return {
+                "ok": False,
+                "error": error,
+                "finished_at": now_utc_iso(),
+                "duration_seconds": round(time.time() - float(work_item["source_started"]), 2),
+            }
+
+    fetch_results: dict[int, dict[str, Any]] = {}
+    if worker_count == 1 or len(work_items) <= 1:
+        for work_item in work_items:
+            fetch_results[int(work_item["ordinal"])] = fetch_source(work_item)
+    else:
+        max_workers = min(worker_count, len(work_items))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_work_item = {executor.submit(fetch_source, work_item): work_item for work_item in work_items}
+            for future in concurrent.futures.as_completed(future_to_work_item):
+                work_item = future_to_work_item[future]
+                fetch_results[int(work_item["ordinal"])] = future.result()
+
+    for work_item in work_items:
+        ordinal = int(work_item["ordinal"])
+        source = work_item["source"]
+        source_report = work_item["source_report"]
+        fetch_result = fetch_results[ordinal]
+        try:
+            if not fetch_result.get("ok"):
+                error = fetch_result.get("error")
+                if isinstance(error, BaseException):
+                    raise error
+                raise RuntimeError(str(error))
+            candidates = fetch_result["candidates"]
+            warnings = str(fetch_result.get("warnings", ""))
+            attempts = fetch_result["attempts"]
             source_report["attempts"] = attempts
             source_report["retry_attempts"] = max(0, len(attempts) - 1)
             source_report["warnings"] = warnings.strip()
@@ -7164,8 +7223,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 failed_after_retries += 1
             source_report["status"] = "failed_after_retries" if source_report["retry_attempts"] else "failed"
             source_report["error"] = str(error)
-            source_report["finished_at"] = now_utc_iso()
-            source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            source_report["finished_at"] = str(fetch_result.get("finished_at") or now_utc_iso())
+            source_report["duration_seconds"] = fetch_result.get("duration_seconds", 0)
             annotate_source_health(source_report, source)
             report["sources"].append(source_report)
             print(
@@ -7178,8 +7237,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             failed_sources += 1
             source_report["status"] = "failed"
             source_report["error"] = str(error)
-            source_report["finished_at"] = now_utc_iso()
-            source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            source_report["finished_at"] = str(fetch_result.get("finished_at") or now_utc_iso())
+            source_report["duration_seconds"] = fetch_result.get("duration_seconds", 0)
             annotate_source_health(source_report, source)
             report["sources"].append(source_report)
             print(
@@ -7202,8 +7261,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["status"] = "retry_success"
         else:
             source_report["status"] = result_status
-        source_report["finished_at"] = now_utc_iso()
-        source_report["duration_seconds"] = round(time.time() - source_started, 2)
+        source_report["finished_at"] = str(fetch_result.get("finished_at") or now_utc_iso())
+        source_report["duration_seconds"] = fetch_result.get("duration_seconds", 0)
         annotate_source_health(source_report, source)
         report["sources"].append(source_report)
         add_stats(stats, source_stats)
@@ -8291,6 +8350,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-company",
         action="append",
         help="Only run discovery for a specific source company. Repeat for multiple companies.",
+    )
+    discover.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of source fetch workers. Tracker, seen-jobs, scoring, and report writes remain single-threaded.",
     )
 
     discover_source = subcommands.add_parser("discover-source-candidates", help=argparse.SUPPRESS)

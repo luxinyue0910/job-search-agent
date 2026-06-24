@@ -107,7 +107,7 @@ python3 job-search/scripts/job_search.py prepare-application --id <application-i
 
 If a job is found by both QA and SDE searches, the tracker keeps one application by URL and appends both values to `matched_tracks`. `prepare-application` uses the application `target_track` unless you override it with `--track`.
 
-Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`.
+Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Source fetches run concurrently by default with `--workers 8`, while tracker, seen-job, scoring, and report writes stay single-threaded. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`.
 
 Discovery reports keep the legacy `status` and `result_status` fields and add `health` plus `failure_category` for source diagnostics. Use `discovery-summary` for a run summary, `source-health` to review failed/config-broken sources, and `daily-review` to write a combined priority/maybe/retry review file under the private repo.
 
@@ -127,7 +127,7 @@ export BING_SEARCH_API_KEY="..."
 Examples:
 
 ```bash
-python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
+python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score --workers 8
 python3 job-search/scripts/job_search.py classify-sources --custom-only
 python3 job-search/scripts/job_search.py classify-sources --custom-only --apply
 python3 job-search/scripts/job_search.py discover-web-jobs --provider serpapi --since-days 7 --score --update-sources

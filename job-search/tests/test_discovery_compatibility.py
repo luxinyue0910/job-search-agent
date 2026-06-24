@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -64,6 +65,7 @@ def discover_args(**overrides):
         "source_timeout_seconds": 30,
         "source_retries": 0,
         "source_retry_timeout_seconds": 0,
+        "workers": 1,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -190,6 +192,59 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([], "")) as mocked:
                 job_search.command_discover_jobs(discover_args())
             self.assertEqual(mocked.call_count, 0)
+
+    def test_discover_jobs_fetches_sources_concurrently_but_processes_on_main_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(
+                private_root,
+                [
+                    {"company": "WorkerOne", "platform": "custom", "url": "https://example.com/one"},
+                    {"company": "WorkerTwo", "platform": "custom", "url": "https://example.com/two"},
+                ],
+            )
+            job_search = load_job_search(private_root)
+            main_thread = threading.current_thread()
+            barrier = threading.Barrier(2, timeout=0.5)
+            lock = threading.Lock()
+            events: list[str] = []
+
+            def fake_discover(source_index, args, timeout_seconds):
+                with lock:
+                    events.append(f"fetch_start_{source_index}")
+                barrier.wait()
+                with lock:
+                    events.append(f"fetch_done_{source_index}")
+                return (
+                    [
+                        {
+                            "company": f"Worker{source_index}",
+                            "role": "Software Engineer",
+                            "url": f"https://example.com/jobs/{source_index}",
+                            "platform": "custom",
+                            "location": "Seattle, WA",
+                            "posted_at": "2026-06-23T00:00:00+00:00",
+                        }
+                    ],
+                    "",
+                    [{"attempt": 1, "status": "success"}],
+                )
+
+            def fake_process(candidates, args, profile, seen, cutoff, current_seen_at):
+                self.assertIs(threading.current_thread(), main_thread)
+                with lock:
+                    events.append(f"process_{candidates[0]['company']}")
+                return job_search.empty_discovery_stats()
+
+            with mock.patch.object(job_search, "discover_source_candidates_with_retries", side_effect=fake_discover):
+                with mock.patch.object(job_search, "process_discovered_candidates", side_effect=fake_process):
+                    job_search.command_discover_jobs(discover_args(workers=2))
+
+            self.assertEqual(events.count("fetch_start_0"), 1)
+            self.assertEqual(events.count("fetch_start_1"), 1)
+            first_process_index = min(index for index, event in enumerate(events) if event.startswith("process_"))
+            self.assertLess(events.index("fetch_done_0"), first_process_index)
+            self.assertLess(events.index("fetch_done_1"), first_process_index)
 
     def test_startup_titles_match_default_discovery_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
