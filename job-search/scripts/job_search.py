@@ -25,6 +25,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -76,6 +77,8 @@ CSV_FIELDS = [
     "source",
     "source_query",
     "freshness_source",
+    "review_bucket",
+    "discovery_bucket",
     "target_track",
     "matched_tracks",
     "resume_file",
@@ -144,6 +147,15 @@ DEFAULT_DISCOVERY_TITLE_KEYWORDS = [
     "entry level",
     "swe",
     "developer",
+    "product engineer",
+    "founding engineer",
+    "developer tools",
+    "developer tools engineer",
+    "integration engineer",
+    "integrations engineer",
+    "customer engineer",
+    "qa automation",
+    "sdet",
 ]
 
 DEFAULT_WEB_DISCOVERY_ROLES = [
@@ -468,6 +480,9 @@ def profile_for_track(track_id: str | None) -> dict[str, Any]:
             [str(item) for item in targets.get(key, [])],
             [str(item) for item in track_targets.get(key, [])],
         )
+    if isinstance(track.get("dealbreakers"), dict):
+        dealbreakers = profile.setdefault("dealbreakers", {})
+        dealbreakers.update(track["dealbreakers"])
     profile["_track"] = track
     return profile
 
@@ -604,6 +619,12 @@ def detect_platform(url: str) -> str:
         return "yc_job_board"
     if "ycombinator.com" in host and "/companies/" in path and "/jobs" in path:
         return "yc_jobs"
+    if "startup.jobs" in host:
+        return "startup_jobs"
+    if host in {"builtin.com", "www.builtin.com"} or host.startswith("builtin") or ".builtin" in host:
+        return "builtin_jobs"
+    if host.startswith("jobs.") and any(domain in host for domain in ["madrona.com", "a16z.com", "lsvp.com"]):
+        return "getro_jobs"
     if "news.ycombinator.com" in host or "hn.algolia.com" in host:
         return "hn_who_is_hiring"
     if path.endswith(".xml") or "/services/rss/" in path:
@@ -803,6 +824,23 @@ def source_discovery_cutoff(source: dict[str, Any], default_cutoff: dt.datetime)
 
 def source_platform(source: dict[str, Any]) -> str:
     return str(source.get("platform") or source.get("type") or detect_platform(source.get("url", ""))).lower()
+
+
+def truthy_source_flag(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "false", "no", "n", "inactive", "disabled"}:
+        return False
+    if normalized in {"1", "true", "yes", "y", "active", "enabled"}:
+        return True
+    return default
+
+
+def source_is_active(source: dict[str, Any]) -> bool:
+    return truthy_source_flag(source.get("active"), default=True)
 
 
 def source_for_track(source: dict[str, Any], track_id: str | None) -> dict[str, Any]:
@@ -4563,6 +4601,14 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_yc_jobs(source)
     if platform == "yc_job_board":
         return discover_yc_job_board_jobs(source)
+    if platform == "startup_jobs":
+        return discover_startup_jobs(source)
+    if platform == "builtin_jobs":
+        return discover_builtin_jobs(source)
+    if platform == "getro_jobs":
+        return discover_getro_jobs(source)
+    if platform == "consider_jobs":
+        return discover_consider_jobs(source)
     if platform == "hn_who_is_hiring":
         return discover_hn_who_is_hiring_jobs(source)
     if platform == "sitemap":
@@ -4976,6 +5022,7 @@ def empty_discovery_stats() -> dict[str, int]:
         "discovered": 0,
         "added": 0,
         "existing": 0,
+        "maybe_backlog": 0,
         "skipped_old": 0,
         "skipped_unknown_date": 0,
         "skipped_title": 0,
@@ -5044,26 +5091,50 @@ def process_discovered_candidates(
         candidate["last_seen"] = current_seen_at
 
         posted_at = parse_datetime(candidate.get("posted_at"))
+        maybe_reasons: list[str] = []
         if not posted_at:
             if not args.include_unknown_posted_date:
-                stats["skipped_unknown_date"] += 1
-                continue
+                if getattr(args, "include_maybe_backlog", False):
+                    maybe_reasons.append("unknown_posted_at")
+                else:
+                    stats["skipped_unknown_date"] += 1
+                    continue
         elif cutoff and posted_at < cutoff:
             stats["skipped_old"] += 1
             continue
         if not args.no_role_filter and not discovery_title_matches(candidate, profile):
-            stats["skipped_title"] += 1
-            continue
+            if getattr(args, "include_maybe_backlog", False):
+                maybe_reasons.append("fuzzy_title")
+            else:
+                stats["skipped_title"] += 1
+                continue
         if not location_allowed(candidate.get("location", ""), profile):
             stats["skipped_location"] += 1
             continue
+        if maybe_reasons:
+            candidate["review_bucket"] = "maybe"
+            candidate["discovery_bucket"] = "maybe_backlog"
+            existing_notes = str(candidate.get("notes") or "").strip()
+            reason_text = "maybe_backlog: " + ", ".join(maybe_reasons)
+            candidate["notes"] = "; ".join(item for item in [existing_notes, reason_text] if item)
+            stats["maybe_backlog"] += 1
 
         app, created = upsert_application(candidate)
         if created:
             stats["added"] += 1
         else:
             stats["existing"] += 1
-        if args.score and app.get("status") in {"found", "needs_retry"}:
+        if maybe_reasons:
+            update_application(
+                app["id"],
+                {
+                    "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                    "notes": candidate.get("notes", app.get("notes", "")),
+                },
+            )
+        if args.score and not maybe_reasons and app.get("status") in {"found", "needs_retry"}:
             try:
                 command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
             except Exception as error:  # noqa: BLE001
@@ -5087,6 +5158,81 @@ def discovery_source_status(candidates_count: int, stats: dict[str, int], warnin
     if candidates_count == 0:
         return "searched_no_jobs_returned"
     return "searched_no_new_matches"
+
+
+def source_failure_category(source: dict[str, Any], text: str) -> str:
+    platform = source_platform(source)
+    lower = text.lower()
+    if not lower.strip():
+        return ""
+    if "source subprocess produced invalid json" in lower or "unterminated string" in lower:
+        return "invalid_json_payload"
+    if "exceeded" in lower and "s" in lower:
+        return "timeout"
+    if "certificate verify failed" in lower or "ssl:" in lower:
+        return "ssl_certificate"
+    if platform == "meta_jobs" or "did not expose static job results" in lower:
+        return "meta_static_unavailable"
+    if platform == "greenhouse" and ("http error 404" in lower or "not found" in lower):
+        return "greenhouse_404"
+    if platform == "workday" and ("http error 410" in lower or " gone" in lower):
+        return "workday_410"
+    if "http error 404" in lower or "not found" in lower:
+        return "http_404"
+    if "http error 410" in lower or " gone" in lower:
+        return "http_410"
+    if "http error 5" in lower or "internal server error" in lower:
+        return "http_5xx"
+    if "urlopen error" in lower or "could not fetch" in lower or "failed to fetch" in lower:
+        return "fetch_error"
+    return "unknown_failure"
+
+
+def source_health_from_category(category: str, status: str, result_status: str, stats: dict[str, int], warnings: str) -> str:
+    if stats.get("added", 0) > 0:
+        return "new_jobs_found"
+    if status == "retry_success":
+        return "success_no_new" if result_status != "partial_success" else "partial_success"
+    if status == "partial_success" or result_status == "partial_success":
+        return "partial_success"
+    if category in {"greenhouse_404", "workday_410", "http_404", "http_410", "meta_static_unavailable"}:
+        return "config_broken"
+    if category in {"invalid_json_payload"}:
+        return "adapter_broken"
+    if category in {"ssl_certificate", "timeout", "http_5xx", "fetch_error", "unknown_failure"}:
+        return "fetch_failed"
+    if status in {"failed", "failed_after_retries"} or result_status == "failed" or warnings.strip():
+        return "fetch_failed"
+    return "success_no_new"
+
+
+def annotate_source_health(source_report: dict[str, Any], source: dict[str, Any]) -> None:
+    stats = source_report.get("stats", {})
+    failure_text = "\n".join(
+        str(item)
+        for item in [
+            source_report.get("error", ""),
+            source_report.get("warnings", ""),
+            "\n".join(str(attempt.get("error", "")) for attempt in source_report.get("attempts", []) if attempt.get("error")),
+        ]
+        if str(item).strip()
+    )
+    category = source_failure_category(source, failure_text)
+    source_report["failure_category"] = category
+    source_report["health"] = source_health_from_category(
+        category,
+        str(source_report.get("status", "")),
+        str(source_report.get("result_status", "")),
+        stats,
+        str(source_report.get("warnings", "")),
+    )
+
+
+def ensure_source_health_annotations(sources: list[dict[str, Any]]) -> None:
+    for source in sources:
+        if source.get("health") and "failure_category" in source:
+            continue
+        annotate_source_health(source, source)
 
 
 def discovery_run_id(started_at: str) -> str:
@@ -5116,23 +5262,26 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
         f"- Added: {totals.get('added', 0)}",
         f"- Existing: {totals.get('existing', 0)}",
         "",
-        "| Status | Result | Attempts | Company | Platform | Candidates | Added | Existing | Old | Unknown date | Title | Location | Error / warnings |",
-        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Status | Result | Health | Failure | Attempts | Company | Platform | Candidates | Added | Existing | Maybe | Old | Unknown date | Title | Location | Error / warnings |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for source in report.get("sources", []):
         stats = source.get("stats", {})
         warning = source.get("error") or source.get("warnings") or ""
         warning = " ".join(str(warning).split())[:180]
         lines.append(
-            "| {status} | {result} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {old} | {unknown} | {title} | {location} | {warning} |".format(
+            "| {status} | {result} | {health} | {failure} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {maybe} | {old} | {unknown} | {title} | {location} | {warning} |".format(
                 status=source.get("status", ""),
                 result=source.get("result_status", ""),
+                health=source.get("health", ""),
+                failure=source.get("failure_category", ""),
                 attempts=len(source.get("attempts", [])) or 1,
                 company=str(source.get("company", "")).replace("|", "\\|"),
                 platform=source.get("platform", ""),
                 candidates=source.get("candidates_returned", 0),
                 added=stats.get("added", 0),
                 existing=stats.get("existing", 0),
+                maybe=stats.get("maybe_backlog", 0),
                 old=stats.get("skipped_old", 0),
                 unknown=stats.get("skipped_unknown_date", 0),
                 title=stats.get("skipped_title", 0),
@@ -5185,12 +5334,17 @@ def print_source_rows(title: str, rows: list[dict[str, Any]], limit: int = 12) -
         details = (
             f"candidates={source.get('candidates_returned', 0)}, "
             f"added={stats.get('added', 0)}, existing={stats.get('existing', 0)}, "
+            f"maybe={stats.get('maybe_backlog', 0)}, "
             f"old={stats.get('skipped_old', 0)}, title={stats.get('skipped_title', 0)}, "
             f"location={stats.get('skipped_location', 0)}"
         )
         reason = source.get("error") or source.get("warnings") or ""
         suffix = f" | {reason.strip()[:160]}" if reason else ""
-        print(f"- {source.get('company', 'Unknown')} ({source.get('platform', '')}): {source.get('status', '')}; {details}{suffix}")
+        health = source.get("health", "")
+        failure = source.get("failure_category", "")
+        health_text = f", health={health}" if health else ""
+        failure_text = f", failure={failure}" if failure else ""
+        print(f"- {source.get('company', 'Unknown')} ({source.get('platform', '')}): {source.get('status', '')}{health_text}{failure_text}; {details}{suffix}")
 
 
 def command_discovery_summary(args: argparse.Namespace) -> None:
@@ -5198,12 +5352,14 @@ def command_discovery_summary(args: argparse.Namespace) -> None:
     path = latest_discovery_run_path() if args.latest or not args.run_id else discovery_run_path(args.run_id)
     report = load_json(path)
     sources = report.get("sources", [])
+    ensure_source_health_annotations(sources)
     totals = report.get("totals", {})
-    failed = [source for source in sources if source.get("status") == "failed"]
+    failed = [source for source in sources if source.get("status") in {"failed", "failed_after_retries"}]
     partial = [source for source in sources if source.get("status") == "partial_success"]
     added = [source for source in sources if source.get("stats", {}).get("added", 0) > 0]
     no_jobs = [source for source in sources if source.get("status") == "searched_no_jobs_returned"]
     no_new = [source for source in sources if source.get("status") == "searched_no_new_matches"]
+    health_counts = collections.Counter(source.get("health") or "unknown" for source in sources)
     attempted = int(totals.get("sources_attempted", 0))
     planned = int(totals.get("sources_planned", 0))
 
@@ -5224,8 +5380,11 @@ def command_discovery_summary(args: argparse.Namespace) -> None:
         f"old={totals.get('skipped_old', 0)}, "
         f"unknown_date={totals.get('skipped_unknown_date', 0)}, "
         f"title={totals.get('skipped_title', 0)}, "
-        f"location={totals.get('skipped_location', 0)}"
+        f"location={totals.get('skipped_location', 0)}, "
+        f"maybe={totals.get('maybe_backlog', 0)}"
     )
+    if health_counts:
+        print("- Health: " + ", ".join(f"{key}={value}" for key, value in sorted(health_counts.items())))
 
     if planned and attempted < planned:
         print(f"\nCoverage warning: {planned - attempted} configured sources were not attempted.")
@@ -5256,6 +5415,50 @@ def command_discovery_summary(args: argparse.Namespace) -> None:
         print("\nRecommendation: search ran successfully; most candidates were already seen or filtered out.")
     else:
         print("\nRecommendation: if this was a broad run, expand or repair sources because no candidates were returned.")
+
+
+def source_health_needs_attention(source: dict[str, Any]) -> bool:
+    health = str(source.get("health") or "")
+    if health in {"config_broken", "adapter_broken", "fetch_failed"}:
+        return True
+    if source.get("status") in {"failed", "failed_after_retries"}:
+        return True
+    return bool(source.get("failure_category"))
+
+
+def command_source_health(args: argparse.Namespace) -> None:
+    require_person_files()
+    path = latest_discovery_run_path() if args.latest or not args.run_id else discovery_run_path(args.run_id)
+    report = load_json(path)
+    ensure_source_health_annotations(report.get("sources", []))
+    sources = [source for source in report.get("sources", []) if source_health_needs_attention(source)]
+    sources.sort(
+        key=lambda source: (
+            str(source.get("health") or ""),
+            str(source.get("failure_category") or ""),
+            str(source.get("company") or "").lower(),
+        )
+    )
+    if args.limit and args.limit > 0:
+        sources = sources[: args.limit]
+
+    print(f"Source Health: {report.get('run_id', path.stem)}")
+    print(f"- Report: {path}")
+    if not sources:
+        print("- No source health issues found.")
+        return
+    for source in sources:
+        reason = source.get("error") or source.get("warnings") or ""
+        reason = " ".join(str(reason).split())[:180]
+        print(
+            "- "
+            f"{source.get('company', 'Unknown')} ({source.get('platform', '')}) "
+            f"health={source.get('health', '') or 'unknown'} "
+            f"failure={source.get('failure_category', '') or 'unknown'} "
+            f"status={source.get('status', '')} "
+            f"attempts={len(source.get('attempts', [])) or 1}"
+            + (f" | {reason}" if reason else "")
+        )
 
 
 def fetch_ashby_job_text(url: str) -> str | None:
@@ -5617,6 +5820,55 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
     return enriched
 
 
+def discover_static_job_board_jobs(source: dict[str, Any], platform: str, note: str) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    try:
+        raw = fetch_url(source_url, timeout=int(source.get("timeout", 25)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch {platform} source for {company}: {error}", file=sys.stderr)
+        return []
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for candidate in parse_json_ld_jobs(raw, source_url, company):
+        if source_platform({"url": candidate.get("url", ""), "platform": candidate.get("platform", "")}) == "custom":
+            candidate["platform"] = platform
+        candidate["source"] = source_url
+        candidate["source_query"] = str(source.get("source_query") or source.get("role") or "")
+        candidate["notes"] = "; ".join(item for item in [candidate.get("notes", ""), note] if item)
+        candidates[candidate["url"]] = candidate
+
+    link_source = dict(source)
+    link_source["platform"] = "custom"
+    link_source.setdefault("parse_job_details", True)
+    for candidate in find_links_for_source(link_source):
+        detected = detect_platform(candidate.get("url", ""))
+        candidate["platform"] = detected if detected != "custom" else platform
+        candidate["source"] = source_url
+        candidate["source_query"] = str(source.get("source_query") or source.get("role") or "")
+        candidate["notes"] = "; ".join(item for item in [candidate.get("notes", ""), note] if item)
+        candidates[candidate["url"]] = candidate
+    return list(candidates.values())
+
+
+def discover_startup_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return discover_static_job_board_jobs(source, "startup_jobs", "Startup.jobs static job board adapter.")
+
+
+def discover_builtin_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return discover_static_job_board_jobs(source, "builtin_jobs", "Built In static job board adapter.")
+
+
+def discover_getro_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return discover_static_job_board_jobs(source, "getro_jobs", "Portfolio job board adapter for Getro-style pages.")
+
+
+def discover_consider_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return discover_static_job_board_jobs(source, "consider_jobs", "Portfolio job board adapter for Consider-style pages.")
+
+
 def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     tracker = load_tracker()
     apps = tracker.setdefault("applications", [])
@@ -5634,6 +5886,8 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
                 "freshness_source",
                 "job_number",
                 "external_job_id",
+                "review_bucket",
+                "discovery_bucket",
             ]:
                 if candidate.get(field) and app.get(field) != candidate[field]:
                     app[field] = candidate[field]
@@ -5675,6 +5929,8 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "source": candidate.get("source", ""),
         "source_query": candidate.get("source_query", ""),
         "freshness_source": candidate.get("freshness_source", ""),
+        "review_bucket": candidate.get("review_bucket", ""),
+        "discovery_bucket": candidate.get("discovery_bucket", ""),
         "target_track": candidate.get("target_track", ""),
         "matched_tracks": candidate.get("matched_tracks", []),
         "resume_file": candidate.get("resume_file", ""),
@@ -5753,9 +6009,13 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     max_years = max(years) if years else 0
     dealbreaker_config = profile.get("dealbreakers", {})
     threshold = int(dealbreaker_config.get("minimum_years_over", 5))
+    skip_from = dealbreaker_config.get("skip_minimum_years_from")
+    skip_from = int(skip_from) if skip_from not in (None, "") else 0
     if app.get("platform") == "amazon_jobs":
         threshold = 2
-    if max_years > threshold:
+    if skip_from and max_years >= skip_from:
+        dealbreakers.append(f"JD mentions {max_years}+ years, at or above skip threshold {skip_from}.")
+    elif max_years > threshold:
         dealbreakers.append(f"JD mentions {max_years}+ years, above threshold {threshold}.")
     penalty_from = int(dealbreaker_config.get("lower_weight_minimum_years_from", 3))
     if max_years >= penalty_from:
@@ -5763,6 +6023,17 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
         action_items.append(
             f"JD mentions {max_years}+ years; lower priority for 0-2 years experience target."
         )
+    track_id = str(profile.get("_track", {}).get("id") or "")
+    if track_id == "qa_engineer":
+        automation_terms = re.search(r"automation|automated|sdet|api|playwright|selenium|pytest|jest|ci/cd|pipeline", role_text)
+        manual_heavy = re.search(r"manual qa|manual testing|test cases?|test scripts?|game tester|localization qa", role_text)
+        hardware_heavy = re.search(r"hardware|firmware|electrical|mechanical|lab equipment|oscilloscope|manufacturing test|board bring-up", role_text)
+        if manual_heavy and not automation_terms:
+            level_score = max(0.4, level_score - 0.8)
+            action_items.append("QA role appears manual-heavy; lower priority than automation/SDET roles.")
+        if hardware_heavy and not automation_terms:
+            level_score = max(0.4, level_score - 0.8)
+            action_items.append("QA role appears hardware/lab-heavy; lower priority unless software automation is central.")
     if re.search(r"we do not sponsor|no sponsorship|unable to sponsor", jd_text, re.I):
         if profile.get("work_authorization", {}).get("requires_sponsorship"):
             dealbreakers.append("JD says sponsorship is unavailable.")
@@ -6547,6 +6818,10 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "sitemap",
         "yc_jobs",
         "yc_job_board",
+        "startup_jobs",
+        "builtin_jobs",
+        "getro_jobs",
+        "consider_jobs",
         "hn_who_is_hiring",
         "kula",
     }
@@ -6581,7 +6856,7 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         posted = "official"
     elif platform in {"sitemap", "rss"}:
         posted = "updated_proxy"
-    elif platform in {"kula", "custom", "pinpoint", "brassring"}:
+    elif platform in {"kula", "custom", "pinpoint", "brassring", "startup_jobs", "builtin_jobs", "getro_jobs", "consider_jobs"}:
         posted = "first_seen_only" if platform == "kula" else "unknown"
     else:
         posted = "unknown"
@@ -6660,6 +6935,8 @@ def source_report_base(source: dict[str, Any]) -> dict[str, Any]:
         "stats": empty_discovery_stats(),
         "warnings": "",
         "error": "",
+        "health": "",
+        "failure_category": "",
         "attempts": [],
         "retry_attempts": 0,
     }
@@ -6737,6 +7014,7 @@ def source_candidates_subprocess(
     ]
     if getattr(args, "track", None):
         command.extend(["--track", str(args.track)])
+    command.append("--payload-file-output")
 
     timeout = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
     try:
@@ -6759,6 +7037,18 @@ def source_candidates_subprocess(
         payload = json.loads(payload_line)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"source subprocess produced invalid JSON: {error}") from error
+    payload_path = str(payload.get("payload_path") or "").strip()
+    if payload_path:
+        try:
+            payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"source subprocess payload_path could not be read: {error}") from error
+        finally:
+            try:
+                Path(payload_path).unlink()
+            except OSError:
+                pass
+
     candidates = payload.get("candidates", [])
     if not isinstance(candidates, list):
         raise RuntimeError("source subprocess returned non-list candidates")
@@ -6777,19 +7067,27 @@ def command_discover_source_candidates(args: argparse.Namespace) -> None:
     warning_buffer = io.StringIO()
     with contextlib.redirect_stderr(warning_buffer):
         candidates = discover_source_jobs(source)
-    print(
-        json.dumps(
-            {
-                "company": source.get("company", ""),
-                "platform": source_platform(source),
-                "url": source.get("url", ""),
-                "warnings": warning_buffer.getvalue().strip(),
-                "candidates": candidates,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-    )
+    payload = {
+        "company": source.get("company", ""),
+        "platform": source_platform(source),
+        "url": source.get("url", ""),
+        "warnings": warning_buffer.getvalue().strip(),
+        "candidates": candidates,
+    }
+    if getattr(args, "payload_file_output", False):
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="job-search-source-",
+            suffix=".json",
+            delete=False,
+        ) as file:
+            json.dump(payload, file, ensure_ascii=False, default=str)
+            file.write("\n")
+            payload_path = file.name
+        print(json.dumps({"payload_path": payload_path}, ensure_ascii=False))
+        return
+    print(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def command_discover_jobs(args: argparse.Namespace) -> None:
@@ -6797,7 +7095,11 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     profile = profile_for_track(getattr(args, "track", None))
     all_sources = load_json(SOURCES_PATH).get("sources", [])
     source_company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
-    source_pairs = list(enumerate(all_sources))
+    source_pairs = [
+        (index, source)
+        for index, source in enumerate(all_sources)
+        if getattr(args, "include_inactive_sources", False) or source_is_active(source)
+    ]
     if source_company_filters:
         source_pairs = [
             (index, source)
@@ -6820,6 +7122,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "cutoff": cutoff.replace(microsecond=0).isoformat(),
         "source_company_filters": sorted(source_company_filters),
         "include_unknown_posted_date": bool(args.include_unknown_posted_date),
+        "include_maybe_backlog": bool(getattr(args, "include_maybe_backlog", False)),
+        "include_inactive_sources": bool(getattr(args, "include_inactive_sources", False)),
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
         "totals": {
@@ -6862,6 +7166,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["error"] = str(error)
             source_report["finished_at"] = now_utc_iso()
             source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            annotate_source_health(source_report, source)
             report["sources"].append(source_report)
             print(
                 f"    failed after {source_report['duration_seconds']}s: {error}",
@@ -6875,6 +7180,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["error"] = str(error)
             source_report["finished_at"] = now_utc_iso()
             source_report["duration_seconds"] = round(time.time() - source_started, 2)
+            annotate_source_health(source_report, source)
             report["sources"].append(source_report)
             print(
                 f"    failed after {source_report['duration_seconds']}s: {error}",
@@ -6898,6 +7204,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["status"] = result_status
         source_report["finished_at"] = now_utc_iso()
         source_report["duration_seconds"] = round(time.time() - source_started, 2)
+        annotate_source_health(source_report, source)
         report["sources"].append(source_report)
         add_stats(stats, source_stats)
         status_detail = source_report["status"]
@@ -6906,6 +7213,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         print(
             f"    {status_detail}: candidates={len(candidates)} "
             f"added={source_stats['added']} existing={source_stats['existing']} "
+            f"maybe={source_stats['maybe_backlog']} "
             f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
             f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
             f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
@@ -6925,6 +7233,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "Discovery complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
+        f"Maybe backlog: {stats['maybe_backlog']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
         f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}. "
@@ -7497,15 +7806,32 @@ def render_screening_answers(template: str, app: dict[str, Any], profile: dict[s
 
 
 def command_application_backlog(args: argparse.Namespace) -> None:
-    statuses = set(args.status or ["prepared", "needs_review", "scored"])
+    bucket = getattr(args, "bucket", "") or ""
+    if not args.status and bucket == "retry":
+        statuses = {"needs_retry"}
+    elif not args.status and bucket == "skipped":
+        statuses = {"skipped"}
+    else:
+        statuses = set(args.status or ["prepared", "needs_review", "scored"])
     tracker = load_tracker()
     apps: list[dict[str, Any]] = []
     for app in tracker.get("applications", []):
+        if bucket == "maybe" and app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
+            continue
+        if bucket == "retry" and app.get("status") != "needs_retry":
+            continue
+        if bucket == "skipped" and app.get("status") != "skipped":
+            continue
+        if bucket == "priority" and (
+            app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog" or app.get("status") in {"needs_retry", "skipped"}
+        ):
+            continue
         if app.get("status") not in statuses:
             continue
         if str(app.get("date_applied") or "").strip():
             continue
-        if numeric_score(app.get("fit_score")) < args.min_fit:
+        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped"} else args.min_fit
+        if numeric_score(app.get("fit_score")) < min_fit:
             continue
         filter_text = application_filter_text(app)
         if args.preferred_locations and not matches_preferred_location(filter_text):
@@ -7528,8 +7854,8 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         apps = apps[: args.limit]
 
     rows = [
-        "| Fit | ATS | Status | Company | Role | Location | Posted/Found | ID |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- |",
+        "| Fit | ATS | Status | Bucket | Company | Role | Location | Posted/Found | ID |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for app in apps:
         posted = app.get("posted_at") or app.get("date_found") or ""
@@ -7540,6 +7866,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
                     str(app.get("fit_score", "")),
                     str(app.get("ats_score", "")),
                     str(app.get("status", "")),
+                    str(app.get("review_bucket") or app.get("discovery_bucket") or "").replace("|", "\\|"),
                     str(app.get("company", "")).replace("|", "\\|"),
                     str(app.get("role", "")).replace("|", "\\|"),
                     str(app.get("location", "")).replace("|", "\\|"),
@@ -7559,6 +7886,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         - preferred_locations: {bool(args.preferred_locations)}
         - exclude_years: {args.exclude_years or ""}
         - hide_intern: {bool(args.hide_intern)}
+        - bucket: {getattr(args, "bucket", "") or "default"}
         - count: {len(apps)}
 
         """
@@ -7618,6 +7946,137 @@ def matches_preferred_location(text: str) -> bool:
 
 def has_year_requirement(text: str, minimum: int) -> bool:
     return any(year >= minimum for year in extract_years(text))
+
+
+def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: float, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for app in apps:
+        if str(app.get("date_applied") or "").strip():
+            continue
+        if bucket == "priority":
+            if app.get("status") not in {"prepared", "needs_review", "scored"}:
+                continue
+            if app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog":
+                continue
+            if app.get("dealbreakers"):
+                continue
+            if numeric_score(app.get("fit_score")) < min_fit:
+                continue
+            filter_text = application_filter_text(app)
+            if not matches_preferred_location(filter_text):
+                continue
+            if has_year_requirement(filter_text, 3):
+                continue
+            if re.search(r"\bintern(ship)?\b", filter_text):
+                continue
+        elif bucket == "maybe":
+            if app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
+                continue
+        elif bucket == "retry":
+            if app.get("status") != "needs_retry":
+                continue
+        else:
+            continue
+        rows.append(app)
+    rows.sort(
+        key=lambda app: (
+            numeric_score(app.get("fit_score")),
+            numeric_score(app.get("ats_score")),
+            str(app.get("posted_at") or app.get("date_found") or ""),
+        ),
+        reverse=True,
+    )
+    return rows[:limit] if limit > 0 else rows
+
+
+def render_daily_review_app_section(title: str, apps: list[dict[str, Any]]) -> list[str]:
+    lines = [f"## {title}", ""]
+    if not apps:
+        lines.extend(["- None", ""])
+        return lines
+    for index, app in enumerate(apps, 1):
+        posted = app.get("posted_at") or app.get("date_found") or ""
+        lines.append(
+            f"{index}. [{app.get('fit_score', '')}/10 fit, {app.get('ats_score', '')}/100 ATS] "
+            f"{app.get('company', '')} - {app.get('role', '')}"
+        )
+        lines.append(f"   - Status: {app.get('status', '')}; bucket: {app.get('review_bucket') or app.get('discovery_bucket') or ''}")
+        lines.append(f"   - Location: {app.get('location', '')}; posted/found: {posted}")
+        lines.append(f"   - ID: {app.get('id', '')}")
+        lines.append(f"   - URL: {app.get('url', '')}")
+    lines.append("")
+    return lines
+
+
+def discovery_reports_for_date(date_value: str) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    if not DISCOVERY_RUNS_DIR.exists():
+        return reports
+    for path in sorted(DISCOVERY_RUNS_DIR.glob("*.json"), key=lambda item: item.name):
+        try:
+            report = load_json(path)
+        except Exception:  # noqa: BLE001 - skip malformed historical reports.
+            continue
+        if str(report.get("started_at") or "").startswith(date_value):
+            report["_path"] = str(path)
+            reports.append(report)
+    return reports
+
+
+def command_daily_review(args: argparse.Namespace) -> None:
+    require_person_files()
+    review_date = args.date or today()
+    apps = load_tracker().get("applications", [])
+    reports = discovery_reports_for_date(review_date)
+    priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit)
+    maybe = daily_review_app_rows(apps, "maybe", 0, args.limit)
+    retry = daily_review_app_rows(apps, "retry", 0, args.limit)
+    source_issues: list[dict[str, Any]] = []
+    for report in reports:
+        for source in report.get("sources", []):
+            if source_health_needs_attention(source):
+                item = dict(source)
+                item["_run_id"] = report.get("run_id", "")
+                source_issues.append(item)
+
+    lines = [
+        f"# Daily Job Review - {review_date}",
+        "",
+        f"- Discovery reports: {len(reports)}",
+        f"- Priority candidates: {len(priority)}",
+        f"- Maybe backlog: {len(maybe)}",
+        f"- Retry needed: {len(retry)}",
+        f"- Source issues: {len(source_issues)}",
+        "",
+    ]
+    lines.extend(render_daily_review_app_section("Priority", priority))
+    lines.extend(render_daily_review_app_section("Maybe Backlog", maybe))
+    lines.extend(render_daily_review_app_section("Retry Needed", retry))
+    lines.extend(["## Source Health Issues", ""])
+    if not source_issues:
+        lines.extend(["- None", ""])
+    else:
+        selected_issues = source_issues[: args.limit] if args.limit > 0 else source_issues
+        for source in selected_issues:
+            reason = source.get("error") or source.get("warnings") or ""
+            reason = " ".join(str(reason).split())[:180]
+            lines.append(
+                f"- {source.get('company', '')} ({source.get('platform', '')}) "
+                f"run={source.get('_run_id', '')} health={source.get('health', '') or 'unknown'} "
+                f"failure={source.get('failure_category', '') or 'unknown'} status={source.get('status', '')}"
+                + (f" | {reason}" if reason else "")
+            )
+        lines.append("")
+
+    if args.output:
+        path = Path(args.output).expanduser()
+        if not path.is_absolute():
+            path = PRIVATE_BASE_ROOT / path
+    else:
+        path = PRIVATE_BASE_ROOT / "data" / "daily_review" / f"{review_date}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Wrote daily review to {path}")
 
 
 def command_notify(args: argparse.Namespace) -> None:
@@ -7798,6 +8257,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add jobs even when the source does not expose a posted date.",
     )
+    discover.add_argument(
+        "--include-maybe-backlog",
+        action="store_true",
+        help="Add unknown-date or fuzzy-title candidates as needs_review with review_bucket=maybe. Default keeps old strict behavior.",
+    )
+    discover.add_argument(
+        "--include-inactive-sources",
+        action="store_true",
+        help="Also run sources marked active=false. Default skips inactive sources.",
+    )
     discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
     discover.add_argument(
@@ -7827,6 +8296,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover_source = subcommands.add_parser("discover-source-candidates", help=argparse.SUPPRESS)
     discover_source.add_argument("--source-index", required=True)
     discover_source.add_argument("--track", help=argparse.SUPPRESS)
+    discover_source.add_argument("--payload-file-output", action="store_true", help=argparse.SUPPRESS)
 
     classify = subcommands.add_parser("classify-sources", help="Detect direct ATS platforms behind configured sources.")
     classify.add_argument("--apply", action="store_true", help="Rewrite detected sources in sources.json.")
@@ -7928,6 +8398,10 @@ def build_parser() -> argparse.ArgumentParser:
     discovery_summary.add_argument("--latest", action="store_true", help="Summarize the most recent discovery run report.")
     discovery_summary.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
     discovery_summary.add_argument("--limit", type=int, default=8, help="Maximum rows to show in each grouped section.")
+    source_health = subcommands.add_parser("source-health", help="List source health issues from a discovery run report.")
+    source_health.add_argument("--latest", action="store_true", help="Inspect the most recent discovery run report.")
+    source_health.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
+    source_health.add_argument("--limit", type=int, default=100, help="Maximum source issues to print. Use 0 for no limit.")
     review_hn = subcommands.add_parser("review-hn", help="Review HN Who is Hiring tracker entries and optionally skip bad fits.")
     review_hn.add_argument("--apply", action="store_true", help="Mark obvious skip entries as skipped in the tracker.")
     review_hn.add_argument("--limit", type=int, default=20, help="Maximum rows to print per group.")
@@ -7963,7 +8437,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exclude jobs whose text mentions this many required years or more, e.g. --exclude-years 3.",
     )
     backlog.add_argument("--hide-intern", action="store_true", help="Hide internship/intern roles.")
+    backlog.add_argument(
+        "--bucket",
+        choices=["priority", "maybe", "retry", "skipped"],
+        help="Optional compatibility bucket view. Defaults to the original high-fit backlog behavior.",
+    )
     backlog.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
+    daily_review = subcommands.add_parser("daily-review", help="Write a daily review from tracker and discovery reports.")
+    daily_review.add_argument("--date", help="Date to review in YYYY-MM-DD. Defaults to today.")
+    daily_review.add_argument("--min-fit", type=float, default=8.0, help="Minimum fit score for priority candidates.")
+    daily_review.add_argument("--limit", type=int, default=30, help="Maximum rows per section. Use 0 for no limit.")
+    daily_review.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
 
@@ -7987,12 +8471,16 @@ def main() -> None:
         command_audit_sources(args)
     elif args.command == "discovery-summary":
         command_discovery_summary(args)
+    elif args.command == "source-health":
+        command_source_health(args)
     elif args.command == "review-hn":
         command_review_hn(args)
     elif args.command == "migrate-seen-jobs":
         command_migrate_seen_jobs(args)
     elif args.command == "application-backlog":
         command_application_backlog(args)
+    elif args.command == "daily-review":
+        command_daily_review(args)
     elif args.command == "discover-web-jobs":
         command_discover_web_jobs(args)
     elif args.command == "discover-watchlist-jobs":

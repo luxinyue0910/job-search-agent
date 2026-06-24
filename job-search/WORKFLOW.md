@@ -107,7 +107,9 @@ python3 job-search/scripts/job_search.py prepare-application --id <application-i
 
 If a job is found by both QA and SDE searches, the tracker keeps one application by URL and appends both values to `matched_tracks`. `prepare-application` uses the application `target_track` unless you override it with `--track`.
 
-Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, and related roles; pass `--no-role-filter` to review every fresh posting.
+Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`.
+
+Discovery reports keep the legacy `status` and `result_status` fields and add `health` plus `failure_category` for source diagnostics. Use `discovery-summary` for a run summary, `source-health` to review failed/config-broken sources, and `daily-review` to write a combined priority/maybe/retry review file under the private repo.
 
 Use `classify-sources --custom-only` before maintaining large company lists. It inspects configured career pages and reports whether a `custom` source can be upgraded to a direct platform such as Greenhouse, Lever, Ashby, Gem, or Workday. Use `--apply` after reviewing the output. Workday sources use the public CXS API and parse relative posting dates such as `Posted Today` and `Posted 3 Days Ago`. Phenom pages are detected but still need a dedicated adapter.
 
@@ -135,7 +137,11 @@ python3 job-search/scripts/job_search.py discover-watchlist-jobs --provider bing
 python3 job-search/scripts/job_search.py discover-watchlist-jobs --provider bing --track qa_engineer --since-days 7 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
+python3 job-search/scripts/job_search.py discover-jobs --since-days 30 --include-maybe-backlog --source-company "Y Combinator Jobs"
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter
+python3 job-search/scripts/job_search.py source-health --latest
+python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
+python3 job-search/scripts/job_search.py daily-review
 ```
 
 Use `--pages-per-query` with SerpAPI when the first Google result page is too shallow. Each extra page costs another SerpAPI request per query, so keep `--max-queries` and `--pages-per-query` balanced.

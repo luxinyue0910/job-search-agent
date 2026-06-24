@@ -333,6 +333,29 @@ python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --include-
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --no-role-filter
 ```
 
+For startup and portfolio sources that do not expose reliable posting dates, keep the default strict behavior for daily direct ATS discovery and opt into the review pool explicitly:
+
+```bash
+python3 job-search/scripts/job_search.py discover-jobs \
+  --track general_sde \
+  --since-days 30 \
+  --include-maybe-backlog \
+  --source-company "Y Combinator Jobs" \
+  --score
+```
+
+This saves candidates with legacy `status: needs_review` plus `review_bucket: maybe`, so older commands keep working while newer review flows can separate them from priority applications.
+
+Discovery run reports preserve `status` and `result_status` and add `health` / `failure_category` for diagnostics. Useful review commands:
+
+```bash
+python3 job-search/scripts/job_search.py discovery-summary --latest
+python3 job-search/scripts/job_search.py source-health --latest
+python3 job-search/scripts/job_search.py application-backlog --bucket priority --preferred-locations --exclude-years 3 --hide-intern
+python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
+python3 job-search/scripts/job_search.py daily-review
+```
+
 ## Freshness and Deduplication
 
 The discovery pipeline records:
