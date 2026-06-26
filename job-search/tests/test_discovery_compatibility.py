@@ -346,6 +346,51 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
 
             self.assertEqual([row["id"] for row in rows], ["good"])
 
+    def test_daily_review_promotes_high_scoring_maybe_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            apps = [
+                {
+                    "id": "sorce-like",
+                    "status": "scored",
+                    "company": "Sorce",
+                    "role": "Software Engineer, Browser Agents",
+                    "location": "Remote",
+                    "fit_score": 10,
+                    "ats_score": 80,
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                    "notes": "maybe_backlog: fuzzy_title; min_experience=Any (new grads ok)",
+                },
+                {
+                    "id": "low-ats",
+                    "status": "scored",
+                    "company": "MaybeCo",
+                    "role": "Backend Engineer",
+                    "location": "San Francisco, CA",
+                    "fit_score": 10,
+                    "ats_score": 62,
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                },
+                {
+                    "id": "three-years",
+                    "status": "scored",
+                    "company": "YearsCo",
+                    "role": "Software Engineer",
+                    "location": "Seattle, WA",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                    "notes": "Requires 3+ years of experience.",
+                },
+            ]
+
+            promoted = job_search.daily_review_app_rows(apps, "promoted_maybe", 9, 10)
+
+            self.assertEqual([row["id"] for row in promoted], ["sorce-like"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8007,6 +8007,13 @@ def has_year_requirement(text: str, minimum: int) -> bool:
     return any(year >= minimum for year in extract_years(text))
 
 
+PROMOTED_MAYBE_MIN_ATS = 70.0
+
+
+def is_maybe_backlog_app(app: dict[str, Any]) -> bool:
+    return app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog"
+
+
 def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: float, limit: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for app in apps:
@@ -8015,7 +8022,7 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
         if bucket == "priority":
             if app.get("status") not in {"prepared", "needs_review", "scored"}:
                 continue
-            if app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog":
+            if is_maybe_backlog_app(app):
                 continue
             if app.get("dealbreakers"):
                 continue
@@ -8028,8 +8035,24 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
                 continue
             if re.search(r"\bintern(ship)?\b", filter_text):
                 continue
+        elif bucket == "promoted_maybe":
+            if app.get("status") not in {"prepared", "needs_review", "scored"}:
+                continue
+            if not is_maybe_backlog_app(app):
+                continue
+            if app.get("dealbreakers"):
+                continue
+            if numeric_score(app.get("fit_score")) < min_fit:
+                continue
+            if numeric_score(app.get("ats_score")) < PROMOTED_MAYBE_MIN_ATS:
+                continue
+            filter_text = application_filter_text(app)
+            if has_year_requirement(filter_text, 3):
+                continue
+            if re.search(r"\bintern(ship)?\b", filter_text):
+                continue
         elif bucket == "maybe":
-            if app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
+            if not is_maybe_backlog_app(app):
                 continue
         elif bucket == "retry":
             if app.get("status") != "needs_retry":
@@ -8088,7 +8111,10 @@ def command_daily_review(args: argparse.Namespace) -> None:
     apps = load_tracker().get("applications", [])
     reports = discovery_reports_for_date(review_date)
     priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit)
+    promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit)
+    promoted_ids = {str(app.get("id", "")) for app in promoted_maybe}
     maybe = daily_review_app_rows(apps, "maybe", 0, args.limit)
+    maybe = [app for app in maybe if str(app.get("id", "")) not in promoted_ids]
     retry = daily_review_app_rows(apps, "retry", 0, args.limit)
     source_issues: list[dict[str, Any]] = []
     for report in reports:
@@ -8103,11 +8129,13 @@ def command_daily_review(args: argparse.Namespace) -> None:
         "",
         f"- Discovery reports: {len(reports)}",
         f"- Priority candidates: {len(priority)}",
+        f"- Promoted maybe: {len(promoted_maybe)}",
         f"- Maybe backlog: {len(maybe)}",
         f"- Retry needed: {len(retry)}",
         f"- Source issues: {len(source_issues)}",
         "",
     ]
+    lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
     lines.extend(render_daily_review_app_section("Priority", priority))
     lines.extend(render_daily_review_app_section("Maybe Backlog", maybe))
     lines.extend(render_daily_review_app_section("Retry Needed", retry))
