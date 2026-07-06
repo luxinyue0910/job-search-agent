@@ -193,6 +193,46 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                 job_search.command_discover_jobs(discover_args())
             self.assertEqual(mocked.call_count, 0)
 
+    def test_warning_only_source_failure_counts_in_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [{"company": "WarnCo", "platform": "custom", "url": "https://example.com/jobs"}])
+            job_search = load_job_search(private_root)
+            warning = "Could not fetch custom source for WarnCo: HTTP Error 403: Forbidden"
+            with mock.patch.object(
+                job_search,
+                "discover_source_candidates_with_retries",
+                return_value=([], warning, [{"attempt": 1, "status": "success", "error": ""}]),
+            ):
+                job_search.command_discover_jobs(discover_args())
+
+            report_path = next((private_root / "data" / "discovery_runs").glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["sources"][0]["status"], "failed")
+            self.assertEqual(report["totals"]["failed_sources"], 1)
+
+    def test_parser_fallback_warning_does_not_make_empty_source_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            warning = "Could not parse RSS feed for Adidas with XML parser, using fallback: No module named expat; use SimpleXMLTreeBuilder instead"
+
+            self.assertEqual(
+                job_search.discovery_source_status(0, job_search.empty_discovery_stats(), warning),
+                "searched_no_jobs_returned",
+            )
+
+            report = {
+                "status": "searched_no_jobs_returned",
+                "result_status": "searched_no_jobs_returned",
+                "error": "",
+                "warnings": warning,
+                "attempts": [],
+                "stats": job_search.empty_discovery_stats(),
+            }
+            job_search.annotate_source_health(report, {"company": "Adidas", "platform": "rss"})
+            self.assertEqual(report["health"], "success_no_new")
+            self.assertEqual(report["failure_category"], "")
+
     def test_discover_jobs_fetches_sources_concurrently_but_processes_on_main_thread(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -340,11 +380,57 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                     "fit_score": 10,
                     "ats_score": 90,
                 },
+                {
+                    "id": "range-years",
+                    "status": "scored",
+                    "company": "RangeCo",
+                    "role": "Software Engineer",
+                    "location": "San Francisco, CA",
+                    "notes": "1-3 years of experience preferred.",
+                    "fit_score": 9,
+                    "ats_score": 80,
+                },
+                {
+                    "id": "sde-iii",
+                    "status": "scored",
+                    "company": "LevelCo",
+                    "role": "Software Development Engineer III",
+                    "location": "Seattle, WA",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                },
+                {
+                    "id": "sde-3",
+                    "status": "scored",
+                    "company": "LevelCo",
+                    "role": "SDE 3",
+                    "location": "Seattle, WA",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                },
+                {
+                    "id": "phd",
+                    "status": "scored",
+                    "company": "AcademicCo",
+                    "role": "Machine Learning Engineer, New Grad PhD",
+                    "location": "Bellevue, WA",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                },
+                {
+                    "id": "dc",
+                    "status": "scored",
+                    "company": "DCCo",
+                    "role": "Software Engineer",
+                    "location": "Washington, District of Columbia, United States",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                },
             ]
 
             rows = job_search.daily_review_app_rows(apps, "priority", 8, 10)
 
-            self.assertEqual([row["id"] for row in rows], ["good"])
+            self.assertEqual([row["id"] for row in rows], ["range-years", "good"])
 
     def test_daily_review_promotes_high_scoring_maybe_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,6 +476,167 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             promoted = job_search.daily_review_app_rows(apps, "promoted_maybe", 9, 10)
 
             self.assertEqual([row["id"] for row in promoted], ["sorce-like"])
+
+    def test_daily_review_retry_omits_obvious_senior_titles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            apps = [
+                {
+                    "id": "retry-good",
+                    "status": "needs_retry",
+                    "company": "Rubrik",
+                    "role": "Software Engineer, Developer Productivity",
+                    "location": "Palo Alto, CA",
+                },
+                {
+                    "id": "retry-iii",
+                    "status": "needs_retry",
+                    "company": "Chewy",
+                    "role": "Data Engineer III",
+                    "location": "Bellevue, WA",
+                },
+            ]
+
+            retry = job_search.daily_review_app_rows(apps, "retry", 0, 10)
+
+            self.assertEqual([row["id"] for row in retry], ["retry-good"])
+
+    def test_discovery_reports_for_date_defaults_to_latest_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            reports_dir = private_root / "data" / "discovery_runs"
+            reports_dir.mkdir(parents=True)
+            old_report = {
+                "run_id": "2026-07-06T17-11-46Z",
+                "started_at": "2026-07-06T17:11:46+00:00",
+                "finished_at": "2026-07-06T17:11:49+00:00",
+                "sources": [{"company": "OldDNSFailure", "status": "failed"}],
+            }
+            latest_report = {
+                "run_id": "2026-07-06T17-12-22Z",
+                "started_at": "2026-07-06T17:12:22+00:00",
+                "finished_at": "2026-07-06T17:40:23+00:00",
+                "sources": [{"company": "LatestRun", "status": "searched_no_new_matches"}],
+            }
+            (reports_dir / "2026-07-06T17-11-46Z.json").write_text(json.dumps(old_report), encoding="utf-8")
+            (reports_dir / "2026-07-06T17-12-22Z.json").write_text(json.dumps(latest_report), encoding="utf-8")
+
+            reports = job_search.discovery_reports_for_date("2026-07-06")
+
+            self.assertEqual([report["run_id"] for report in reports], ["2026-07-06T17-12-22Z"])
+
+    def test_discovery_reports_for_date_prefers_broad_report_over_later_limited_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            reports_dir = private_root / "data" / "discovery_runs"
+            reports_dir.mkdir(parents=True)
+            broad_report = {
+                "run_id": "2026-07-06T17-12-22Z",
+                "started_at": "2026-07-06T17:12:22+00:00",
+                "totals": {"sources_attempted": 364},
+                "sources": [],
+            }
+            limited_report = {
+                "run_id": "2026-07-06T17-55-11Z",
+                "started_at": "2026-07-06T17:55:11+00:00",
+                "totals": {"sources_attempted": 2},
+                "sources": [],
+            }
+            (reports_dir / "2026-07-06T17-12-22Z.json").write_text(json.dumps(broad_report), encoding="utf-8")
+            (reports_dir / "2026-07-06T17-55-11Z.json").write_text(json.dumps(limited_report), encoding="utf-8")
+
+            reports = job_search.discovery_reports_for_date("2026-07-06")
+
+            self.assertEqual([report["run_id"] for report in reports], ["2026-07-06T17-12-22Z"])
+
+    def test_discovery_reports_for_date_prefers_latest_nearly_full_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            reports_dir = private_root / "data" / "discovery_runs"
+            reports_dir.mkdir(parents=True)
+            old_full_report = {
+                "run_id": "2026-07-06T17-12-22Z",
+                "started_at": "2026-07-06T17:12:22+00:00",
+                "totals": {"sources_attempted": 364},
+                "sources": [],
+            }
+            new_full_report = {
+                "run_id": "2026-07-06T18-00-36Z",
+                "started_at": "2026-07-06T18:00:36+00:00",
+                "totals": {"sources_attempted": 359},
+                "sources": [],
+            }
+            limited_report = {
+                "run_id": "2026-07-06T18-45-00Z",
+                "started_at": "2026-07-06T18:45:00+00:00",
+                "totals": {"sources_attempted": 2},
+                "sources": [],
+            }
+            for report in [old_full_report, new_full_report, limited_report]:
+                (reports_dir / f"{report['run_id']}.json").write_text(json.dumps(report), encoding="utf-8")
+
+            reports = job_search.discovery_reports_for_date("2026-07-06")
+
+            self.assertEqual([report["run_id"] for report in reports], ["2026-07-06T18-00-36Z"])
+
+    def test_discovery_reports_for_date_can_include_all_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            reports_dir = private_root / "data" / "discovery_runs"
+            reports_dir.mkdir(parents=True)
+            for run_id in ["2026-07-06T17-11-46Z", "2026-07-06T17-12-22Z"]:
+                (reports_dir / f"{run_id}.json").write_text(
+                    json.dumps({"run_id": run_id, "started_at": run_id.replace("Z", "+00:00"), "sources": []}),
+                    encoding="utf-8",
+                )
+
+            reports = job_search.discovery_reports_for_date("2026-07-06", latest_only=False)
+
+            self.assertEqual([report["run_id"] for report in reports], ["2026-07-06T17-11-46Z", "2026-07-06T17-12-22Z"])
+
+    def test_source_issue_resolved_by_later_same_day_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            failed_report = {
+                "run_id": "2026-07-06T18-00-36Z",
+                "started_at": "2026-07-06T18:00:36+00:00",
+                "sources": [
+                    {
+                        "company": "Airbnb",
+                        "platform": "greenhouse",
+                        "status": "failed",
+                        "health": "fetch_failed",
+                    }
+                ],
+            }
+            retry_report = {
+                "run_id": "2026-07-06T18-33-22Z",
+                "started_at": "2026-07-06T18:33:22+00:00",
+                "sources": [
+                    {
+                        "company": "Airbnb",
+                        "platform": "greenhouse",
+                        "status": "searched_no_new_matches",
+                        "health": "success_no_new",
+                    }
+                ],
+            }
+
+            self.assertTrue(
+                job_search.source_issue_resolved_later(
+                    failed_report["sources"][0],
+                    failed_report,
+                    [failed_report, retry_report],
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -199,6 +199,11 @@ ATS_SEARCH_SITES = [
     "jobs.ashbyhq.com",
 ]
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
 
 class SearchRateLimited(RuntimeError):
     """Raised when a search provider asks us to stop sending requests."""
@@ -654,7 +659,7 @@ def fetch_url(url: str, timeout: int = 20) -> str:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
         },
     )
@@ -667,7 +672,7 @@ def fetch_json(url: str, timeout: int = 20) -> Any:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json,*/*;q=0.8",
         },
     )
@@ -681,7 +686,7 @@ def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json,*/*;q=0.8",
             "Content-Type": "application/json",
         },
@@ -696,7 +701,7 @@ def fetch_json_form_post(url: str, payload: dict[str, Any], timeout: int = 20) -
         url,
         data=urllib.parse.urlencode(payload).encode("utf-8"),
         headers={
-            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json,*/*;q=0.8",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
@@ -718,7 +723,7 @@ def parse_jsonp(raw: str) -> Any:
 
 def fetch_jsonp(url: str, timeout: int = 20, referer: str | None = None) -> Any:
     headers = {
-        "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+        "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "application/javascript,application/json;q=0.9,*/*;q=0.8",
     }
     if referer:
@@ -1634,7 +1639,7 @@ def discover_alibaba_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         request = urllib.request.Request(
             landing_url,
             headers={
-                "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
@@ -1672,7 +1677,7 @@ def discover_alibaba_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 endpoint,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
-                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "User-Agent": DEFAULT_USER_AGENT,
                     "Accept": "application/json, text/plain, */*",
                     "Content-Type": "application/json",
                     "Origin": "https://talent.alibaba.com",
@@ -1765,7 +1770,7 @@ def discover_pdd_globalhr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 endpoint,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
-                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "User-Agent": DEFAULT_USER_AGENT,
                     "Accept": "application/json, text/plain, */*",
                     "Content-Type": "application/json",
                     "Origin": "https://careers.pddglobalhr.com",
@@ -1863,7 +1868,7 @@ def discover_huawei_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             request = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "User-Agent": DEFAULT_USER_AGENT,
                     "Accept": "application/json, text/plain, */*",
                     "Referer": base_url,
                     "Cookie": f"locale={source.get('language', 'en_US')}",
@@ -2229,7 +2234,7 @@ def microsoft_pcsx_session() -> tuple[urllib.request.OpenerDirector, dict[str, s
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
     base_headers = {
-        "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+        "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
     }
     response = opener.open(urllib.request.Request("https://apply.careers.microsoft.com/careers", headers=base_headers), timeout=20)
@@ -2831,7 +2836,7 @@ def discover_providence_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             request = urllib.request.Request(
                 api_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+                    "User-Agent": DEFAULT_USER_AGENT,
                     "Accept": "application/json,*/*;q=0.8",
                     "X-Origin": "providence.jobs",
                     "Referer": "https://providence.jobs/jobs/",
@@ -3544,7 +3549,7 @@ def discover_bamboohr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 job-search-workspace/1.0",
+            "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
             "Referer": f"https://{subdomain}.bamboohr.com/careers/",
         },
@@ -5149,10 +5154,20 @@ def add_stats(target: dict[str, int], source: dict[str, int]) -> None:
         target[key] = target.get(key, 0) + value
 
 
+def non_benign_discovery_warnings(warnings: str) -> str:
+    lines: list[str] = []
+    for line in str(warnings or "").splitlines():
+        if "with XML parser, using fallback" in line:
+            continue
+        lines.append(line)
+    return "\n".join(line for line in lines if line.strip()).strip()
+
+
 def discovery_source_status(candidates_count: int, stats: dict[str, int], warnings: str) -> str:
-    if warnings.strip() and candidates_count == 0:
+    effective_warnings = non_benign_discovery_warnings(warnings)
+    if effective_warnings and candidates_count == 0:
         return "failed"
-    if warnings.strip():
+    if effective_warnings:
         return "partial_success"
     if stats.get("added", 0) > 0:
         return "new_jobs_added"
@@ -5209,11 +5224,12 @@ def source_health_from_category(category: str, status: str, result_status: str, 
 
 def annotate_source_health(source_report: dict[str, Any], source: dict[str, Any]) -> None:
     stats = source_report.get("stats", {})
+    effective_warnings = non_benign_discovery_warnings(str(source_report.get("warnings", "")))
     failure_text = "\n".join(
         str(item)
         for item in [
             source_report.get("error", ""),
-            source_report.get("warnings", ""),
+            effective_warnings,
             "\n".join(str(attempt.get("error", "")) for attempt in source_report.get("attempts", []) if attempt.get("error")),
         ]
         if str(item).strip()
@@ -5225,7 +5241,7 @@ def annotate_source_health(source_report: dict[str, Any], source: dict[str, Any]
         str(source_report.get("status", "")),
         str(source_report.get("result_status", "")),
         stats,
-        str(source_report.get("warnings", "")),
+        effective_warnings,
     )
 
 
@@ -5425,6 +5441,36 @@ def source_health_needs_attention(source: dict[str, Any]) -> bool:
     if source.get("status") in {"failed", "failed_after_retries"}:
         return True
     return bool(source.get("failure_category"))
+
+
+def source_issue_identity(source: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(source.get("company") or "").strip().lower(),
+        str(source.get("platform") or "").strip().lower(),
+    )
+
+
+def source_health_is_success(source: dict[str, Any]) -> bool:
+    if source.get("status") in {"failed", "failed_after_retries", "partial_success"}:
+        return False
+    if str(source.get("health") or "") in {"success_no_new", "new_jobs_found"}:
+        return True
+    return not source_health_needs_attention(source)
+
+
+def source_issue_resolved_later(issue_source: dict[str, Any], issue_report: dict[str, Any], reports: list[dict[str, Any]]) -> bool:
+    issue_key = source_issue_identity(issue_source)
+    if not issue_key[0]:
+        return False
+    issue_started_at = str(issue_report.get("started_at") or issue_report.get("run_id") or "")
+    for report in reports:
+        report_started_at = str(report.get("started_at") or report.get("run_id") or "")
+        if report_started_at <= issue_started_at:
+            continue
+        for source in report.get("sources", []):
+            if source_issue_identity(source) == issue_key and source_health_is_success(source):
+                return True
+    return False
 
 
 def command_source_health(args: argparse.Namespace) -> None:
@@ -5983,7 +6029,21 @@ def keyword_matches(text: str, keywords: list[str]) -> list[str]:
 
 
 def extract_years(text: str) -> list[int]:
-    return [int(match) for match in re.findall(r"(\d+)\+?\s*(?:years|yrs)", text, flags=re.I)]
+    """Return minimum required years signals, treating ranges by their lower bound."""
+    value = str(text or "")
+    years: list[int] = []
+    range_spans: list[tuple[int, int]] = []
+    range_pattern = re.compile(r"\b(\d+)\s*(?:-|–|—|\bto\b)\s*(\d+)\+?\s*(?:years|yrs)\b", flags=re.I)
+    for match in range_pattern.finditer(value):
+        years.append(int(match.group(1)))
+        range_spans.append(match.span())
+    if range_spans:
+        chars = list(value)
+        for start, end in range_spans:
+            chars[start:end] = " " * (end - start)
+        value = "".join(chars)
+    years.extend(int(match) for match in re.findall(r"\b(\d+)\+?\s*(?:years|yrs)\b", value, flags=re.I))
+    return years
 
 
 def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> dict[str, Any]:
@@ -7281,6 +7341,10 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
 
     save_seen_jobs(seen)
     report["finished_at"] = now_utc_iso()
+    failed_sources = sum(1 for source in report["sources"] if source.get("status") in {"failed", "failed_after_retries"})
+    retried_sources = sum(1 for source in report["sources"] if int(source.get("retry_attempts") or 0) > 0)
+    retry_recovered_sources = sum(1 for source in report["sources"] if source.get("status") == "retry_success")
+    failed_after_retries = sum(1 for source in report["sources"] if source.get("status") == "failed_after_retries")
     report["totals"]["failed_sources"] = failed_sources
     report["totals"]["retried_sources"] = retried_sources
     report["totals"]["retry_recovered_sources"] = retry_recovered_sources
@@ -7897,12 +7961,17 @@ def command_application_backlog(args: argparse.Namespace) -> None:
             continue
         if args.exclude_years and has_year_requirement(filter_text, args.exclude_years):
             continue
+        if bucket == "priority" and has_seniority_title_signal(app):
+            continue
+        if bucket == "priority" and has_phd_signal(app):
+            continue
         if args.hide_intern and re.search(r"\bintern(ship)?\b", filter_text):
             continue
         apps.append(app)
 
     apps.sort(
         key=lambda app: (
+            -recommendation_risk_penalty(app),
             numeric_score(app.get("fit_score")),
             numeric_score(app.get("ats_score")),
             str(app.get("posted_at") or app.get("date_found") or ""),
@@ -7975,6 +8044,9 @@ def application_filter_text(app: dict[str, Any]) -> str:
 
 
 def matches_preferred_location(text: str) -> bool:
+    if re.search(r"\b(washington,\s*(?:district of columbia|dc)|district of columbia|washington\s+dc)\b", text):
+        if not re.search(r"\b(seattle|bellevue|redmond|kirkland|wa\b|washington state)\b", text):
+            return False
     patterns = [
         r"\bwa\b",
         r"\bwashington\b",
@@ -8010,6 +8082,42 @@ def has_year_requirement(text: str, minimum: int) -> bool:
 PROMOTED_MAYBE_MIN_ATS = 70.0
 
 
+def has_seniority_title_signal(app: dict[str, Any]) -> bool:
+    role = str(app.get("role", "") or "").lower()
+    if re.search(r"\b(senior|sr\.?|staff|principal|distinguished|lead|leader|manager|director|head|vp|chief|cto)\b", role):
+        return True
+    level_three_plus = r"(?:iii|iv|v|3|4|5)"
+    role_families = (
+        r"sde|software\s+development\s+engineer|software\s+engineer|software\s+developer|"
+        r"frontend\s+(?:software\s+)?engineer|backend\s+(?:software\s+)?engineer|full[-\s]?stack\s+(?:software\s+)?engineer|"
+        r"machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|sdet|qa\s+engineer"
+    )
+    if re.search(rf"\b(?:{role_families})\s*{level_three_plus}\b", role):
+        return True
+    if re.search(rf"\bengineer\s*{level_three_plus}\b", role):
+        return True
+    return False
+
+
+def has_phd_signal(app: dict[str, Any]) -> bool:
+    role = str(app.get("role", "") or "").lower()
+    return bool(re.search(r"\bph\.?\s*d\b|\bdoctorate\b", role))
+
+
+def recommendation_risk_penalty(app: dict[str, Any]) -> int:
+    filter_text = application_filter_text(app)
+    penalty = 0
+    if has_seniority_title_signal(app):
+        penalty += 2
+    if has_phd_signal(app):
+        penalty += 2
+    if has_year_requirement(filter_text, 3):
+        penalty += 2
+    if re.search(r"\bintern(ship)?\b", filter_text):
+        penalty += 2
+    return penalty
+
+
 def is_maybe_backlog_app(app: dict[str, Any]) -> bool:
     return app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog"
 
@@ -8033,6 +8141,10 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
                 continue
             if has_year_requirement(filter_text, 3):
                 continue
+            if has_seniority_title_signal(app):
+                continue
+            if has_phd_signal(app):
+                continue
             if re.search(r"\bintern(ship)?\b", filter_text):
                 continue
         elif bucket == "promoted_maybe":
@@ -8049,6 +8161,10 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
             filter_text = application_filter_text(app)
             if has_year_requirement(filter_text, 3):
                 continue
+            if has_seniority_title_signal(app):
+                continue
+            if has_phd_signal(app):
+                continue
             if re.search(r"\bintern(ship)?\b", filter_text):
                 continue
         elif bucket == "maybe":
@@ -8057,11 +8173,21 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
         elif bucket == "retry":
             if app.get("status") != "needs_retry":
                 continue
+            filter_text = application_filter_text(app)
+            if has_year_requirement(filter_text, 3):
+                continue
+            if has_seniority_title_signal(app):
+                continue
+            if has_phd_signal(app):
+                continue
+            if re.search(r"\bintern(ship)?\b", filter_text):
+                continue
         else:
             continue
         rows.append(app)
     rows.sort(
         key=lambda app: (
+            -recommendation_risk_penalty(app),
             numeric_score(app.get("fit_score")),
             numeric_score(app.get("ats_score")),
             str(app.get("posted_at") or app.get("date_found") or ""),
@@ -8090,7 +8216,7 @@ def render_daily_review_app_section(title: str, apps: list[dict[str, Any]]) -> l
     return lines
 
 
-def discovery_reports_for_date(date_value: str) -> list[dict[str, Any]]:
+def discovery_reports_for_date(date_value: str, latest_only: bool = True) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     if not DISCOVERY_RUNS_DIR.exists():
         return reports
@@ -8102,6 +8228,30 @@ def discovery_reports_for_date(date_value: str) -> list[dict[str, Any]]:
         if str(report.get("started_at") or "").startswith(date_value):
             report["_path"] = str(path)
             reports.append(report)
+    if latest_only and reports:
+        def report_source_count(report: dict[str, Any]) -> int:
+            totals = report.get("totals", {}) if isinstance(report.get("totals"), dict) else {}
+            attempted = totals.get("sources_attempted", 0)
+            try:
+                return int(attempted)
+            except (TypeError, ValueError):
+                return len(report.get("sources", []) if isinstance(report.get("sources"), list) else [])
+
+        max_source_count = max(report_source_count(report) for report in reports)
+        broad_threshold = max_source_count * 0.8
+        selection_pool = [report for report in reports if report_source_count(report) >= broad_threshold]
+        if not selection_pool:
+            selection_pool = reports
+        return [
+            max(
+                selection_pool,
+                key=lambda report: (
+                    str(report.get("started_at") or ""),
+                    str(report.get("run_id") or ""),
+                    str(report.get("_path") or ""),
+                ),
+            )
+        ]
     return reports
 
 
@@ -8109,7 +8259,9 @@ def command_daily_review(args: argparse.Namespace) -> None:
     require_person_files()
     review_date = args.date or today()
     apps = load_tracker().get("applications", [])
-    reports = discovery_reports_for_date(review_date)
+    all_reports = bool(getattr(args, "all_reports", False))
+    reports = discovery_reports_for_date(review_date, latest_only=not all_reports)
+    reports_for_resolution = discovery_reports_for_date(review_date, latest_only=False) if not all_reports else reports
     priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit)
     promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit)
     promoted_ids = {str(app.get("id", "")) for app in promoted_maybe}
@@ -8120,6 +8272,8 @@ def command_daily_review(args: argparse.Namespace) -> None:
     for report in reports:
         for source in report.get("sources", []):
             if source_health_needs_attention(source):
+                if not all_reports and source_issue_resolved_later(source, report, reports_for_resolution):
+                    continue
                 item = dict(source)
                 item["_run_id"] = report.get("run_id", "")
                 source_issues.append(item)
@@ -8540,6 +8694,11 @@ def build_parser() -> argparse.ArgumentParser:
     daily_review.add_argument("--date", help="Date to review in YYYY-MM-DD. Defaults to today.")
     daily_review.add_argument("--min-fit", type=float, default=8.0, help="Minimum fit score for priority candidates.")
     daily_review.add_argument("--limit", type=int, default=30, help="Maximum rows per section. Use 0 for no limit.")
+    daily_review.add_argument(
+        "--all-reports",
+        action="store_true",
+        help="Include every discovery report from the date. Default uses the latest report to avoid stale failed runs.",
+    )
     daily_review.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")
     return parser
