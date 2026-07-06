@@ -498,6 +498,50 @@ python3 job-search/scripts/job_search.py classify-sources --custom-only --apply
 
 This helps migrate generic career-page URLs into structured ATS entries.
 
+## Agent Workflow Layer
+
+The core `job_search.py` script remains the deterministic engine for ATS discovery, filtering, scoring, material generation, and tracker updates. The `job-search/agents/` layer adds a lightweight human-in-the-loop agent harness on top of that engine.
+
+The first supported agent workflow is daily discovery:
+
+```bash
+export JOB_SEARCH_PRIVATE_DIR="$HOME/job-search-private"
+
+python3 job-search/agents/runner.py daily \
+  --track general_sde \
+  --since-days 7 \
+  --workers 4
+```
+
+This creates an auditable run under the private repo:
+
+```text
+data/agent_runs/<timestamp>-general_sde/
+  input.json
+  trace.jsonl
+  tool_calls.jsonl
+  output.json
+  report.md
+```
+
+The Discovery Agent is intentionally tool-heavy and mostly deterministic. It calls the existing discovery engine, reads the structured discovery report, updates `data/source_health.json`, and writes an agent run report. It does not submit applications.
+
+The initial agent layer includes:
+
+- `DiscoveryAgent`: orchestrates daily discovery, source-health memory, traces, and reports.
+- `FitReviewAgent`: rule-based priority / maybe / skip review that can later be upgraded with LLM structured output.
+- `ApplicationQAAgent`: rule-based grounding and sensitive-claim checks for generated materials before human submission.
+
+Run the example job-fit eval:
+
+```bash
+python3 job-search/agents/runner.py eval \
+  --suite job_fit \
+  --cases job-search/evals/job_fit_cases.example.jsonl
+```
+
+This keeps the project aligned with modern agent patterns while preserving the important boundary: deterministic tools handle source discovery and tracker updates, AI-assisted review remains auditable, and final application submission stays manual.
+
 ## Safety and Privacy Principles
 
 - Keep the public repo free of real profiles, resumes, trackers, generated cover letters, screenshots, and browser sessions.

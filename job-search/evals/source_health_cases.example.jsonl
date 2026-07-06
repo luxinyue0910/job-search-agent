@@ -1,0 +1,2 @@
+{"id":"healthy-no-new","source":{"company":"ExampleCo","status":"searched_no_new_matches","health":"healthy","stats":{"added":0}},"expected_status":"healthy"}
+{"id":"failed-workday","source":{"company":"WorkdayCo","status":"failed_after_retries","health":"config_broken","failure_category":"workday_410","stats":{"added":0}},"expected_status":"config_broken"}
