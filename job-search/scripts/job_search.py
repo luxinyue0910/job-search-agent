@@ -301,9 +301,26 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2, ensure_ascii=False)
-        file.write("\n")
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temp_path = file.name
+            json.dump(data, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path:
+            with contextlib.suppress(FileNotFoundError):
+                Path(temp_path).unlink()
 
 
 def seen_jobs_shard_for_url(url: str) -> str:
@@ -605,6 +622,8 @@ def detect_platform(url: str) -> str:
         return "providence_jobs"
     if "careers.salesforce.com" in host:
         return "salesforce_jobs"
+    if "governmentjobs.com" in host:
+        return "governmentjobs"
     if host == "careers.zoom.us":
         return "zoom_careers"
     if "smartrecruiters.com" in host:
@@ -4052,6 +4071,182 @@ def discover_sitemap_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def governmentjobs_agency(source: dict[str, Any]) -> str:
+    if source.get("agency"):
+        return str(source["agency"]).strip("/")
+    path_parts = [part for part in urllib.parse.urlparse(str(source.get("url") or "")).path.split("/") if part]
+    if len(path_parts) >= 2 and path_parts[0].lower() == "careers":
+        return path_parts[1]
+    return ""
+
+
+def governmentjobs_search_url(source: dict[str, Any], keyword: str, page: int) -> str:
+    parsed = urllib.parse.urlparse(str(source.get("url") or "https://www.governmentjobs.com/careers"))
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or "www.governmentjobs.com"
+    agency = governmentjobs_agency(source)
+    params = {
+        "agency": agency,
+        "keyword": keyword,
+        "page": str(page),
+        "sort": str(source.get("sort") or "PositionTitle"),
+        "isDescendingSort": "true" if truthy_source_flag(source.get("is_descending_sort"), default=False) else "false",
+    }
+    if source.get("department_folder"):
+        params["departmentFolder"] = str(source["department_folder"])
+    return f"{scheme}://{host}/careers/home/index?{urllib.parse.urlencode(params)}"
+
+
+def fetch_governmentjobs_search(url: str, source: dict[str, Any], timeout: int = 30) -> str:
+    parsed = urllib.parse.urlparse(str(source.get("url") or "https://www.governmentjobs.com/careers"))
+    referer = urllib.parse.urlunparse(parsed._replace(query="", fragment=""))
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": referer,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def governmentjobs_newprint_url(job_url: str, job_id: str) -> str:
+    parsed = urllib.parse.urlparse(job_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    agency = ""
+    if len(path_parts) >= 2 and path_parts[0].lower() == "careers":
+        agency = path_parts[1]
+    if not agency:
+        return job_url
+    return urllib.parse.urlunparse(parsed._replace(path=f"/careers/{agency}/jobs/newprint/{job_id}", query="", fragment=""))
+
+
+def parse_governmentjobs_newprint(raw: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    title_match = re.search(r'<h1[^>]*class=["\'][^"\']*job-title[^"\']*["\'][^>]*>(.*?)</h1>', raw, flags=re.I | re.S)
+    if title_match:
+        result["role"] = html_to_text(title_match.group(1))
+    for match in re.finditer(
+        r'<div[^>]*class=["\'][^"\']*term-description[^"\']*["\'][^>]*>(.*?)</div>\s*</div>\s*<div[^>]*class=["\'][^"\']*span8[^"\']*["\'][^>]*>\s*<p[^>]*>(.*?)</p>',
+        raw,
+        flags=re.I | re.S,
+    ):
+        key = html_to_text(match.group(1)).strip().lower()
+        value = html_to_text(match.group(2)).strip()
+        if key and value:
+            result[key] = value
+    if result.get("opening date"):
+        result["posted_at"] = normalize_datetime(result["opening date"])
+    if result.get("closing date"):
+        result["updated_at"] = normalize_datetime(result["closing date"])
+    if result.get("job number"):
+        result["job_number"] = result["job number"]
+    if result.get("location"):
+        result["location"] = result["location"]
+    result["_jd_text"] = html_to_text(raw)
+    return result
+
+
+def parse_governmentjobs_listing(raw: str, source: dict[str, Any], search_url: str, keyword: str) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "GovernmentJobs")
+    candidates: list[dict[str, Any]] = []
+    block_starts = list(
+        re.finditer(
+            r'<li[^>]*class=["\'][^"\']*list-item[^"\']*["\'][^>]*data-job-id=["\']([^"\']+)["\'][^>]*>',
+            raw,
+            flags=re.I | re.S,
+        )
+    )
+    for index, block_match in enumerate(block_starts):
+        job_id = html.unescape(block_match.group(1)).strip()
+        next_start = block_starts[index + 1].start() if index + 1 < len(block_starts) else len(raw)
+        block = raw[block_match.end() : next_start]
+        link_match = re.search(r'<a[^>]*class=["\'][^"\']*item-details-link[^"\']*["\'][^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', block, flags=re.I | re.S)
+        if not link_match:
+            continue
+        url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(link_match.group(1))))
+        role = html_to_text(link_match.group(2)) or infer_role_from_url(url)
+        meta_items = [html_to_text(item) for item in re.findall(r"<li[^>]*>(.*?)</li>", block, flags=re.I | re.S)]
+        location = meta_items[0] if meta_items else ""
+        category = next((item.replace("Category:", "").strip() for item in meta_items if "Category:" in item), "")
+        department = next((item.replace("Department:", "").strip() for item in meta_items if "Department:" in item), "")
+        summary_match = re.search(r'<div[^>]*class=["\'][^"\']*list-entry[^"\']*["\'][^>]*>(.*?)</div>', block, flags=re.I | re.S)
+        summary = html_to_text(summary_match.group(1)) if summary_match else ""
+        posted_text_match = re.search(r'<span[^>]*class=["\'][^"\']*list-entry-starts[^"\']*["\'][^>]*>\s*<span>(.*?)</span>', block, flags=re.I | re.S)
+        posted_note = html_to_text(posted_text_match.group(1)) if posted_text_match else ""
+        posted_at = parse_workday_posted_on(posted_note) if posted_note else ""
+        notes = "GovernmentJobs/NEOGOV search adapter."
+        if category:
+            notes += f" Category: {category}."
+        if department:
+            notes += f" Department: {department}."
+        if posted_note:
+            notes += f" Listing says: {posted_note}."
+        candidates.append(
+            {
+                "company": company,
+                "role": role,
+                "url": url,
+                "platform": "governmentjobs",
+                "location": location,
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": source.get("url", search_url),
+                "source_query": keyword,
+                "freshness_source": "governmentjobs_listing_relative_posted_at" if posted_at else "unknown",
+                "_jd_text": "\n\n".join(part for part in [role, location, summary] if part),
+                "notes": notes,
+            }
+        )
+    return candidates
+
+
+def discover_governmentjobs_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    max_pages = int(source.get("max_pages", 2))
+    max_detail_pages = int(source.get("max_detail_pages", 10))
+    candidates_by_url: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page in range(1, max_pages + 1):
+            search_url = governmentjobs_search_url(source, keyword, page)
+            try:
+                raw = fetch_governmentjobs_search(search_url, source, timeout=30)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch GovernmentJobs search for {source.get('company', 'GovernmentJobs')}: {error}", file=sys.stderr)
+                break
+            page_candidates = parse_governmentjobs_listing(raw, source, search_url, keyword)
+            if not page_candidates:
+                break
+            for candidate in page_candidates:
+                candidates_by_url[candidate["url"]] = candidate
+            if "next-page" not in raw.lower() and f"page={page + 1}" not in raw:
+                break
+    for candidate in list(candidates_by_url.values())[:max_detail_pages]:
+        job_id = str(candidate.get("external_job_id") or candidate.get("job_number") or "")
+        if not job_id:
+            continue
+        detail_url = governmentjobs_newprint_url(str(candidate["url"]), job_id)
+        try:
+            detail_raw = fetch_url(detail_url, timeout=30)
+        except Exception:
+            continue
+        detail = parse_governmentjobs_newprint(detail_raw)
+        for key in ["role", "location", "job_number", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["freshness_source"] = "governmentjobs_newprint_opening_date" if candidate.get("posted_at") else candidate.get("freshness_source", "unknown")
+        candidate["notes"] = f"{candidate.get('notes', '').rstrip()} Detail page: {detail_url}."
+    return list(candidates_by_url.values())
+
+
 def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     feed_url = rss_feed_url(source)
@@ -4619,6 +4814,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_hn_who_is_hiring_jobs(source)
     if platform == "sitemap":
         return discover_sitemap_jobs(source)
+    if platform == "governmentjobs":
+        return discover_governmentjobs_jobs(source)
     if platform == "rss":
         return discover_rss_jobs(source)
     if platform == "jibe":
@@ -6035,15 +6232,32 @@ def extract_years(text: str) -> list[int]:
     range_spans: list[tuple[int, int]] = []
     range_pattern = re.compile(r"\b(\d+)\s*(?:-|–|—|\bto\b)\s*(\d+)\+?\s*(?:years|yrs)\b", flags=re.I)
     for match in range_pattern.finditer(value):
-        years.append(int(match.group(1)))
+        lower_bound = int(match.group(1))
+        if lower_bound <= 15 and not age_year_context(value, *match.span()):
+            years.append(lower_bound)
         range_spans.append(match.span())
     if range_spans:
         chars = list(value)
         for start, end in range_spans:
             chars[start:end] = " " * (end - start)
         value = "".join(chars)
-    years.extend(int(match) for match in re.findall(r"\b(\d+)\+?\s*(?:years|yrs)\b", value, flags=re.I))
+    for match in re.finditer(r"\b(\d+)\+?\s*(?:years|yrs)\b", value, flags=re.I):
+        year_value = int(match.group(1))
+        if year_value <= 15 and not age_year_context(value, *match.span()):
+            years.append(year_value)
     return years
+
+
+def age_year_context(text: str, start: int, end: int) -> bool:
+    """Ignore age/legal eligibility phrases such as 18+ years old/of age."""
+    context = text[max(0, start - 80) : min(len(text), end + 80)].lower()
+    if re.search(r"\byears?\s+(?:old|of\s+age|or\s+older)\b", context):
+        return True
+    if re.search(r"\b(?:age|aged)\s*(?:of\s*)?\d+\+?\b", context):
+        return True
+    if re.search(r"\b(?:must|should|need|required)\s+be\s+(?:at\s+least\s+)?\d+\+?\s+years?\b", context):
+        return True
+    return False
 
 
 def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> dict[str, Any]:
@@ -6750,6 +6964,10 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
             result["detected_platform"] = "careerpuck"
             result["detected_url"] = url
             result["notes"] = "CareerPuck detected."
+        if not result["detected_platform"] and "governmentjobs.com" in urllib.parse.urlparse(url).netloc.lower():
+            result["detected_platform"] = "governmentjobs"
+            result["detected_url"] = url
+            result["notes"] = "GovernmentJobs/NEOGOV detected."
 
     detected_url = str(result.get("detected_url") or "")
     platform = str(result.get("detected_platform") or "")
@@ -6817,6 +7035,8 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company, "platform": "pinpoint", "url": detected_url, "jobs_url": pinpoint_jobs_url({"url": detected_url})}
     elif platform == "brassring":
         result["source"] = {"company": company, "platform": "brassring", "url": detected_url, "job_urls": [detected_url]}
+    elif platform == "governmentjobs":
+        result["source"] = {"company": company or "GovernmentJobs", "platform": "governmentjobs", "url": detected_url, "agency": governmentjobs_agency({"url": detected_url}), "keywords": DEFAULT_WORKDAY_KEYWORDS}
     return result
 
 
@@ -6875,6 +7095,7 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "talentbrew",
         "careerpuck",
         "pinpoint",
+        "governmentjobs",
         "rss",
         "sitemap",
         "yc_jobs",
@@ -6904,6 +7125,7 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "workable",
         "bamboohr",
         "careerpuck",
+        "governmentjobs",
     }
     if platform in api_good:
         quality = "api_good"
