@@ -70,6 +70,7 @@ CSV_FIELDS = [
     "status",
     "fit_score",
     "ats_score",
+    "experience_bucket",
     "date_found",
     "posted_at",
     "updated_at",
@@ -5257,6 +5258,7 @@ def process_discovered_candidates(
         candidate["url"] = normalize_job_url(candidate["url"])
         key = candidate["url"]
         seen_record = seen_jobs.get(key)
+        seen_created = seen_record is None
         if seen_record is None:
             seen_record = {
                 "company": candidate.get("company", ""),
@@ -5303,8 +5305,15 @@ def process_discovered_candidates(
                     stats["skipped_unknown_date"] += 1
                     continue
         elif cutoff and posted_at < cutoff:
-            stats["skipped_old"] += 1
-            continue
+            if (
+                getattr(args, "include_maybe_backlog", False)
+                and getattr(args, "maybe_old_posted_date", False)
+                and seen_created
+            ):
+                maybe_reasons.append("old_posted_at_new_to_us")
+            else:
+                stats["skipped_old"] += 1
+                continue
         if not args.no_role_filter and not discovery_title_matches(candidate, profile):
             if getattr(args, "include_maybe_backlog", False):
                 maybe_reasons.append("fuzzy_title")
@@ -6227,7 +6236,7 @@ def keyword_matches(text: str, keywords: list[str]) -> list[str]:
 
 def extract_years(text: str) -> list[int]:
     """Return minimum required years signals, treating ranges by their lower bound."""
-    value = str(text or "")
+    value = normalize_experience_text(text)
     years: list[int] = []
     range_spans: list[tuple[int, int]] = []
     range_pattern = re.compile(r"\b(\d+)\s*(?:-|–|—|\bto\b)\s*(\d+)\+?\s*(?:years|yrs)\b", flags=re.I)
@@ -6246,6 +6255,84 @@ def extract_years(text: str) -> list[int]:
         if year_value <= 15 and not age_year_context(value, *match.span()):
             years.append(year_value)
     return years
+
+
+def extract_year_requirements(text: str) -> list[dict[str, Any]]:
+    """Return structured experience requirements from JD/application text."""
+    value = normalize_experience_text(text)
+    requirements: list[dict[str, Any]] = []
+    range_spans: list[tuple[int, int]] = []
+    range_pattern = re.compile(r"\b(\d+)\s*(?:-|–|—|\bto\b)\s*(\d+)\+?\s*(?:years|yrs)\b", flags=re.I)
+    for match in range_pattern.finditer(value):
+        lower_bound = int(match.group(1))
+        upper_bound = int(match.group(2))
+        if lower_bound <= 15 and upper_bound <= 20 and not age_year_context(value, *match.span()):
+            requirements.append(
+                {
+                    "min": lower_bound,
+                    "max": upper_bound,
+                    "plus": False,
+                    "text": match.group(0),
+                }
+            )
+        range_spans.append(match.span())
+    if range_spans:
+        chars = list(value)
+        for start, end in range_spans:
+            chars[start:end] = " " * (end - start)
+        value = "".join(chars)
+    for match in re.finditer(r"\b(\d+)(\+)?\s*(?:years|yrs)\b", value, flags=re.I):
+        year_value = int(match.group(1))
+        if year_value <= 15 and not age_year_context(value, *match.span()):
+            requirements.append(
+                {
+                    "min": year_value,
+                    "max": None if match.group(2) else year_value,
+                    "plus": bool(match.group(2)),
+                    "text": match.group(0),
+                }
+            )
+    return requirements
+
+
+def extract_month_requirements(text: str) -> list[int]:
+    value = normalize_experience_text(text)
+    word_numbers = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "eighteen": 18,
+        "twenty four": 24,
+        "twenty-four": 24,
+    }
+    months: list[int] = []
+    numeric_or_parenthetical = re.compile(
+        r"\b(?:(?P<word>one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|eighteen|twenty[-\s]four)\s*\((?P<paren>\d+)\)|(?P<num>\d+))\s*(?:months?|mos?)\b",
+        flags=re.I,
+    )
+    for match in numeric_or_parenthetical.finditer(value):
+        if match.group("paren"):
+            month_value = int(match.group("paren"))
+        elif match.group("num"):
+            month_value = int(match.group("num"))
+        else:
+            month_value = word_numbers.get(str(match.group("word") or "").lower(), 0)
+        if 0 < month_value <= 60:
+            months.append(month_value)
+    return months
+
+
+def normalize_experience_text(text: str) -> str:
+    return html.unescape(str(text or "")).replace("\xa0", " ")
 
 
 def age_year_context(text: str, start: int, end: int) -> bool:
@@ -6281,6 +6368,11 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     if re.search(r"\b(senior|staff|principal|lead)\b", app.get("role", ""), re.I):
         dealbreakers.append("Role title appears senior/staff/principal/lead.")
     years = extract_years(jd_text)
+    experience_requirements = extract_year_requirements(jd_text)
+    month_requirements = extract_month_requirements(jd_text)
+    experience_app = dict(app)
+    experience_app["notes"] = jd_text
+    experience_bucket = experience_requirement_bucket(experience_app)
     max_years = max(years) if years else 0
     dealbreaker_config = profile.get("dealbreakers", {})
     threshold = int(dealbreaker_config.get("minimum_years_over", 5))
@@ -6326,6 +6418,9 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
         "fit_score": fit_score,
         "ats_score": ats_score,
         "status": status,
+        "experience_bucket": experience_bucket,
+        "experience_requirements": [str(item.get("text") or "") for item in experience_requirements if item.get("text")]
+        + [f"{months} months" for months in month_requirements],
         "matched_keywords": matched,
         "resume_keyword_matches": resume_matches,
         "missing_keywords": [keyword for keyword in matched if keyword not in resume_matches],
@@ -7406,6 +7501,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "source_company_filters": sorted(source_company_filters),
         "include_unknown_posted_date": bool(args.include_unknown_posted_date),
         "include_maybe_backlog": bool(getattr(args, "include_maybe_backlog", False)),
+        "maybe_old_posted_date": bool(getattr(args, "maybe_old_posted_date", False)),
         "include_inactive_sources": bool(getattr(args, "include_inactive_sources", False)),
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
@@ -7779,6 +7875,8 @@ def command_score_job(args: argparse.Namespace) -> None:
         {
             "fit_score": score["fit_score"],
             "ats_score": score["ats_score"],
+            "experience_bucket": score.get("experience_bucket", ""),
+            "experience_requirements": score.get("experience_requirements", []),
             "status": score["status"],
             "dealbreakers": score["dealbreakers"],
             "action_items": score["action_items"],
@@ -7842,6 +7940,7 @@ def render_fetch_failure_report(app: dict[str, Any], reason: str) -> str:
 def render_score_report(app: dict[str, Any], score: dict[str, Any]) -> str:
     missing = ", ".join(score["missing_keywords"]) or "None"
     matched = ", ".join(score["matched_keywords"]) or "None"
+    experience_requirements = ", ".join(score.get("experience_requirements", [])) or "None"
     dealbreakers = "\n".join(f"- {item}" for item in score["dealbreakers"]) or "- None"
     actions = "\n".join(f"- {item}" for item in score["action_items"]) or "- None"
     return textwrap.dedent(
@@ -7854,6 +7953,8 @@ def render_score_report(app: dict[str, Any], score: dict[str, Any]) -> str:
         - Fit score: {score['fit_score']}/10
         - ATS score: {score['ats_score']}/100
         - Status: {score['status']}
+        - Experience bucket: {score.get('experience_bucket', 'unknown')}
+        - Experience requirements: {experience_requirements}
 
         ## Matched Keywords
 
@@ -8183,6 +8284,8 @@ def command_application_backlog(args: argparse.Namespace) -> None:
             continue
         if args.exclude_years and has_year_requirement(filter_text, args.exclude_years):
             continue
+        if bucket == "priority" and experience_requirement_bucket(app) == "3_plus":
+            continue
         if bucket == "priority" and has_seniority_title_signal(app):
             continue
         if bucket == "priority" and has_phd_signal(app):
@@ -8191,21 +8294,15 @@ def command_application_backlog(args: argparse.Namespace) -> None:
             continue
         apps.append(app)
 
-    apps.sort(
-        key=lambda app: (
-            -recommendation_risk_penalty(app),
-            numeric_score(app.get("fit_score")),
-            numeric_score(app.get("ats_score")),
-            str(app.get("posted_at") or app.get("date_found") or ""),
-        ),
-        reverse=True,
-    )
+    apps.sort(key=recommendation_sort_key, reverse=True)
+    if bucket == "priority":
+        apps = cap_recommendations_by_company(apps, getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT))
     if args.limit and args.limit > 0:
         apps = apps[: args.limit]
 
     rows = [
-        "| Fit | ATS | Status | Bucket | Company | Role | Location | Posted/Found | ID |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
+        "| Fit | ATS | Experience | Status | Bucket | Company | Role | Location | Posted/Found | ID |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for app in apps:
         posted = app.get("posted_at") or app.get("date_found") or ""
@@ -8215,6 +8312,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
                 [
                     str(app.get("fit_score", "")),
                     str(app.get("ats_score", "")),
+                    experience_requirement_bucket(app),
                     str(app.get("status", "")),
                     str(app.get("review_bucket") or app.get("discovery_bucket") or "").replace("|", "\\|"),
                     str(app.get("company", "")).replace("|", "\\|"),
@@ -8237,6 +8335,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         - exclude_years: {args.exclude_years or ""}
         - hide_intern: {bool(args.hide_intern)}
         - bucket: {getattr(args, "bucket", "") or "default"}
+        - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket == "priority" else "none"}
         - count: {len(apps)}
 
         """
@@ -8254,9 +8353,9 @@ def command_application_backlog(args: argparse.Namespace) -> None:
 
 def application_filter_text(app: dict[str, Any]) -> str:
     parts: list[str] = []
-    for field in ["company", "role", "location", "notes", "posted_at", "date_found"]:
+    for field in ["company", "role", "location", "notes", "posted_at", "date_found", "experience_bucket"]:
         parts.append(str(app.get(field, "")))
-    for field in ["action_items", "dealbreakers", "matched_keywords", "missing_keywords"]:
+    for field in ["action_items", "dealbreakers", "matched_keywords", "missing_keywords", "experience_requirements"]:
         value = app.get(field, [])
         if isinstance(value, list):
             parts.extend(str(item) for item in value)
@@ -8302,6 +8401,82 @@ def has_year_requirement(text: str, minimum: int) -> bool:
 
 
 PROMOTED_MAYBE_MIN_ATS = 70.0
+DEFAULT_RECOMMENDATION_COMPANY_LIMIT = 3
+
+
+def level_two_title_signal(app: dict[str, Any]) -> bool:
+    role = str(app.get("role", "") or "").lower()
+    role_families = (
+        r"sde|software\s+development\s+engineer|software\s+engineer|software\s+developer|"
+        r"frontend\s+(?:software\s+)?engineer|backend\s+(?:software\s+)?engineer|full[-\s]?stack\s+(?:software\s+)?engineer|"
+        r"machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|sdet|qa\s+engineer"
+    )
+    return bool(
+        re.search(rf"\b(?:{role_families})\s*(?:ii|2)\b", role)
+        or re.search(r"\b(?:sde|se)\s*2\b", role)
+        or re.search(r"\bengineer\s*(?:ii|2)\b", role)
+    )
+
+
+def experience_requirement_bucket(app: dict[str, Any]) -> str:
+    existing = str(app.get("experience_bucket") or "").strip()
+    if existing:
+        return existing
+    role = str(app.get("role") or "")
+    tracker_text = application_filter_text(app)
+    filter_text = f"{tracker_text} {recommendation_jd_text(app)}"
+    title_and_tracker_text = f"{role} {tracker_text}".lower()
+    if re.search(r"\b(new\s+grad|new\s+college|early\s+career|entry[-\s]?level|apprentice(ship)?|junior)\b", title_and_tracker_text):
+        return "new_grad"
+    requirements = extract_year_requirements(filter_text)
+    if requirements:
+        if any(int(req.get("min") or 0) >= 3 for req in requirements):
+            return "3_plus"
+        if any(int(req.get("min") or 0) == 2 and req.get("max") and int(req.get("max") or 0) >= 3 for req in requirements):
+            return "2_range"
+        if any(int(req.get("min") or 0) == 2 and req.get("plus") for req in requirements):
+            return "2_plus"
+        if any(int(req.get("min") or 0) <= 1 and req.get("max") and int(req.get("max") or 0) <= 3 for req in requirements):
+            return "1_2"
+        if any(int(req.get("min") or 0) <= 2 for req in requirements):
+            return "1_2"
+    month_requirements = extract_month_requirements(filter_text)
+    if month_requirements:
+        min_months = min(month_requirements)
+        if min_months <= 12:
+            return "0_1"
+        if min_months <= 24:
+            return "1_2"
+    if level_two_title_signal(app):
+        return "2_plus"
+    return "unknown"
+
+
+def recommendation_jd_text(app: dict[str, Any], max_chars: int = 60000) -> str:
+    path_value = str(app.get("jd_path") or "").strip()
+    if not path_value:
+        return ""
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = PRIVATE_BASE_ROOT / path
+    try:
+        if not path.exists() or not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+    except OSError:
+        return ""
+
+
+def experience_bucket_priority_score(bucket: str) -> int:
+    return {
+        "new_grad": 5,
+        "0_1": 5,
+        "1_2": 4,
+        "unknown": 3,
+        "2_plus": 2,
+        "2_range": 1,
+        "3_plus": 0,
+    }.get(bucket, 3)
 
 
 def has_seniority_title_signal(app: dict[str, Any]) -> bool:
@@ -8335,16 +8510,52 @@ def recommendation_risk_penalty(app: dict[str, Any]) -> int:
         penalty += 2
     if has_year_requirement(filter_text, 3):
         penalty += 2
+    bucket = experience_requirement_bucket(app)
+    if bucket == "2_plus":
+        penalty += 1
+    elif bucket == "2_range":
+        penalty += 2
     if re.search(r"\bintern(ship)?\b", filter_text):
         penalty += 2
     return penalty
+
+
+def recommendation_sort_key(app: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        -recommendation_risk_penalty(app),
+        experience_bucket_priority_score(experience_requirement_bucket(app)),
+        numeric_score(app.get("fit_score")),
+        numeric_score(app.get("ats_score")),
+        str(app.get("posted_at") or app.get("date_found") or ""),
+    )
+
+
+def cap_recommendations_by_company(apps: list[dict[str, Any]], company_limit: int) -> list[dict[str, Any]]:
+    if company_limit <= 0:
+        return apps
+    counts: dict[str, int] = {}
+    capped: list[dict[str, Any]] = []
+    for app in apps:
+        company_key = re.sub(r"\s+", " ", str(app.get("company") or "unknown").strip().lower())
+        count = counts.get(company_key, 0)
+        if count >= company_limit:
+            continue
+        counts[company_key] = count + 1
+        capped.append(app)
+    return capped
 
 
 def is_maybe_backlog_app(app: dict[str, Any]) -> bool:
     return app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog"
 
 
-def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: float, limit: int) -> list[dict[str, Any]]:
+def daily_review_app_rows(
+    apps: list[dict[str, Any]],
+    bucket: str,
+    min_fit: float,
+    limit: int,
+    company_limit: int = DEFAULT_RECOMMENDATION_COMPANY_LIMIT,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for app in apps:
         if str(app.get("date_applied") or "").strip():
@@ -8361,7 +8572,7 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
             filter_text = application_filter_text(app)
             if not matches_preferred_location(filter_text):
                 continue
-            if has_year_requirement(filter_text, 3):
+            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
                 continue
             if has_seniority_title_signal(app):
                 continue
@@ -8381,7 +8592,7 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
             if numeric_score(app.get("ats_score")) < PROMOTED_MAYBE_MIN_ATS:
                 continue
             filter_text = application_filter_text(app)
-            if has_year_requirement(filter_text, 3):
+            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
                 continue
             if has_seniority_title_signal(app):
                 continue
@@ -8396,7 +8607,7 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
             if app.get("status") != "needs_retry":
                 continue
             filter_text = application_filter_text(app)
-            if has_year_requirement(filter_text, 3):
+            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
                 continue
             if has_seniority_title_signal(app):
                 continue
@@ -8407,15 +8618,9 @@ def daily_review_app_rows(apps: list[dict[str, Any]], bucket: str, min_fit: floa
         else:
             continue
         rows.append(app)
-    rows.sort(
-        key=lambda app: (
-            -recommendation_risk_penalty(app),
-            numeric_score(app.get("fit_score")),
-            numeric_score(app.get("ats_score")),
-            str(app.get("posted_at") or app.get("date_found") or ""),
-        ),
-        reverse=True,
-    )
+    rows.sort(key=recommendation_sort_key, reverse=True)
+    if bucket in {"priority", "promoted_maybe"}:
+        rows = cap_recommendations_by_company(rows, company_limit)
     return rows[:limit] if limit > 0 else rows
 
 
@@ -8431,6 +8636,7 @@ def render_daily_review_app_section(title: str, apps: list[dict[str, Any]]) -> l
             f"{app.get('company', '')} - {app.get('role', '')}"
         )
         lines.append(f"   - Status: {app.get('status', '')}; bucket: {app.get('review_bucket') or app.get('discovery_bucket') or ''}")
+        lines.append(f"   - Experience: {experience_requirement_bucket(app)}")
         lines.append(f"   - Location: {app.get('location', '')}; posted/found: {posted}")
         lines.append(f"   - ID: {app.get('id', '')}")
         lines.append(f"   - URL: {app.get('url', '')}")
@@ -8484,8 +8690,8 @@ def command_daily_review(args: argparse.Namespace) -> None:
     all_reports = bool(getattr(args, "all_reports", False))
     reports = discovery_reports_for_date(review_date, latest_only=not all_reports)
     reports_for_resolution = discovery_reports_for_date(review_date, latest_only=False) if not all_reports else reports
-    priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit)
-    promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit)
+    priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit, args.company_limit)
+    promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit, args.company_limit)
     promoted_ids = {str(app.get("id", "")) for app in promoted_maybe}
     maybe = daily_review_app_rows(apps, "maybe", 0, args.limit)
     maybe = [app for app in maybe if str(app.get("id", "")) not in promoted_ids]
@@ -8509,6 +8715,7 @@ def command_daily_review(args: argparse.Namespace) -> None:
         f"- Maybe backlog: {len(maybe)}",
         f"- Retry needed: {len(retry)}",
         f"- Source issues: {len(source_issues)}",
+        f"- Company limit: {args.company_limit if args.company_limit > 0 else 'none'}",
         "",
     ]
     lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
@@ -8565,15 +8772,11 @@ def render_notification(tracker: dict[str, Any], profile: dict[str, Any]) -> str
     apps = tracker.get("applications", [])
     today_apps = [app for app in apps if app.get("date_found") == today()]
     skipped = [app for app in apps if app.get("status") in {"skipped", "needs_review"}]
-    recommended = sorted(
-        [app for app in apps if isinstance(app.get("fit_score"), (int, float)) and not app.get("dealbreakers")],
-        key=lambda app: (app.get("fit_score", 0), app.get("ats_score", 0)),
-        reverse=True,
-    )[:5]
+    recommended = daily_review_app_rows(apps, "priority", 8.0, 5, DEFAULT_RECOMMENDATION_COMPANY_LIMIT)
 
     top_jobs = "\n".join(
         f"- [{app.get('fit_score')}/10 fit, {app.get('ats_score')}/100 ATS] "
-        f"{app.get('company')} - {app.get('role')} ({app.get('platform')})\n  {app.get('url')}"
+        f"{app.get('company')} - {app.get('role')} ({app.get('platform')}, {experience_requirement_bucket(app)})\n  {app.get('url')}"
         for app in recommended
     ) or "- No scored recommendations yet."
     action_items = collect_action_items(apps)
@@ -8724,6 +8927,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-maybe-backlog",
         action="store_true",
         help="Add unknown-date or fuzzy-title candidates as needs_review with review_bucket=maybe. Default keeps old strict behavior.",
+    )
+    discover.add_argument(
+        "--maybe-old-posted-date",
+        action="store_true",
+        help="With --include-maybe-backlog, keep newly seen candidates whose posted_at is older than the cutoff in the maybe bucket.",
     )
     discover.add_argument(
         "--include-inactive-sources",
@@ -8911,11 +9119,23 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["priority", "maybe", "retry", "skipped"],
         help="Optional compatibility bucket view. Defaults to the original high-fit backlog behavior.",
     )
+    backlog.add_argument(
+        "--company-limit",
+        type=int,
+        default=DEFAULT_RECOMMENDATION_COMPANY_LIMIT,
+        help="Maximum recommendations per company for --bucket priority. Use 0 for no cap.",
+    )
     backlog.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
     daily_review = subcommands.add_parser("daily-review", help="Write a daily review from tracker and discovery reports.")
     daily_review.add_argument("--date", help="Date to review in YYYY-MM-DD. Defaults to today.")
     daily_review.add_argument("--min-fit", type=float, default=8.0, help="Minimum fit score for priority candidates.")
     daily_review.add_argument("--limit", type=int, default=30, help="Maximum rows per section. Use 0 for no limit.")
+    daily_review.add_argument(
+        "--company-limit",
+        type=int,
+        default=DEFAULT_RECOMMENDATION_COMPANY_LIMIT,
+        help="Maximum priority/promoted maybe recommendations per company. Use 0 for no cap.",
+    )
     daily_review.add_argument(
         "--all-reports",
         action="store_true",

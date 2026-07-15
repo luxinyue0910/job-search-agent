@@ -340,11 +340,12 @@ python3 job-search/scripts/job_search.py discover-jobs \
   --track general_sde \
   --since-days 30 \
   --include-maybe-backlog \
+  --maybe-old-posted-date \
   --source-company "Y Combinator Jobs" \
   --score
 ```
 
-This saves candidates with legacy `status: needs_review` plus `review_bucket: maybe`, so older commands keep working while newer review flows can separate them from priority applications.
+This saves candidates with legacy `status: needs_review` plus `review_bucket: maybe`, so older commands keep working while newer review flows can separate them from priority applications. `--maybe-old-posted-date` is intended for startup/portfolio sweeps: a newly seen job with an older `posted_at` is preserved for manual review, while previously seen old jobs stay out of the tracker.
 
 Discovery run reports preserve `status` and `result_status` and add `health` / `failure_category` for diagnostics. Useful review commands:
 
@@ -355,6 +356,8 @@ python3 job-search/scripts/job_search.py application-backlog --bucket priority -
 python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
 python3 job-search/scripts/job_search.py daily-review
 ```
+
+Priority recommendation views prefer `new grad`, `0-1`, and `1-2` year roles, then downrank `2+` and `2-5` year roles. They skip obvious `3+`, `Senior`, `III`, `Staff`, `Principal`, PhD-only, and internship roles by default. Priority and promoted-maybe lists cap output to three roles per company unless `--company-limit 0` is passed.
 
 ## Freshness and Deduplication
 

@@ -59,6 +59,7 @@ def discover_args(**overrides):
         "since_days": None,
         "include_unknown_posted_date": False,
         "include_maybe_backlog": False,
+        "maybe_old_posted_date": False,
         "include_inactive_sources": False,
         "no_role_filter": False,
         "score": False,
@@ -194,6 +195,42 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(app["status"], "needs_review")
             self.assertEqual(app["review_bucket"], "maybe")
             self.assertEqual(app["discovery_bucket"], "maybe_backlog")
+
+    def test_old_posted_at_can_enter_maybe_backlog_only_when_newly_seen(self):
+        candidate = {
+            "company": "OldButNewCo",
+            "role": "Software Engineer",
+            "url": "https://example.com/jobs/old-but-new",
+            "platform": "custom",
+            "location": "Seattle, WA",
+            "posted_at": "2020-01-01T00:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [{"company": "OldButNewCo", "platform": "custom", "url": "https://example.com/jobs"}])
+            job_search = load_job_search(private_root)
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([dict(candidate)], "")):
+                job_search.command_discover_jobs(discover_args(include_maybe_backlog=False, maybe_old_posted_date=False))
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            self.assertEqual(tracker["applications"], [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [{"company": "OldButNewCo", "platform": "custom", "url": "https://example.com/jobs"}])
+            job_search = load_job_search(private_root)
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([dict(candidate)], "")):
+                job_search.command_discover_jobs(discover_args(include_maybe_backlog=True, maybe_old_posted_date=True))
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            app = tracker["applications"][0]
+            self.assertEqual(app["status"], "needs_review")
+            self.assertEqual(app["review_bucket"], "maybe")
+            self.assertEqual(app["discovery_bucket"], "maybe_backlog")
+            self.assertIn("old_posted_at_new_to_us", app["notes"])
+
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([dict(candidate)], "")):
+                job_search.command_discover_jobs(discover_args(include_maybe_backlog=True, maybe_old_posted_date=True))
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(tracker["applications"]), 1)
 
     def test_inactive_sources_are_skipped_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -404,9 +441,14 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
             self.assertEqual(job_search.extract_years("Applicants must be 18+ years old."), [])
+            self.assertEqual(job_search.extract_year_requirements("Applicants must be 18+ years old."), [])
             self.assertEqual(job_search.extract_years("Must be at least 21 years of age."), [])
+            self.assertEqual(job_search.extract_year_requirements("Must be at least 21 years of age."), [])
             self.assertEqual(job_search.extract_years("Requires 3+ years of software development experience."), [3])
+            self.assertEqual(job_search.extract_year_requirements("Requires 2-5 years of software development experience.")[0]["min"], 2)
             self.assertEqual(job_search.extract_years("Requires 1-3 years of IT support experience."), [1])
+            self.assertEqual(job_search.extract_month_requirements("Requires six (6) months of software experience."), [6])
+            self.assertEqual(job_search.extract_month_requirements("Requires six (6)&nbsp;months of software experience."), [6])
 
     def test_startup_jobs_adapter_reads_static_json_ld(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +587,129 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             rows = job_search.daily_review_app_rows(apps, "priority", 8, 10)
 
             self.assertEqual([row["id"] for row in rows], ["range-years", "good"])
+
+    def test_daily_review_prioritizes_entry_level_and_caps_company(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            apps = [
+                {
+                    "id": "two-plus",
+                    "status": "scored",
+                    "company": "TwoPlusCo",
+                    "role": "Software Engineer II",
+                    "location": "Seattle, WA",
+                    "notes": "Requires 2+ years of experience.",
+                    "fit_score": 10,
+                    "ats_score": 100,
+                },
+                {
+                    "id": "two-five",
+                    "status": "scored",
+                    "company": "RangeCo",
+                    "role": "Software Engineer",
+                    "location": "Seattle, WA",
+                    "notes": "Requires 2-5 years of experience.",
+                    "fit_score": 10,
+                    "ats_score": 100,
+                },
+                {
+                    "id": "one-two",
+                    "status": "scored",
+                    "company": "SmallCo",
+                    "role": "Software Engineer",
+                    "location": "Seattle, WA",
+                    "notes": "Requires 1-2 years of experience.",
+                    "fit_score": 8.5,
+                    "ats_score": 75,
+                },
+                {
+                    "id": "new-grad",
+                    "status": "scored",
+                    "company": "GradCo",
+                    "role": "Software Engineer, New Grad",
+                    "location": "Bellevue, WA",
+                    "fit_score": 8.1,
+                    "ats_score": 70,
+                },
+            ]
+            for index in range(5):
+                apps.append(
+                    {
+                        "id": f"bigco-extra-{index}",
+                        "status": "scored",
+                        "company": "BigCo",
+                        "role": "Software Engineer",
+                        "location": "Seattle, WA",
+                        "notes": "Entry level role; 0-1 years welcome.",
+                        "fit_score": 9,
+                        "ats_score": 80,
+                    }
+                )
+
+            rows = job_search.daily_review_app_rows(apps, "priority", 8, 20)
+
+            ids = [row["id"] for row in rows]
+            self.assertLess(ids.index("new-grad"), ids.index("two-plus"))
+            self.assertLess(rows.index(next(row for row in rows if row["id"] == "two-plus")), rows.index(next(row for row in rows if row["id"] == "two-five")))
+            self.assertLess(rows.index(next(row for row in rows if row["id"] == "one-two")), rows.index(next(row for row in rows if row["id"] == "two-plus")))
+            self.assertEqual(sum(1 for row in rows if row["company"] == "BigCo"), 3)
+
+    def test_experience_bucket_can_use_existing_jd_path_without_rescoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            jd_path = Path(tmp) / "jd.md"
+            jd_path.write_text("Basic Qualifications: 2+ years of software development experience.", encoding="utf-8")
+            app = {
+                "id": "existing-amazon",
+                "status": "scored",
+                "company": "Amazon",
+                "role": "Machine Learning Engineer",
+                "location": "Seattle, WA",
+                "fit_score": 9,
+                "ats_score": 80,
+                "jd_path": str(jd_path),
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "2_plus")
+
+    def test_experience_bucket_treats_month_requirements_as_entry_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            jd_path = Path(tmp) / "jd.md"
+            jd_path.write_text("You have a Master’s degree plus three (3) months of related experience.", encoding="utf-8")
+            app = {
+                "id": "existing-glean",
+                "status": "scored",
+                "company": "Glean",
+                "role": "Software Engineer",
+                "location": "Mountain View, CA",
+                "fit_score": 10,
+                "ats_score": 82,
+                "jd_path": str(jd_path),
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "0_1")
+
+    def test_experience_bucket_does_not_treat_page_nav_apprenticeship_as_new_grad(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            jd_path = Path(tmp) / "jd.md"
+            jd_path.write_text(
+                "Careers Engineering Apprenticeship Internship Programs. Your Expertise: 2-4+ years of industry experience.",
+                encoding="utf-8",
+            )
+            app = {
+                "id": "airbnb-dev-tools",
+                "status": "scored",
+                "company": "Airbnb",
+                "role": "Software Engineer, Dev Tools",
+                "location": "Remote - USA",
+                "fit_score": 9.2,
+                "ats_score": 71,
+                "jd_path": str(jd_path),
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "2_range")
 
     def test_daily_review_promotes_high_scoring_maybe_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:

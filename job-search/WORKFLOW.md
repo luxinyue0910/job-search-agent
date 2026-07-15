@@ -107,7 +107,7 @@ python3 job-search/scripts/job_search.py prepare-application --id <application-i
 
 If a job is found by both QA and SDE searches, the tracker keeps one application by URL and appends both values to `matched_tracks`. `prepare-application` uses the application `target_track` unless you override it with `--track`.
 
-Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Source fetches run concurrently by default with `--workers 8`, while tracker, seen-job, scoring, and report writes stay single-threaded. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`.
+Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Source fetches run concurrently by default with `--workers 8`, while tracker, seen-job, scoring, and report writes stay single-threaded. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`. For startup/portfolio sweeps, add `--maybe-old-posted-date` when a newly seen job with an older `posted_at` should enter maybe backlog instead of being dropped.
 
 Discovery reports keep the legacy `status` and `result_status` fields and add `health` plus `failure_category` for source diagnostics. Use `discovery-summary` for a run summary, `source-health` to review failed/config-broken sources, and `daily-review` to write a combined priority/maybe/retry review file under the private repo.
 
@@ -137,12 +137,14 @@ python3 job-search/scripts/job_search.py discover-watchlist-jobs --provider bing
 python3 job-search/scripts/job_search.py discover-watchlist-jobs --provider bing --track qa_engineer --since-days 7 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --score
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --include-unknown-posted-date
-python3 job-search/scripts/job_search.py discover-jobs --since-days 30 --include-maybe-backlog --source-company "Y Combinator Jobs"
+python3 job-search/scripts/job_search.py discover-jobs --since-days 30 --include-maybe-backlog --maybe-old-posted-date --source-company "Y Combinator Jobs"
 python3 job-search/scripts/job_search.py discover-jobs --since-hours 24 --no-role-filter
 python3 job-search/scripts/job_search.py source-health --latest
 python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
 python3 job-search/scripts/job_search.py daily-review
 ```
+
+Priority recommendation views prefer `new grad`, `0-1`, and `1-2` year roles, then downrank `2+` and `2-5` year roles. They skip obvious `3+`, `Senior`, `III`, `Staff`, `Principal`, PhD-only, and internship roles by default. Priority and promoted-maybe lists cap output to three roles per company unless `--company-limit 0` is passed.
 
 Use `--pages-per-query` with SerpAPI when the first Google result page is too shallow. Each extra page costs another SerpAPI request per query, so keep `--max-queries` and `--pages-per-query` balanced.
 
