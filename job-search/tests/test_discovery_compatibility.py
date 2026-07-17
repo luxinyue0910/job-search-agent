@@ -63,6 +63,7 @@ def discover_args(**overrides):
         "include_inactive_sources": False,
         "no_role_filter": False,
         "score": False,
+        "score_maybe_limit": 3,
         "source_timeout_seconds": 30,
         "source_retries": 0,
         "source_retry_timeout_seconds": 0,
@@ -170,7 +171,7 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
     def test_unknown_posted_at_default_skips_but_maybe_backlog_keeps_needs_review(self):
         candidate = {
             "company": "MaybeCo",
-            "role": "Operations Analyst",
+            "role": "Technical Support Specialist",
             "url": "https://example.com/jobs/maybe",
             "platform": "custom",
             "location": "Seattle, WA",
@@ -195,6 +196,50 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(app["status"], "needs_review")
             self.assertEqual(app["review_bucket"], "maybe")
             self.assertEqual(app["discovery_bucket"], "maybe_backlog")
+
+    def test_maybe_backlog_title_prefilter_rejects_unrelated_roles(self):
+        candidate = {
+            "company": "HospitalCo",
+            "role": "Registered Nurse Specialist",
+            "url": "https://example.com/jobs/nurse",
+            "platform": "custom",
+            "location": "Seattle, WA",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [{"company": "HospitalCo", "platform": "custom", "url": "https://example.com/jobs"}])
+            job_search = load_job_search(private_root)
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([candidate], "")):
+                job_search.command_discover_jobs(discover_args(include_maybe_backlog=True))
+
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            report_path = next((private_root / "data" / "discovery_runs").glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(tracker["applications"], [])
+            self.assertEqual(report["totals"]["skipped_title"], 1)
+
+    def test_relevant_maybe_candidate_is_scored_with_per_source_limit(self):
+        candidate = {
+            "company": "SupportCo",
+            "role": "Integrations Support Specialist",
+            "url": "https://example.com/jobs/support",
+            "platform": "custom",
+            "location": "Seattle, WA",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [{"company": "SupportCo", "platform": "custom", "url": "https://example.com/jobs"}])
+            job_search = load_job_search(private_root)
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=([candidate], "")):
+                with mock.patch.object(job_search, "command_score_job") as score_job:
+                    job_search.command_discover_jobs(
+                        discover_args(include_maybe_backlog=True, score=True, score_maybe_limit=1)
+                    )
+
+            report_path = next((private_root / "data" / "discovery_runs").glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            score_job.assert_called_once()
+            self.assertEqual(report["totals"]["maybe_scored"], 1)
 
     def test_old_posted_at_can_enter_maybe_backlog_only_when_newly_seen(self):
         candidate = {
@@ -327,6 +372,8 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             def fake_fetch_search(url, source_arg, timeout=20):
                 self.assertIn("/careers/home/index", url)
                 self.assertIn("agency=kingcounty", url)
+                self.assertIn("sort=PostingDate", url)
+                self.assertIn("isDescendingSort=true", url)
                 self.assertEqual(source_arg["company"], "King County")
                 return listing_html
 
@@ -449,6 +496,46 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(job_search.extract_years("Requires 1-3 years of IT support experience."), [1])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6) months of software experience."), [6])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6)&nbsp;months of software experience."), [6])
+            self.assertEqual(job_search.extract_year_requirements("Employees receive more vacation after 5 years of service."), [])
+
+    def test_experience_bucket_uses_lowest_viable_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            app = {
+                "role": "Software Engineer",
+                "notes": "Level I requires 2+ years of experience; Level II requires 4+ years; Level III requires 6+ years.",
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "2_plus")
+            self.assertFalse(job_search.has_year_requirement(job_search.application_filter_text(app), 3))
+
+    def test_score_text_recomputes_stale_experience_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            profile = {
+                "targets": {"roles": ["software engineer"], "keywords": ["python"]},
+                "preferences": {"relocation_allowed_states": ["WA", "CA"]},
+                "dealbreakers": {"lower_weight_minimum_years_from": 3, "skip_minimum_years_from": 5},
+                "work_authorization": {"requires_sponsorship": False},
+            }
+            app = {
+                "company": "FreshCo",
+                "role": "Software Engineer",
+                "location": "Seattle, WA",
+                "platform": "greenhouse",
+                "experience_bucket": "3_plus",
+            }
+
+            score = job_search.score_text(
+                app,
+                "Software Engineer role requiring 1+ years of experience with Python.",
+                profile,
+            )
+
+            self.assertEqual(score["experience_bucket"], "1_2")
+            self.assertNotEqual(score["status"], "skipped")
 
     def test_startup_jobs_adapter_reads_static_json_ld(self):
         with tempfile.TemporaryDirectory() as tmp:

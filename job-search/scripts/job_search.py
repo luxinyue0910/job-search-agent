@@ -193,6 +193,19 @@ DEFAULT_WORKDAY_KEYWORDS = [
     "Forward Deployed Engineer",
 ]
 
+DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS = [
+    "technical support",
+    "application support",
+    "help desk",
+    "service desk",
+    "desktop support",
+    "IT support",
+    "systems administrator",
+    "IT operations",
+    "implementation specialist",
+    "AI transformation",
+]
+
 ATS_SEARCH_SITES = [
     "job-boards.greenhouse.io",
     "boards.greenhouse.io",
@@ -4090,8 +4103,8 @@ def governmentjobs_search_url(source: dict[str, Any], keyword: str, page: int) -
         "agency": agency,
         "keyword": keyword,
         "page": str(page),
-        "sort": str(source.get("sort") or "PositionTitle"),
-        "isDescendingSort": "true" if truthy_source_flag(source.get("is_descending_sort"), default=False) else "false",
+        "sort": str(source.get("sort") or "PostingDate"),
+        "isDescendingSort": "true" if truthy_source_flag(source.get("is_descending_sort"), default=True) else "false",
     }
     if source.get("department_folder"):
         params["departmentFolder"] = str(source["department_folder"])
@@ -4212,6 +4225,8 @@ def discover_governmentjobs_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    if str(source.get("track_hint") or "") == "traditional_it_wa":
+        keywords = merge_unique(keywords, DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS)
     max_pages = int(source.get("max_pages", 2))
     max_detail_pages = int(source.get("max_detail_pages", 10))
     candidates_by_url: dict[str, dict[str, Any]] = {}
@@ -5008,7 +5023,7 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
         return False
     profile_terms = [
         str(item).lower()
-        for item in profile.get("targets", {}).get("roles", []) + profile.get("targets", {}).get("levels", [])
+        for item in profile.get("targets", {}).get("roles", [])
         if str(item).strip()
     ]
     track_terms = [
@@ -5020,6 +5035,72 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
     if not track_terms:
         terms += DEFAULT_DISCOVERY_TITLE_KEYWORDS
     return any(re.search(rf"\b{re.escape(term)}\b", role) for term in terms)
+
+
+MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "general_sde": (
+        r"\bsoftware\s+(?:development\s+)?engineer\b",
+        r"\bsoftware\s+developer\b",
+        r"\b(?:back[- ]?end|front[- ]?end|full[- ]?stack|product|platform|devops|developer tools?)\s+(?:software\s+)?engineer\b",
+        r"\b(?:founding|integration|integrations)\s+engineer\b",
+        r"\bsite reliability engineer\b|\bsre\b",
+    ),
+    "qa_engineer": (
+        r"\bqa\b|\bquality assurance\b|\bsdet\b",
+        r"\bsoftware (?:development )?engineer in test\b",
+        r"\b(?:software )?test automation engineer\b",
+        r"\bautomation qa engineer\b|\bqa automation engineer\b",
+        r"\bsoftware quality engineer\b",
+    ),
+    "fde_ai_engineer": (
+        r"\bforward deployed (?:software |ai )?engineer\b",
+        r"\b(?:applied |generative |gen)?ai (?:solutions |product )?engineer\b",
+        r"\bmachine learning engineer\b",
+        r"\b(?:solutions|customer|implementation|integration) engineer\b",
+        r"\bai (?:transformation|operations|program|enablement) (?:coordinator|specialist|analyst)\b",
+    ),
+    "traditional_it_wa": (
+        r"\b(?:technical|application|production|desktop|computer|technology|it|integration|integrations) support (?:engineer|analyst|specialist|technician)\b",
+        r"\b(?:help|service) desk (?:engineer|analyst|specialist|technician)\b",
+        r"\bit operations (?:engineer|analyst|specialist|technician)\b",
+        r"\b(?:systems?|business systems|application systems|it systems) (?:analyst|administrator|specialist)\b",
+        r"\b(?:database|data systems|data management|business intelligence|reporting|technology) analyst\b",
+        r"\b(?:application|applications|data systems|database|report|bi|integration) developer\b",
+        r"\b(?:workday|erp) (?:developer|analyst|specialist)\b",
+        r"\b(?:qa|quality assurance) analyst\b",
+        r"\b(?:technology|it|ai transformation|ai operations|ai enablement) coordinator\b",
+        r"\b(?:implementation|integration|integrations|technical support|customer support) specialist\b",
+        r"\bforms? (?:and|&) records? analyst\b",
+    ),
+    "data_center_infra": (
+        r"\bdata cent(?:er|re) (?:operations )?(?:engineer|technician|specialist)\b",
+        r"\bnetwork (?:operations |development )?(?:engineer|technician|specialist)\b",
+        r"\binfrastructure operations (?:engineer|technician|specialist)\b",
+        r"\bsystems? (?:operations )?(?:engineer|technician|administrator)\b",
+    ),
+}
+
+MAYBE_TITLE_NEGATIVE_PATTERN = re.compile(
+    r"\b(?:nurse|rn|physician|therapist|clinician|medical assistant|patient services|pharmacy|pharmacist|"
+    r"surgical|radiologic|dental|dietitian|food service|cook|custodian|security officer|sales|marketing|"
+    r"recruiter|account executive|attorney|paralegal|social worker|counselor|teacher|mechanical|electrical|"
+    r"construction|facilities|warehouse|driver)\b",
+    flags=re.I,
+)
+
+
+def maybe_backlog_title_relevant(candidate: dict[str, Any], profile: dict[str, Any]) -> bool:
+    """Keep fuzzy candidates only when the title still belongs to the active track."""
+    role = re.sub(r"\s+", " ", str(candidate.get("role") or "")).strip().lower()
+    if not role or MAYBE_TITLE_NEGATIVE_PATTERN.search(role):
+        return False
+    if re.search(r"\b(?:senior|sr\.?|staff|principal|distinguished|lead|manager|director|head|vp|chief|cto|intern|internship)\b", role):
+        return False
+    track_id = str(profile.get("_track", {}).get("id") or "").strip()
+    patterns = MAYBE_TITLE_PATTERNS.get(track_id)
+    if not patterns:
+        patterns = tuple(pattern for values in MAYBE_TITLE_PATTERNS.values() for pattern in values)
+    return any(re.search(pattern, role, flags=re.I) for pattern in patterns)
 
 
 def location_allowed(location: str, profile: dict[str, Any]) -> bool:
@@ -5231,6 +5312,7 @@ def empty_discovery_stats() -> dict[str, int]:
         "skipped_unknown_date": 0,
         "skipped_title": 0,
         "skipped_location": 0,
+        "maybe_scored": 0,
         "scoring_failed": 0,
     }
 
@@ -5248,6 +5330,7 @@ def process_discovered_candidates(
     track = load_track(getattr(args, "track", None))
     track_id = str(track.get("id", "")).strip()
     track_resume = path_from_track(track, "resume_file") if track else None
+    maybe_score_limit = max(0, int(getattr(args, "score_maybe_limit", 3) or 0))
     for candidate in candidates:
         stats["discovered"] += 1
         if track_id:
@@ -5314,8 +5397,12 @@ def process_discovered_candidates(
             else:
                 stats["skipped_old"] += 1
                 continue
-        if not args.no_role_filter and not discovery_title_matches(candidate, profile):
-            if getattr(args, "include_maybe_backlog", False):
+        exact_title_match = args.no_role_filter or discovery_title_matches(candidate, profile)
+        if not exact_title_match:
+            if (
+                getattr(args, "include_maybe_backlog", False)
+                and maybe_backlog_title_relevant(candidate, profile)
+            ):
                 maybe_reasons.append("fuzzy_title")
             else:
                 stats["skipped_title"] += 1
@@ -5346,9 +5433,24 @@ def process_discovered_candidates(
                     "notes": candidate.get("notes", app.get("notes", "")),
                 },
             )
-        if args.score and not maybe_reasons and app.get("status") in {"found", "needs_retry"}:
+        should_score_maybe = (
+            bool(maybe_reasons)
+            and bool(args.score)
+            and stats["maybe_scored"] < maybe_score_limit
+            and (exact_title_match or maybe_backlog_title_relevant(candidate, profile))
+            and app.get("status") in {"found", "needs_review", "needs_retry"}
+            and not app.get("date_applied")
+        )
+        should_score_strict = (
+            bool(args.score)
+            and not maybe_reasons
+            and app.get("status") in {"found", "needs_retry"}
+        )
+        if should_score_strict or should_score_maybe:
             try:
                 command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
+                if should_score_maybe:
+                    stats["maybe_scored"] += 1
             except Exception as error:  # noqa: BLE001
                 stats["scoring_failed"] += 1
                 update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
@@ -6242,7 +6344,7 @@ def extract_years(text: str) -> list[int]:
     range_pattern = re.compile(r"\b(\d+)\s*(?:-|–|—|\bto\b)\s*(\d+)\+?\s*(?:years|yrs)\b", flags=re.I)
     for match in range_pattern.finditer(value):
         lower_bound = int(match.group(1))
-        if lower_bound <= 15 and not age_year_context(value, *match.span()):
+        if lower_bound <= 15 and experience_year_context(value, *match.span()):
             years.append(lower_bound)
         range_spans.append(match.span())
     if range_spans:
@@ -6252,7 +6354,7 @@ def extract_years(text: str) -> list[int]:
         value = "".join(chars)
     for match in re.finditer(r"\b(\d+)\+?\s*(?:years|yrs)\b", value, flags=re.I):
         year_value = int(match.group(1))
-        if year_value <= 15 and not age_year_context(value, *match.span()):
+        if year_value <= 15 and experience_year_context(value, *match.span()):
             years.append(year_value)
     return years
 
@@ -6266,7 +6368,7 @@ def extract_year_requirements(text: str) -> list[dict[str, Any]]:
     for match in range_pattern.finditer(value):
         lower_bound = int(match.group(1))
         upper_bound = int(match.group(2))
-        if lower_bound <= 15 and upper_bound <= 20 and not age_year_context(value, *match.span()):
+        if lower_bound <= 15 and upper_bound <= 20 and experience_year_context(value, *match.span()):
             requirements.append(
                 {
                     "min": lower_bound,
@@ -6283,7 +6385,7 @@ def extract_year_requirements(text: str) -> list[dict[str, Any]]:
         value = "".join(chars)
     for match in re.finditer(r"\b(\d+)(\+)?\s*(?:years|yrs)\b", value, flags=re.I):
         year_value = int(match.group(1))
-        if year_value <= 15 and not age_year_context(value, *match.span()):
+        if year_value <= 15 and experience_year_context(value, *match.span()):
             requirements.append(
                 {
                     "min": year_value,
@@ -6347,6 +6449,53 @@ def age_year_context(text: str, start: int, end: int) -> bool:
     return False
 
 
+def experience_year_context(text: str, start: int, end: int) -> bool:
+    """Return true only when a year expression is plausibly an experience requirement."""
+    if age_year_context(text, start, end):
+        return False
+    context = text[max(0, start - 140) : min(len(text), end + 180)].lower()
+    near_context = text[max(0, start - 80) : min(len(text), end + 100)].lower()
+    benefit_markers = (
+        "vacation",
+        "paid time off",
+        "pto",
+        "sick leave",
+        "parental leave",
+        "retirement",
+        "vesting",
+        "service award",
+        "employee benefit",
+    )
+    if any(marker in near_context for marker in benefit_markers) and "experience" not in near_context:
+        return False
+    experience_markers = (
+        "experience",
+        "qualification",
+        "required",
+        "requires",
+        "requiring",
+        "minimum",
+        "must have",
+        "you have",
+        "you bring",
+        "you possess",
+        "candidate has",
+        "applicant has",
+        "professional background",
+        "hands-on",
+        "working with",
+        "developing",
+        "building",
+        "supporting",
+    )
+    return any(marker in context for marker in experience_markers)
+
+
+def minimum_experience_years(requirements: list[dict[str, Any]]) -> int:
+    values = [int(item.get("min") or 0) for item in requirements if int(item.get("min") or 0) > 0]
+    return min(values) if values else 0
+
+
 def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> dict[str, Any]:
     target_keywords = [str(item) for item in profile.get("targets", {}).get("keywords", [])]
     track_keywords = [str(item) for item in profile.get("_track", {}).get("scoring_keywords", [])]
@@ -6367,28 +6516,32 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
         dealbreakers.append("Security clearance appears required.")
     if re.search(r"\b(senior|staff|principal|lead)\b", app.get("role", ""), re.I):
         dealbreakers.append("Role title appears senior/staff/principal/lead.")
-    years = extract_years(jd_text)
     experience_requirements = extract_year_requirements(jd_text)
     month_requirements = extract_month_requirements(jd_text)
     experience_app = dict(app)
     experience_app["notes"] = jd_text
+    experience_app["experience_bucket"] = ""
+    experience_app["experience_requirements"] = []
+    experience_app["action_items"] = []
+    experience_app["dealbreakers"] = []
+    experience_app["jd_path"] = ""
     experience_bucket = experience_requirement_bucket(experience_app)
-    max_years = max(years) if years else 0
+    required_years = minimum_experience_years(experience_requirements)
     dealbreaker_config = profile.get("dealbreakers", {})
     threshold = int(dealbreaker_config.get("minimum_years_over", 5))
     skip_from = dealbreaker_config.get("skip_minimum_years_from")
     skip_from = int(skip_from) if skip_from not in (None, "") else 0
     if app.get("platform") == "amazon_jobs":
         threshold = 2
-    if skip_from and max_years >= skip_from:
-        dealbreakers.append(f"JD mentions {max_years}+ years, at or above skip threshold {skip_from}.")
-    elif max_years > threshold:
-        dealbreakers.append(f"JD mentions {max_years}+ years, above threshold {threshold}.")
+    if skip_from and required_years >= skip_from:
+        dealbreakers.append(f"JD mentions {required_years}+ years, at or above skip threshold {skip_from}.")
+    elif required_years > threshold:
+        dealbreakers.append(f"JD mentions {required_years}+ years, above threshold {threshold}.")
     penalty_from = int(dealbreaker_config.get("lower_weight_minimum_years_from", 3))
-    if max_years >= penalty_from:
+    if required_years >= penalty_from:
         level_score = max(0.4, level_score - 1.4)
         action_items.append(
-            f"JD mentions {max_years}+ years; lower priority for 0-2 years experience target."
+            f"JD mentions {required_years}+ years; lower priority for 0-2 years experience target."
         )
     track_id = str(profile.get("_track", {}).get("id") or "")
     if track_id == "qa_engineer":
@@ -7505,6 +7658,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "include_inactive_sources": bool(getattr(args, "include_inactive_sources", False)),
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
+        "score_maybe_limit": int(getattr(args, "score_maybe_limit", 3) or 0),
         "totals": {
             "sources_planned": len(source_pairs),
             "sources_attempted": 0,
@@ -7650,7 +7804,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         print(
             f"    {status_detail}: candidates={len(candidates)} "
             f"added={source_stats['added']} existing={source_stats['existing']} "
-            f"maybe={source_stats['maybe_backlog']} "
+            f"maybe={source_stats['maybe_backlog']} maybe_scored={source_stats['maybe_scored']} "
             f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
             f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
             f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
@@ -7674,7 +7828,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "Discovery complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
-        f"Maybe backlog: {stats['maybe_backlog']}. "
+        f"Maybe backlog: {stats['maybe_backlog']}. Maybe scored: {stats['maybe_scored']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
         f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}. "
@@ -8397,7 +8551,8 @@ def matches_preferred_location(text: str) -> bool:
 
 
 def has_year_requirement(text: str, minimum: int) -> bool:
-    return any(year >= minimum for year in extract_years(text))
+    required_years = minimum_experience_years(extract_year_requirements(text))
+    return bool(required_years and required_years >= minimum)
 
 
 PROMOTED_MAYBE_MIN_ATS = 70.0
@@ -8430,15 +8585,27 @@ def experience_requirement_bucket(app: dict[str, Any]) -> str:
         return "new_grad"
     requirements = extract_year_requirements(filter_text)
     if requirements:
-        if any(int(req.get("min") or 0) >= 3 for req in requirements):
+        minimum_years = minimum_experience_years(requirements)
+        minimum_requirements = [
+            requirement
+            for requirement in requirements
+            if int(requirement.get("min") or 0) == minimum_years
+        ]
+        if minimum_years >= 3:
             return "3_plus"
-        if any(int(req.get("min") or 0) == 2 and req.get("max") and int(req.get("max") or 0) >= 3 for req in requirements):
+        if minimum_years == 2 and any(
+            req.get("max") and int(req.get("max") or 0) >= 3
+            for req in minimum_requirements
+        ):
             return "2_range"
-        if any(int(req.get("min") or 0) == 2 and req.get("plus") for req in requirements):
+        if minimum_years == 2 and any(req.get("plus") for req in minimum_requirements):
             return "2_plus"
-        if any(int(req.get("min") or 0) <= 1 and req.get("max") and int(req.get("max") or 0) <= 3 for req in requirements):
+        if minimum_years <= 1 and any(
+            req.get("max") and int(req.get("max") or 0) <= 3
+            for req in minimum_requirements
+        ):
             return "1_2"
-        if any(int(req.get("min") or 0) <= 2 for req in requirements):
+        if minimum_years <= 2:
             return "1_2"
     month_requirements = extract_month_requirements(filter_text)
     if month_requirements:
@@ -8940,6 +9107,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover.add_argument("--no-role-filter", action="store_true", help="Add all fresh jobs regardless of title.")
     discover.add_argument("--score", action="store_true", help="Score newly added found jobs after discovery.")
+    discover.add_argument(
+        "--score-maybe-limit",
+        type=int,
+        default=3,
+        help="With --score, fetch and score at most this many relevant maybe candidates per source. Use 0 to disable.",
+    )
     discover.add_argument(
         "--source-timeout-seconds",
         type=float,
