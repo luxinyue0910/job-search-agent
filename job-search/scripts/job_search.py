@@ -898,6 +898,44 @@ def source_for_track(source: dict[str, Any], track_id: str | None) -> dict[str, 
     return selected
 
 
+DEFAULT_DISCOVER_ALL_TRACKS = [
+    "general_sde",
+    "qa_engineer",
+    "fde_ai_engineer",
+    "traditional_it_wa",
+    "data_center_infra",
+]
+
+DISCOVER_ALL_ROLE_QUERIES = [
+    "Software Engineer",
+    "SDET",
+    "Forward Deployed Engineer",
+    "Application Support Analyst",
+    "Data Center Engineer",
+]
+
+
+def source_for_tracks(source: dict[str, Any], track_ids: list[str]) -> dict[str, Any]:
+    """Build one source request configuration that covers all requested tracks."""
+    selected = dict(source)
+    keywords = [str(item) for item in source.get("keywords", []) if str(item).strip()]
+    locations = [str(item) for item in source.get("locations", []) if str(item).strip()]
+    for track_id in track_ids:
+        track_source = source_for_track(source, track_id)
+        keywords = merge_unique(
+            keywords,
+            [str(item) for item in track_source.get("keywords", []) if str(item).strip()],
+        )
+        locations = merge_unique(
+            locations,
+            [str(item) for item in track_source.get("locations", []) if str(item).strip()],
+        )
+    selected["keywords"] = merge_unique(keywords, DISCOVER_ALL_ROLE_QUERIES)
+    if locations:
+        selected["locations"] = locations
+    return selected
+
+
 def greenhouse_board_from_source(source: dict[str, Any]) -> str | None:
     if source.get("board"):
         return str(source["board"])
@@ -5103,6 +5141,21 @@ def maybe_backlog_title_relevant(candidate: dict[str, Any], profile: dict[str, A
     return any(re.search(pattern, role, flags=re.I) for pattern in patterns)
 
 
+def unclassified_technical_title_relevant(candidate: dict[str, Any]) -> bool:
+    role = re.sub(r"\s+", " ", str(candidate.get("role") or "")).strip().lower()
+    if not role or MAYBE_TITLE_NEGATIVE_PATTERN.search(role):
+        return False
+    if re.search(r"\b(?:senior|sr\.?|staff|principal|distinguished|lead|manager|director|head|vp|chief|cto|intern|internship)\b", role):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:software|developer|data|cloud|platform|infrastructure|systems?|application|technical|"
+            r"technology|it|qa|test|automation|integration|support|network|database|devops|sre)\b",
+            role,
+        )
+    )
+
+
 def location_allowed(location: str, profile: dict[str, Any]) -> bool:
     value = str(location or "").strip().lower()
     if not value:
@@ -5327,6 +5380,11 @@ def process_discovered_candidates(
 ) -> dict[str, int]:
     stats = empty_discovery_stats()
     seen_jobs = seen.setdefault("jobs", {})
+    existing_apps_by_url = {
+        normalize_job_url(app.get("url", "")): app
+        for app in load_tracker().get("applications", [])
+        if app.get("url")
+    }
     track = load_track(getattr(args, "track", None))
     track_id = str(track.get("id", "")).strip()
     track_resume = path_from_track(track, "resume_file") if track else None
@@ -5340,6 +5398,12 @@ def process_discovered_candidates(
                 candidate["resume_file"] = str(track_resume)
         candidate["url"] = normalize_job_url(candidate["url"])
         key = candidate["url"]
+        existing_app = existing_apps_by_url.get(key)
+        needs_existing_cross_track_evaluation = bool(
+            track_id
+            and existing_app
+            and track_evaluation_key(track_id) not in track_evaluations_with_legacy(existing_app)
+        )
         seen_record = seen_jobs.get(key)
         seen_created = seen_record is None
         if seen_record is None:
@@ -5391,9 +5455,13 @@ def process_discovered_candidates(
             if (
                 getattr(args, "include_maybe_backlog", False)
                 and getattr(args, "maybe_old_posted_date", False)
-                and seen_created
+                and (seen_created or needs_existing_cross_track_evaluation)
             ):
-                maybe_reasons.append("old_posted_at_new_to_us")
+                maybe_reasons.append(
+                    "old_posted_at_new_track"
+                    if needs_existing_cross_track_evaluation and not seen_created
+                    else "old_posted_at_new_to_us"
+                )
             else:
                 stats["skipped_old"] += 1
                 continue
@@ -5419,12 +5487,13 @@ def process_discovered_candidates(
             stats["maybe_backlog"] += 1
 
         app, created = upsert_application(candidate)
+        existing_apps_by_url[key] = app
         if created:
             stats["added"] += 1
         else:
             stats["existing"] += 1
         if maybe_reasons:
-            update_application(
+            app = update_application(
                 app["id"],
                 {
                     "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
@@ -5433,28 +5502,375 @@ def process_discovered_candidates(
                     "notes": candidate.get("notes", app.get("notes", "")),
                 },
             )
+        evaluation_track_id = track_evaluation_key(track_id)
+        current_track_evaluated = evaluation_track_id in track_evaluations_with_legacy(app)
+        scoreable_status = app.get("status") in {"found", "needs_review", "needs_retry", "scored", "skipped"}
+        needs_track_evaluation = not current_track_evaluated
         should_score_maybe = (
             bool(maybe_reasons)
             and bool(args.score)
             and stats["maybe_scored"] < maybe_score_limit
             and (exact_title_match or maybe_backlog_title_relevant(candidate, profile))
-            and app.get("status") in {"found", "needs_review", "needs_retry"}
+            and scoreable_status
+            and (needs_track_evaluation or app.get("status") in {"found", "needs_retry"})
             and not app.get("date_applied")
         )
         should_score_strict = (
             bool(args.score)
             and not maybe_reasons
-            and app.get("status") in {"found", "needs_retry"}
+            and scoreable_status
+            and (needs_track_evaluation or app.get("status") in {"found", "needs_retry"})
+            and not app.get("date_applied")
         )
         if should_score_strict or should_score_maybe:
             try:
-                command_score_job(argparse.Namespace(id=app["id"], jd_file=None))
+                command_score_job(
+                    argparse.Namespace(
+                        id=app["id"],
+                        jd_file=None,
+                        track=track_id or None,
+                        quiet=bool(getattr(args, "quiet", False)),
+                    )
+                )
                 if should_score_maybe:
                     stats["maybe_scored"] += 1
             except Exception as error:  # noqa: BLE001
                 stats["scoring_failed"] += 1
                 update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
     return stats
+
+
+def process_discovered_candidates_all_tracks(
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    profiles: dict[str, dict[str, Any]],
+    seen: dict[str, Any],
+    cutoff: dt.datetime | None,
+    current_seen_at: str,
+    score_queue: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    stats = empty_discovery_stats()
+    seen_jobs = seen.setdefault("jobs", {})
+    tracker_apps_by_url = {
+        normalize_job_url(app.get("url", "")): app
+        for app in load_tracker().get("applications", [])
+        if app.get("url")
+    }
+    maybe_score_limit = max(0, int(getattr(args, "score_maybe_limit", 3) or 0))
+    for candidate in candidates:
+        stats["discovered"] += 1
+        candidate["url"] = normalize_job_url(candidate["url"])
+        key = candidate["url"]
+        existing_app = tracker_apps_by_url.get(key)
+        seen_record = seen_jobs.get(key)
+        seen_created = seen_record is None
+        if seen_record is None:
+            seen_record = {
+                "company": candidate.get("company", ""),
+                "role": candidate.get("role", ""),
+                "url": key,
+                "first_seen": current_seen_at,
+                "last_seen": current_seen_at,
+            }
+            seen_jobs[key] = seen_record
+        for field in [
+            "company",
+            "role",
+            "platform",
+            "location",
+            "posted_at",
+            "updated_at",
+            "source",
+            "source_query",
+            "freshness_source",
+            "job_number",
+            "external_job_id",
+        ]:
+            value = candidate.get(field)
+            if value and seen_record.get(field) != value:
+                seen_record[field] = value
+        candidate["first_seen"] = seen_record.get("first_seen", current_seen_at)
+        candidate["last_seen"] = current_seen_at
+
+        exact_tracks: list[str] = []
+        fuzzy_tracks: list[str] = []
+        for track_id, profile in profiles.items():
+            if args.no_role_filter or discovery_title_matches(candidate, profile):
+                exact_tracks.append(track_id)
+            elif getattr(args, "include_maybe_backlog", False) and maybe_backlog_title_relevant(candidate, profile):
+                fuzzy_tracks.append(track_id)
+        matched_tracks = merge_unique(exact_tracks, fuzzy_tracks)
+        unclassified_technical = bool(
+            not matched_tracks
+            and getattr(args, "include_maybe_backlog", False)
+            and unclassified_technical_title_relevant(candidate)
+        )
+        if not matched_tracks and not unclassified_technical:
+            stats["skipped_title"] += 1
+            continue
+        if not any(location_allowed(candidate.get("location", ""), profile) for profile in profiles.values()):
+            stats["skipped_location"] += 1
+            continue
+
+        evaluation_keys = matched_tracks or ["default"]
+        existing_evaluations = track_evaluations_with_legacy(existing_app or {})
+        needs_cross_track_evaluation = any(
+            key_name not in existing_evaluations or existing_evaluations[key_name].get("status") == "needs_retry"
+            for key_name in evaluation_keys
+        )
+        maybe_reasons: list[str] = []
+        posted_at = parse_datetime(candidate.get("posted_at"))
+        if not posted_at:
+            if not args.include_unknown_posted_date:
+                if getattr(args, "include_maybe_backlog", False):
+                    maybe_reasons.append("unknown_posted_at")
+                else:
+                    stats["skipped_unknown_date"] += 1
+                    continue
+        elif cutoff and posted_at < cutoff:
+            if (
+                getattr(args, "include_maybe_backlog", False)
+                and getattr(args, "maybe_old_posted_date", False)
+                and (seen_created or existing_app is None or needs_cross_track_evaluation)
+            ):
+                maybe_reasons.append(
+                    "old_posted_at_new_track"
+                    if existing_app is not None and needs_cross_track_evaluation
+                    else "old_posted_at_new_to_us"
+                )
+            else:
+                stats["skipped_old"] += 1
+                continue
+        if not exact_tracks and fuzzy_tracks:
+            maybe_reasons.append("fuzzy_title")
+        if unclassified_technical:
+            maybe_reasons.append("unclassified_technical")
+
+        candidate["matched_tracks"] = matched_tracks
+        selected_track = str((existing_app or {}).get("target_track") or "")
+        if not selected_track and matched_tracks:
+            selected_track = exact_tracks[0] if exact_tracks else matched_tracks[0]
+        candidate["target_track"] = selected_track
+        if selected_track in profiles:
+            selected_track_config = profiles[selected_track].get("_track", {})
+            selected_resume = path_from_track(selected_track_config, "resume_file")
+            if selected_resume:
+                candidate["resume_file"] = str(selected_resume)
+        seen_record["matched_tracks"] = merge_unique(seen_record.get("matched_tracks", []), matched_tracks)
+        if selected_track and not seen_record.get("target_track"):
+            seen_record["target_track"] = selected_track
+
+        if maybe_reasons:
+            candidate["review_bucket"] = "maybe"
+            candidate["discovery_bucket"] = "maybe_backlog"
+            existing_notes = str(candidate.get("notes") or "").strip()
+            reason_text = "maybe_backlog: " + ", ".join(maybe_reasons)
+            candidate["notes"] = "; ".join(item for item in [existing_notes, reason_text] if item)
+            stats["maybe_backlog"] += 1
+
+        app, created = upsert_application(candidate)
+        tracker_apps_by_url[key] = app
+        if created:
+            stats["added"] += 1
+        else:
+            stats["existing"] += 1
+        if maybe_reasons:
+            app = update_application(
+                app["id"],
+                {
+                    "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                    "notes": candidate.get("notes", app.get("notes", "")),
+                },
+            )
+            tracker_apps_by_url[key] = app
+
+        if not args.score or app.get("date_applied"):
+            continue
+        scoreable_status = app.get("status") in {"found", "needs_review", "needs_retry", "scored", "skipped"}
+        if not scoreable_status:
+            continue
+        evaluations = track_evaluations_with_legacy(app)
+        tracks_to_score = [
+            key_name
+            for key_name in evaluation_keys
+            if key_name not in evaluations or evaluations[key_name].get("status") == "needs_retry"
+        ]
+        if not tracks_to_score:
+            continue
+        if score_queue is None and maybe_reasons and stats["maybe_scored"] >= maybe_score_limit:
+            continue
+
+        if score_queue is not None:
+            posted_timestamp = posted_at.timestamp() if posted_at else 0.0
+            maybe_priority = (
+                (4.0 if created else 0.0)
+                + (2.0 * len(exact_tracks))
+                + (0.5 * len(fuzzy_tracks))
+                + (1.0 if posted_timestamp else 0.0)
+                - (2.0 if unclassified_technical else 0.0)
+                - (1.0 if "old_posted_at_new_to_us" in maybe_reasons else 0.0)
+            )
+            for evaluation_key in tracks_to_score:
+                score_queue.append(
+                    {
+                        "app_id": app["id"],
+                        "track": None if evaluation_key == "default" else evaluation_key,
+                        "maybe": bool(maybe_reasons),
+                        "priority": maybe_priority,
+                        "posted_timestamp": posted_timestamp,
+                    }
+                )
+            continue
+
+        scored_any = False
+        for evaluation_key in tracks_to_score:
+            try:
+                command_score_job(
+                    argparse.Namespace(
+                        id=app["id"],
+                        jd_file=None,
+                        track=None if evaluation_key == "default" else evaluation_key,
+                        quiet=bool(getattr(args, "quiet", False)),
+                    )
+                )
+                scored_any = True
+            except Exception as error:  # noqa: BLE001
+                stats["scoring_failed"] += 1
+                update_application(app["id"], {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+        if maybe_reasons and scored_any:
+            stats["maybe_scored"] += 1
+    return stats
+
+
+def deduplicate_score_queue(score_queue: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: dict[tuple[str, str], dict[str, Any]] = {}
+    for task in score_queue:
+        key = (str(task.get("app_id") or ""), str(task.get("track") or ""))
+        existing = deduplicated.get(key)
+        if existing is None:
+            deduplicated[key] = dict(task)
+            continue
+        existing["maybe"] = bool(existing.get("maybe")) and bool(task.get("maybe"))
+        existing["priority"] = max(float(existing.get("priority") or 0), float(task.get("priority") or 0))
+        existing["posted_timestamp"] = max(
+            float(existing.get("posted_timestamp") or 0),
+            float(task.get("posted_timestamp") or 0),
+        )
+    return list(deduplicated.values())
+
+
+def select_discovery_score_tasks(
+    score_queue: list[dict[str, Any]],
+    max_maybe_scores: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    tasks = deduplicate_score_queue(score_queue)
+    strict_tasks = [task for task in tasks if not task.get("maybe")]
+    maybe_tasks = [task for task in tasks if task.get("maybe")]
+    maybe_apps: dict[str, dict[str, Any]] = {}
+    for task in maybe_tasks:
+        app_id = str(task.get("app_id") or "")
+        candidate = maybe_apps.setdefault(
+            app_id,
+            {
+                "priority": float(task.get("priority") or 0),
+                "posted_timestamp": float(task.get("posted_timestamp") or 0),
+            },
+        )
+        candidate["priority"] = max(candidate["priority"], float(task.get("priority") or 0))
+        candidate["posted_timestamp"] = max(
+            candidate["posted_timestamp"],
+            float(task.get("posted_timestamp") or 0),
+        )
+    ranked_maybe_apps = sorted(
+        maybe_apps,
+        key=lambda app_id: (
+            maybe_apps[app_id]["priority"],
+            maybe_apps[app_id]["posted_timestamp"],
+            app_id,
+        ),
+        reverse=True,
+    )
+    selected_maybe_apps = set(ranked_maybe_apps[: max(0, max_maybe_scores)])
+    selected_maybe_tasks = [task for task in maybe_tasks if str(task.get("app_id") or "") in selected_maybe_apps]
+    return strict_tasks + selected_maybe_tasks, len(maybe_apps), len(selected_maybe_apps)
+
+
+def prefetch_job_description(app_id: str) -> str:
+    app = get_application(app_id)
+    output_dir = app_output_dir(app)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    jd_path = output_dir / "jd.md"
+    jd_text = cached_job_text_for_scoring(app)
+    jd_path.write_text(jd_text.rstrip() + "\n", encoding="utf-8")
+    return str(jd_path)
+
+
+def execute_discovery_score_queue(
+    score_queue: list[dict[str, Any]],
+    args: argparse.Namespace,
+) -> dict[str, int]:
+    max_maybe_scores = max(0, int(getattr(args, "max_maybe_scores", 20) or 0))
+    selected_tasks, maybe_candidates, maybe_selected = select_discovery_score_tasks(
+        score_queue,
+        max_maybe_scores,
+    )
+    summary = {
+        "queued_tasks": len(deduplicate_score_queue(score_queue)),
+        "selected_tasks": len(selected_tasks),
+        "unique_apps": len({str(task.get("app_id") or "") for task in selected_tasks}),
+        "maybe_candidates": maybe_candidates,
+        "maybe_selected": maybe_selected,
+        "maybe_scored": 0,
+        "scoring_failed": 0,
+    }
+    if not selected_tasks:
+        return summary
+
+    score_workers = max(1, int(getattr(args, "score_workers", 4) or 1))
+    app_ids = sorted({str(task.get("app_id") or "") for task in selected_tasks})
+    jd_paths: dict[str, str] = {}
+    if score_workers == 1 or len(app_ids) <= 1:
+        for app_id in app_ids:
+            try:
+                jd_paths[app_id] = prefetch_job_description(app_id)
+            except Exception:  # noqa: BLE001 - scoring records the retry state below.
+                jd_paths[app_id] = ""
+    else:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(score_workers, len(app_ids))
+        ) as executor:
+            future_to_app_id = {
+                executor.submit(prefetch_job_description, app_id): app_id
+                for app_id in app_ids
+            }
+            for future in concurrent.futures.as_completed(future_to_app_id):
+                app_id = future_to_app_id[future]
+                try:
+                    jd_paths[app_id] = future.result()
+                except Exception:  # noqa: BLE001 - scoring records the retry state below.
+                    jd_paths[app_id] = ""
+
+    maybe_scored_apps: set[str] = set()
+    for task in selected_tasks:
+        app_id = str(task.get("app_id") or "")
+        try:
+            command_score_job(
+                argparse.Namespace(
+                    id=app_id,
+                    jd_file=jd_paths.get(app_id) or None,
+                    track=task.get("track"),
+                    quiet=True,
+                )
+            )
+            if task.get("maybe"):
+                maybe_scored_apps.add(app_id)
+        except Exception as error:  # noqa: BLE001
+            summary["scoring_failed"] += 1
+            update_application(app_id, {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+    summary["maybe_scored"] = len(maybe_scored_apps)
+    return summary
 
 
 def add_stats(target: dict[str, int], source: dict[str, int]) -> None:
@@ -6288,6 +6704,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "discovery_bucket": candidate.get("discovery_bucket", ""),
         "target_track": candidate.get("target_track", ""),
         "matched_tracks": candidate.get("matched_tracks", []),
+        "track_evaluations": candidate.get("track_evaluations", {}),
         "resume_file": candidate.get("resume_file", ""),
         "date_applied": "",
         "resume_path": "",
@@ -6581,6 +6998,120 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
         "action_items": action_items,
         "jd_text": jd_text,
     }
+
+
+def track_evaluation_key(track_id: str | None) -> str:
+    return str(track_id or "").strip() or "default"
+
+
+def track_evaluations_with_legacy(app: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_evaluations = app.get("track_evaluations")
+    evaluations = {
+        str(key): dict(value)
+        for key, value in (raw_evaluations.items() if isinstance(raw_evaluations, dict) else [])
+        if isinstance(value, dict)
+    }
+    legacy_track = str(app.get("target_track") or "").strip()
+    if not legacy_track or legacy_track in evaluations:
+        return evaluations
+    has_legacy_score = isinstance(app.get("fit_score"), (int, float)) or isinstance(app.get("ats_score"), (int, float))
+    if not has_legacy_score:
+        return evaluations
+    legacy_status = str(app.get("status") or "needs_review")
+    legacy_dealbreakers = list(app.get("dealbreakers") or [])
+    evaluations[legacy_track] = {
+        "track_id": legacy_track,
+        "fit_score": app.get("fit_score", ""),
+        "ats_score": app.get("ats_score", ""),
+        "status": legacy_status,
+        "eligible": legacy_status not in {"skipped", "needs_retry"} and not legacy_dealbreakers,
+        "experience_bucket": app.get("experience_bucket", ""),
+        "experience_requirements": list(app.get("experience_requirements") or []),
+        "dealbreakers": legacy_dealbreakers,
+        "action_items": list(app.get("action_items") or []),
+        "matched_keywords": list(app.get("matched_keywords") or []),
+        "resume_keyword_matches": list(app.get("resume_keyword_matches") or []),
+        "missing_keywords": list(app.get("missing_keywords") or []),
+        "resume_file": app.get("resume_file", ""),
+        "score_report_path": app.get("score_report_path", ""),
+        "evaluated_at": app.get("last_scored_at", ""),
+        "legacy_imported": True,
+    }
+    return evaluations
+
+
+def build_track_evaluation(
+    track_id: str,
+    score: dict[str, Any],
+    resume_file: str,
+    report_path: Path,
+) -> dict[str, Any]:
+    dealbreakers = list(score.get("dealbreakers") or [])
+    status = str(score.get("status") or "needs_review")
+    return {
+        "track_id": track_id,
+        "fit_score": score.get("fit_score", ""),
+        "ats_score": score.get("ats_score", ""),
+        "status": status,
+        "eligible": status not in {"skipped", "needs_retry"} and not dealbreakers,
+        "experience_bucket": score.get("experience_bucket", ""),
+        "experience_requirements": list(score.get("experience_requirements") or []),
+        "dealbreakers": dealbreakers,
+        "action_items": list(score.get("action_items") or []),
+        "matched_keywords": list(score.get("matched_keywords") or []),
+        "resume_keyword_matches": list(score.get("resume_keyword_matches") or []),
+        "missing_keywords": list(score.get("missing_keywords") or []),
+        "resume_file": resume_file,
+        "score_report_path": str(report_path),
+        "evaluated_at": now_utc_iso(),
+    }
+
+
+def best_track_evaluation(
+    evaluations: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    successful = [
+        (track_id, evaluation)
+        for track_id, evaluation in evaluations.items()
+        if isinstance(evaluation, dict) and evaluation.get("status") != "needs_retry"
+    ]
+    if not successful:
+        return None, None
+    eligible = [item for item in successful if bool(item[1].get("eligible"))]
+    candidates = eligible or successful
+    experience_priority = {
+        "new_grad": 5,
+        "0_1": 5,
+        "1_2": 4,
+        "2_plus": 3,
+        "2_range": 2,
+        "unknown": 1,
+        "3_plus": 0,
+    }
+
+    def rank(item: tuple[str, dict[str, Any]]) -> tuple[float, float, int, str]:
+        track_id, evaluation = item
+        return (
+            numeric_score(evaluation.get("fit_score")),
+            numeric_score(evaluation.get("ats_score")),
+            experience_priority.get(str(evaluation.get("experience_bucket") or "unknown"), 1),
+            track_id,
+        )
+
+    return max(candidates, key=rank)
+
+
+def cached_job_text_for_scoring(app: dict[str, Any], jd_file: str | None = None) -> str:
+    if jd_file:
+        return Path(jd_file).read_text(encoding="utf-8", errors="replace")
+    cached_path = str(app.get("jd_path") or "").strip()
+    if cached_path:
+        path = Path(cached_path)
+        if path.exists():
+            cached_text = path.read_text(encoding="utf-8", errors="replace").strip()
+            if cached_text and not job_text_fetch_failure_reason(cached_text):
+                return cached_text
+    return read_job_text(app)
 
 
 def location_matches(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> bool:
@@ -7543,7 +8074,9 @@ def source_candidates_subprocess(
         "--source-index",
         str(source_index),
     ]
-    if getattr(args, "track", None):
+    for track_id in getattr(args, "tracks", None) or []:
+        command.extend(["--union-track", str(track_id)])
+    if not getattr(args, "tracks", None) and getattr(args, "track", None):
         command.extend(["--track", str(args.track)])
     command.append("--payload-file-output")
 
@@ -7593,8 +8126,14 @@ def command_discover_source_candidates(args: argparse.Namespace) -> None:
         source = sources[int(args.source_index)]
     except (IndexError, ValueError) as error:
         raise SystemExit(f"Invalid source index: {args.source_index}") from error
-    track = load_track(getattr(args, "track", None))
-    source = source_for_track(source, str(track.get("id", "")).strip())
+    union_tracks = [str(track_id).strip() for track_id in (getattr(args, "union_track", None) or []) if str(track_id).strip()]
+    if union_tracks:
+        for track_id in union_tracks:
+            load_track(track_id)
+        source = source_for_tracks(source, union_tracks)
+    else:
+        track = load_track(getattr(args, "track", None))
+        source = source_for_track(source, str(track.get("id", "")).strip())
     warning_buffer = io.StringIO()
     with contextlib.redirect_stderr(warning_buffer):
         candidates = discover_source_jobs(source)
@@ -7623,7 +8162,13 @@ def command_discover_source_candidates(args: argparse.Namespace) -> None:
 
 def command_discover_jobs(args: argparse.Namespace) -> None:
     require_person_files()
-    profile = profile_for_track(getattr(args, "track", None))
+    track_ids = [
+        str(track_id).strip()
+        for track_id in (getattr(args, "tracks", None) or [])
+        if str(track_id).strip()
+    ]
+    profiles = {track_id: profile_for_track(track_id) for track_id in track_ids}
+    profile = profile_for_track(None) if track_ids else profile_for_track(getattr(args, "track", None))
     all_sources = load_json(SOURCES_PATH).get("sources", [])
     source_company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
     source_pairs = [
@@ -7645,11 +8190,14 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     retry_recovered_sources = 0
     failed_after_retries = 0
     current_seen_at = now_utc_iso()
+    quiet = bool(getattr(args, "quiet", False))
+    deferred_score_queue: list[dict[str, Any]] | None = [] if track_ids and bool(args.score) else None
     report = {
         "run_id": discovery_run_id(current_seen_at),
         "started_at": current_seen_at,
         "finished_at": "",
-        "track": getattr(args, "track", None) or "",
+        "track": "all" if track_ids else (getattr(args, "track", None) or ""),
+        "tracks": track_ids,
         "cutoff": cutoff.replace(microsecond=0).isoformat(),
         "source_company_filters": sorted(source_company_filters),
         "include_unknown_posted_date": bool(args.include_unknown_posted_date),
@@ -7659,6 +8207,17 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
         "score_maybe_limit": int(getattr(args, "score_maybe_limit", 3) or 0),
+        "max_maybe_scores": (
+            int(getattr(args, "max_maybe_scores", 20) or 0)
+            if deferred_score_queue is not None
+            else None
+        ),
+        "score_workers": (
+            int(getattr(args, "score_workers", 4) or 1)
+            if deferred_score_queue is not None
+            else None
+        ),
+        "quiet": quiet,
         "totals": {
             "sources_planned": len(source_pairs),
             "sources_attempted": 0,
@@ -7677,7 +8236,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     report["workers"] = worker_count
     work_items = []
     for ordinal, (source_index, source) in enumerate(source_pairs, 1):
-        source = source_for_track(source, track_id)
+        source = source_for_tracks(source, track_ids) if track_ids else source_for_track(source, track_id)
         work_items.append(
             {
                 "ordinal": ordinal,
@@ -7687,11 +8246,12 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 "source_report": source_report_base(source),
             }
         )
-        print(
-            f"[{ordinal}/{len(source_pairs)}] {source.get('company', 'Unknown Company')} "
-            f"({source_platform(source)}) ...",
-            flush=True,
-        )
+        if not quiet:
+            print(
+                f"[{ordinal}/{len(source_pairs)}] {source.get('company', 'Unknown Company')} "
+                f"({source_platform(source)}) ...",
+                flush=True,
+            )
         report["totals"]["sources_attempted"] += 1
 
     def fetch_source(work_item: dict[str, Any]) -> dict[str, Any]:
@@ -7759,11 +8319,12 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["duration_seconds"] = fetch_result.get("duration_seconds", 0)
             annotate_source_health(source_report, source)
             report["sources"].append(source_report)
-            print(
-                f"    failed after {source_report['duration_seconds']}s: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if not quiet:
+                print(
+                    f"    failed after {source_report['duration_seconds']}s: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             continue
         except Exception as error:  # noqa: BLE001 - one source should not stop the run.
             failed_sources += 1
@@ -7773,16 +8334,35 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
             source_report["duration_seconds"] = fetch_result.get("duration_seconds", 0)
             annotate_source_health(source_report, source)
             report["sources"].append(source_report)
-            print(
-                f"    failed after {source_report['duration_seconds']}s: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if not quiet:
+                print(
+                    f"    failed after {source_report['duration_seconds']}s: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             continue
 
         effective_cutoff = source_discovery_cutoff(source, cutoff)
         source_report["cutoff"] = effective_cutoff.replace(microsecond=0).isoformat() if effective_cutoff else ""
-        source_stats = process_discovered_candidates(candidates, args, profile, seen, effective_cutoff, current_seen_at)
+        if track_ids:
+            source_stats = process_discovered_candidates_all_tracks(
+                candidates,
+                args,
+                profiles,
+                seen,
+                effective_cutoff,
+                current_seen_at,
+                score_queue=deferred_score_queue,
+            )
+        else:
+            source_stats = process_discovered_candidates(
+                candidates,
+                args,
+                profile,
+                seen,
+                effective_cutoff,
+                current_seen_at,
+            )
         source_report["candidates_returned"] = len(candidates)
         source_report["stats"] = source_stats
         result_status = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
@@ -7801,15 +8381,32 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         status_detail = source_report["status"]
         if source_report["result_status"] and source_report["status"] != source_report["result_status"]:
             status_detail = f"{source_report['status']} ({source_report['result_status']})"
-        print(
-            f"    {status_detail}: candidates={len(candidates)} "
-            f"added={source_stats['added']} existing={source_stats['existing']} "
-            f"maybe={source_stats['maybe_backlog']} maybe_scored={source_stats['maybe_scored']} "
-            f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
-            f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
-            f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
-            flush=True,
-        )
+        if not quiet:
+            print(
+                f"    {status_detail}: candidates={len(candidates)} "
+                f"added={source_stats['added']} existing={source_stats['existing']} "
+                f"maybe={source_stats['maybe_backlog']} maybe_scored={source_stats['maybe_scored']} "
+                f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
+                f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
+                f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
+                flush=True,
+            )
+
+    if deferred_score_queue is not None:
+        scoring_summary = execute_discovery_score_queue(deferred_score_queue, args)
+        stats["maybe_scored"] += scoring_summary["maybe_scored"]
+        stats["scoring_failed"] += scoring_summary["scoring_failed"]
+        report["scoring"] = scoring_summary
+        if not quiet:
+            print(
+                "Scoring batch complete. "
+                f"Queued tasks: {scoring_summary['queued_tasks']}. "
+                f"Selected tasks: {scoring_summary['selected_tasks']}. "
+                f"Unique jobs: {scoring_summary['unique_apps']}. "
+                f"Maybe selected: {scoring_summary['maybe_selected']}/{scoring_summary['maybe_candidates']}. "
+                f"Failures: {scoring_summary['scoring_failed']}.",
+                flush=True,
+            )
 
     save_seen_jobs(seen)
     report["finished_at"] = now_utc_iso()
@@ -7825,7 +8422,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         report["totals"][key] = value
     report_path = write_discovery_run_report(report)
     print(
-        "Discovery complete. "
+        ("All-track discovery complete. " if track_ids else "Discovery complete. ")
+        +
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
         f"Maybe backlog: {stats['maybe_backlog']}. Maybe scored: {stats['maybe_scored']}. "
@@ -7836,6 +8434,12 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Failed after retries: {failed_after_retries}."
     )
     print(f"Discovery run report: {report_path}")
+
+
+def command_discover_all(args: argparse.Namespace) -> None:
+    args.track = None
+    args.tracks = list(getattr(args, "tracks", None) or DEFAULT_DISCOVER_ALL_TRACKS)
+    command_discover_jobs(args)
 
 
 def command_discover_web_jobs(args: argparse.Namespace) -> None:
@@ -7976,30 +8580,90 @@ def command_score_job(args: argparse.Namespace) -> None:
     requested_track = getattr(args, "track", None) or app.get("target_track")
     profile = profile_for_track(requested_track)
     track = profile.get("_track", {})
-    if track.get("id"):
-        app["target_track"] = track["id"]
-        app["matched_tracks"] = merge_unique(app.get("matched_tracks", []), [track["id"]])
-        track_resume = path_from_track(track, "resume_file")
-        if track_resume:
-            app["resume_file"] = str(track_resume)
-    jd_text = read_job_text(app, args.jd_file)
+    track_id = track_evaluation_key(track.get("id") or requested_track)
+    matched_track_id = "" if track_id == "default" else track_id
+    matched_tracks = merge_unique(app.get("matched_tracks", []), [matched_track_id] if matched_track_id else [])
+    track_resume = path_from_track(track, "resume_file") if track else None
+    resume_file = str(track_resume or app.get("resume_file") or "")
+    jd_text = cached_job_text_for_scoring(app, args.jd_file)
     output_dir = app_output_dir(app)
     output_dir.mkdir(parents=True, exist_ok=True)
     jd_path = output_dir / "jd.md"
-    report_path = output_dir / "score_report.md"
+    canonical_report_path = output_dir / "score_report.md"
+    report_path = output_dir / f"score_report.{slugify(track_id)}.md"
     jd_path.write_text(jd_text + "\n", encoding="utf-8")
     fetch_failure_reason = job_text_fetch_failure_reason(jd_text)
+    evaluations = track_evaluations_with_legacy(app)
     if fetch_failure_reason:
         report = render_fetch_failure_report(app, fetch_failure_reason)
         report_path.write_text(report, encoding="utf-8")
+        evaluations[track_id] = {
+            "track_id": track_id,
+            "fit_score": "",
+            "ats_score": "",
+            "status": "needs_retry",
+            "eligible": False,
+            "experience_bucket": "",
+            "experience_requirements": [],
+            "dealbreakers": [],
+            "action_items": [
+                "Job description fetch failed; retry scoring after the ATS recovers or with a manual JD file."
+            ],
+            "matched_keywords": [],
+            "resume_keyword_matches": [],
+            "missing_keywords": [],
+            "resume_file": resume_file,
+            "score_report_path": str(report_path),
+            "evaluated_at": now_utc_iso(),
+            "failure_reason": fetch_failure_reason,
+        }
         failure_note = f"fetch_failed: {fetch_failure_reason}"
         existing_notes = str(app.get("notes") or "").strip()
         notes = existing_notes
         if failure_note not in existing_notes:
             notes = failure_note if not existing_notes else f"{existing_notes}\n{failure_note}"
-        update_application(
-            app["id"],
-            {
+        best_track_id, best_evaluation = best_track_evaluation(evaluations)
+        if best_track_id and best_evaluation:
+            selected_report_value = str(best_evaluation.get("score_report_path") or "").strip()
+            selected_report_path = Path(selected_report_value) if selected_report_value else None
+            if selected_report_path and selected_report_path.is_file() and selected_report_path != canonical_report_path:
+                canonical_report_path.write_text(
+                    selected_report_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            elif not canonical_report_path.exists():
+                selected_app = dict(app)
+                selected_app["target_track"] = "" if best_track_id == "default" else best_track_id
+                canonical_report_path.write_text(
+                    render_score_report(selected_app, best_evaluation),
+                    encoding="utf-8",
+                )
+            selected_status = str(best_evaluation.get("status") or "needs_review")
+            if app.get("status") in {"applied", "prepared"}:
+                selected_status = str(app["status"])
+            updates = {
+                "track_evaluations": evaluations,
+                "target_track": "" if best_track_id == "default" else best_track_id,
+                "matched_tracks": matched_tracks,
+                "jd_path": str(jd_path),
+                "score_report_path": str(canonical_report_path),
+                "fit_score": best_evaluation.get("fit_score", ""),
+                "ats_score": best_evaluation.get("ats_score", ""),
+                "experience_bucket": best_evaluation.get("experience_bucket", ""),
+                "experience_requirements": list(best_evaluation.get("experience_requirements") or []),
+                "status": selected_status,
+                "dealbreakers": list(best_evaluation.get("dealbreakers") or []),
+                "action_items": list(best_evaluation.get("action_items") or []),
+                "matched_keywords": list(best_evaluation.get("matched_keywords") or []),
+                "resume_keyword_matches": list(best_evaluation.get("resume_keyword_matches") or []),
+                "missing_keywords": list(best_evaluation.get("missing_keywords") or []),
+                "resume_file": best_evaluation.get("resume_file", ""),
+                "notes": notes,
+                "last_scored_at": now_utc_iso(),
+            }
+        else:
+            canonical_report_path.write_text(report, encoding="utf-8")
+            updates = {
                 "fit_score": "",
                 "ats_score": "",
                 "status": "needs_retry",
@@ -8011,41 +8675,73 @@ def command_score_job(args: argparse.Namespace) -> None:
                 "resume_keyword_matches": [],
                 "missing_keywords": [],
                 "jd_path": str(jd_path),
-                "score_report_path": str(report_path),
+                "score_report_path": str(canonical_report_path),
                 "target_track": app.get("target_track", ""),
-                "matched_tracks": app.get("matched_tracks", []),
-                "resume_file": app.get("resume_file", ""),
+                "matched_tracks": matched_tracks,
+                "resume_file": resume_file,
                 "notes": notes,
-            },
-        )
-        print(report)
+                "track_evaluations": evaluations,
+                "last_scored_at": now_utc_iso(),
+            }
+        update_application(app["id"], updates)
+        if not bool(getattr(args, "quiet", False)):
+            print(report)
         return
 
-    score = score_text(app, jd_text, profile)
-    report = render_score_report(app, score)
+    score_app = dict(app)
+    score_app["target_track"] = "" if track_id == "default" else track_id
+    score = score_text(score_app, jd_text, profile)
+    report = render_score_report(score_app, score)
     report_path.write_text(report, encoding="utf-8")
+    evaluations[track_id] = build_track_evaluation(track_id, score, resume_file, report_path)
+    best_track_id, best_evaluation = best_track_evaluation(evaluations)
+    if not best_track_id or not best_evaluation:
+        raise RuntimeError(f"No usable track evaluation produced for {app['id']}")
+    selected_report_value = str(best_evaluation.get("score_report_path") or "").strip()
+    selected_report_path = Path(selected_report_value) if selected_report_value else None
+    if selected_report_path and selected_report_path.is_file():
+        canonical_report_path.write_text(
+            selected_report_path.read_text(encoding="utf-8", errors="replace"),
+            encoding="utf-8",
+        )
+    else:
+        selected_app = dict(app)
+        selected_app["target_track"] = "" if best_track_id == "default" else best_track_id
+        canonical_report_path.write_text(
+            render_score_report(selected_app, best_evaluation),
+            encoding="utf-8",
+        )
+    selected_status = str(best_evaluation.get("status") or "needs_review")
+    if app.get("status") in {"applied", "prepared"}:
+        selected_status = str(app["status"])
     update_application(
         app["id"],
         {
-            "fit_score": score["fit_score"],
-            "ats_score": score["ats_score"],
-            "experience_bucket": score.get("experience_bucket", ""),
-            "experience_requirements": score.get("experience_requirements", []),
-            "status": score["status"],
-            "dealbreakers": score["dealbreakers"],
-            "action_items": score["action_items"],
-            "matched_keywords": score["matched_keywords"],
-            "resume_keyword_matches": score["resume_keyword_matches"],
-            "missing_keywords": score["missing_keywords"],
+            "fit_score": best_evaluation.get("fit_score", ""),
+            "ats_score": best_evaluation.get("ats_score", ""),
+            "experience_bucket": best_evaluation.get("experience_bucket", ""),
+            "experience_requirements": list(best_evaluation.get("experience_requirements") or []),
+            "status": selected_status,
+            "dealbreakers": list(best_evaluation.get("dealbreakers") or []),
+            "action_items": list(best_evaluation.get("action_items") or []),
+            "matched_keywords": list(best_evaluation.get("matched_keywords") or []),
+            "resume_keyword_matches": list(best_evaluation.get("resume_keyword_matches") or []),
+            "missing_keywords": list(best_evaluation.get("missing_keywords") or []),
             "jd_path": str(jd_path),
-            "score_report_path": str(report_path),
-            "target_track": app.get("target_track", ""),
-            "matched_tracks": app.get("matched_tracks", []),
-            "resume_file": app.get("resume_file", ""),
-            "notes": "; ".join(score["dealbreakers"] or score["action_items"]),
+            "score_report_path": str(canonical_report_path),
+            "target_track": "" if best_track_id == "default" else best_track_id,
+            "matched_tracks": matched_tracks,
+            "resume_file": best_evaluation.get("resume_file", ""),
+            "notes": "; ".join(
+                list(best_evaluation.get("dealbreakers") or [])
+                or list(best_evaluation.get("action_items") or [])
+            ),
+            "track_evaluations": evaluations,
+            "last_scored_at": now_utc_iso(),
         },
     )
-    print(report)
+    if not bool(getattr(args, "quiet", False)):
+        print(report)
 
 
 def job_text_fetch_failure_reason(jd_text: str) -> str:
@@ -8407,6 +9103,9 @@ def render_screening_answers(template: str, app: dict[str, Any], profile: dict[s
 
 def command_application_backlog(args: argparse.Namespace) -> None:
     bucket = getattr(args, "bucket", "") or ""
+    requested_track = str(getattr(args, "track", "") or "").strip()
+    if requested_track:
+        load_track(requested_track)
     if not args.status and bucket == "retry":
         statuses = {"needs_retry"}
     elif not args.status and bucket == "skipped":
@@ -8416,37 +9115,62 @@ def command_application_backlog(args: argparse.Namespace) -> None:
     tracker = load_tracker()
     apps: list[dict[str, Any]] = []
     for app in tracker.get("applications", []):
-        if bucket == "maybe" and app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
-            continue
-        if bucket == "retry" and app.get("status") != "needs_retry":
-            continue
-        if bucket == "skipped" and app.get("status") != "skipped":
-            continue
-        if bucket == "priority" and (
-            app.get("review_bucket") == "maybe" or app.get("discovery_bucket") == "maybe_backlog" or app.get("status") in {"needs_retry", "skipped"}
-        ):
-            continue
-        if app.get("status") not in statuses:
-            continue
         if str(app.get("date_applied") or "").strip():
             continue
-        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped"} else args.min_fit
-        if numeric_score(app.get("fit_score")) < min_fit:
+        candidate_app = app
+        if requested_track:
+            evaluation = track_evaluations_with_legacy(app).get(requested_track)
+            if not evaluation:
+                continue
+            candidate_app = dict(app)
+            for field in [
+                "fit_score",
+                "ats_score",
+                "status",
+                "experience_bucket",
+                "experience_requirements",
+                "dealbreakers",
+                "action_items",
+                "matched_keywords",
+                "resume_keyword_matches",
+                "missing_keywords",
+                "resume_file",
+                "score_report_path",
+            ]:
+                if field in evaluation:
+                    candidate_app[field] = evaluation[field]
+            candidate_app["target_track"] = requested_track
+        if bucket == "maybe" and app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
             continue
-        filter_text = application_filter_text(app)
+        if bucket == "retry" and candidate_app.get("status") != "needs_retry":
+            continue
+        if bucket == "skipped" and candidate_app.get("status") != "skipped":
+            continue
+        if bucket == "priority" and (
+            app.get("review_bucket") == "maybe"
+            or app.get("discovery_bucket") == "maybe_backlog"
+            or candidate_app.get("status") in {"needs_retry", "skipped"}
+        ):
+            continue
+        if candidate_app.get("status") not in statuses:
+            continue
+        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped"} else args.min_fit
+        if numeric_score(candidate_app.get("fit_score")) < min_fit:
+            continue
+        filter_text = application_filter_text(candidate_app)
         if args.preferred_locations and not matches_preferred_location(filter_text):
             continue
         if args.exclude_years and has_year_requirement(filter_text, args.exclude_years):
             continue
-        if bucket == "priority" and experience_requirement_bucket(app) == "3_plus":
+        if bucket == "priority" and experience_requirement_bucket(candidate_app) == "3_plus":
             continue
-        if bucket == "priority" and has_seniority_title_signal(app):
+        if bucket == "priority" and has_seniority_title_signal(candidate_app):
             continue
-        if bucket == "priority" and has_phd_signal(app):
+        if bucket == "priority" and has_phd_signal(candidate_app):
             continue
         if args.hide_intern and re.search(r"\bintern(ship)?\b", filter_text):
             continue
-        apps.append(app)
+        apps.append(candidate_app)
 
     apps.sort(key=recommendation_sort_key, reverse=True)
     if bucket == "priority":
@@ -8489,6 +9213,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         - exclude_years: {args.exclude_years or ""}
         - hide_intern: {bool(args.hide_intern)}
         - bucket: {getattr(args, "bucket", "") or "default"}
+        - track: {requested_track or "all"}
         - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket == "priority" else "none"}
         - count: {len(apps)}
 
@@ -9142,10 +9867,103 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="Number of source fetch workers. Tracker, seen-jobs, scoring, and report writes remain single-threaded.",
     )
+    discover.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-source progress and score reports; print only the final discovery summary.",
+    )
+
+    discover_all = subcommands.add_parser(
+        "discover-all",
+        help="Crawl each source once, then route and score jobs across multiple tracks.",
+    )
+    discover_all.add_argument("--since-hours", type=float, help="Only add jobs posted within this many hours. Defaults to 24.")
+    discover_all.add_argument("--since-days", type=float, help="Only add jobs posted within this many days.")
+    discover_all.add_argument(
+        "--track",
+        dest="tracks",
+        action="append",
+        help="Track to include. Repeat for multiple tracks. Defaults to all configured primary tracks.",
+    )
+    discover_all.add_argument(
+        "--include-unknown-posted-date",
+        action="store_true",
+        help="Add jobs even when the source does not expose a posted date.",
+    )
+    discover_all.add_argument(
+        "--include-maybe-backlog",
+        action="store_true",
+        help="Keep fuzzy-title, unknown-date, or unclassified technical candidates in the maybe bucket.",
+    )
+    discover_all.add_argument(
+        "--maybe-old-posted-date",
+        action="store_true",
+        help="With --include-maybe-backlog, keep newly seen old-post candidates for review.",
+    )
+    discover_all.add_argument(
+        "--include-inactive-sources",
+        action="store_true",
+        help="Also run sources marked active=false. Default skips inactive sources.",
+    )
+    discover_all.add_argument("--no-role-filter", action="store_true", help="Route every fresh job to all selected tracks.")
+    discover_all.add_argument("--score", action="store_true", help="Score routed jobs against every matched track.")
+    discover_all.add_argument(
+        "--score-maybe-limit",
+        type=int,
+        default=3,
+        help="Legacy compatibility option. Use --max-maybe-scores to control unified discovery scoring.",
+    )
+    discover_all.add_argument(
+        "--max-maybe-scores",
+        type=int,
+        default=20,
+        help="With --score, score at most this many maybe candidates globally. Use 0 to disable.",
+    )
+    discover_all.add_argument(
+        "--score-workers",
+        type=int,
+        default=4,
+        help="Number of concurrent JD fetch workers before score calculations and tracker writes run serially.",
+    )
+    discover_all.add_argument(
+        "--source-timeout-seconds",
+        type=float,
+        default=45,
+        help="Maximum seconds to spend on one source before marking it failed. Use 0 to disable.",
+    )
+    discover_all.add_argument(
+        "--source-retries",
+        type=int,
+        default=1,
+        help="Retry a failed source this many times before marking it failed_after_retries.",
+    )
+    discover_all.add_argument(
+        "--source-retry-timeout-seconds",
+        type=float,
+        default=0,
+        help="Timeout for retry attempts. Defaults to twice --source-timeout-seconds.",
+    )
+    discover_all.add_argument(
+        "--source-company",
+        action="append",
+        help="Only run discovery for a specific source company. Repeat for multiple companies.",
+    )
+    discover_all.add_argument(
+        "--workers",
+        type=int,
+        default=12,
+        help="Number of source fetch workers. Classification and tracker writes remain single-threaded.",
+    )
+    discover_all.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-source progress and score reports; print only the final discovery summary.",
+    )
 
     discover_source = subcommands.add_parser("discover-source-candidates", help=argparse.SUPPRESS)
     discover_source.add_argument("--source-index", required=True)
     discover_source.add_argument("--track", help=argparse.SUPPRESS)
+    discover_source.add_argument("--union-track", action="append", help=argparse.SUPPRESS)
     discover_source.add_argument("--payload-file-output", action="store_true", help=argparse.SUPPRESS)
 
     classify = subcommands.add_parser("classify-sources", help="Detect direct ATS platforms behind configured sources.")
@@ -9277,6 +10095,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backlog.add_argument("--limit", type=int, default=50, help="Maximum rows to print. Use 0 for no limit.")
     backlog.add_argument(
+        "--track",
+        help="Use one track's independent evaluation instead of the selected top-level score.",
+    )
+    backlog.add_argument(
         "--preferred-locations",
         action="store_true",
         help="Only include WA, CA, or Remote US roles.",
@@ -9330,6 +10152,8 @@ def main() -> None:
         command_find_jobs(args)
     elif args.command == "discover-jobs":
         command_discover_jobs(args)
+    elif args.command == "discover-all":
+        command_discover_all(args)
     elif args.command == "discover-source-candidates":
         command_discover_source_candidates(args)
     elif args.command == "classify-sources":

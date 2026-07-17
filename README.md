@@ -275,15 +275,37 @@ A track may define:
 - Track-specific Markdown resume.
 - Track-specific PDF resume.
 
-If the same URL is discovered by multiple tracks, the tracker keeps one application record and appends all matched tracks to `matched_tracks`. `prepare-application` uses `target_track` unless overridden.
+If the same URL is discovered by multiple tracks, the tracker keeps one application record and appends all matched tracks to `matched_tracks`. With `--score`, the cached JD is evaluated independently for each matched track and stored under `track_evaluations`. The best eligible evaluation is mirrored into the backward-compatible `target_track`, `fit_score`, and `ats_score` fields. `prepare-application` uses that selected `target_track` unless overridden.
 
 ## Discovery Commands
+
+Run the default daily discovery once across all primary tracks:
+
+```bash
+python3 job-search/scripts/job_search.py discover-all \
+  --since-days 7 \
+  --include-maybe-backlog \
+  --maybe-old-posted-date \
+  --score \
+  --max-maybe-scores 20 \
+  --workers 12 \
+  --score-workers 4 \
+  --quiet
+```
+
+`discover-all` fetches each configured source once. Full-board ATS adapters return their normal board snapshot; query-based adapters receive the union of source keywords, track overrides, and five broad role-family queries. Each candidate is routed to zero or more tracks, its JD is cached once, and matching tracks receive independent evaluations. Repeat `--track` to limit the run to selected tracks.
+
+Source fetches run concurrently through `--workers`. After every source has been normalized and filtered, strict candidates are queued for scoring and maybe candidates are ranked as one global pool. `--max-maybe-scores 20` limits expensive JD fetches to the top 20 maybe candidates across the entire run, rather than per source. JD downloads use `--score-workers`; score calculations and tracker writes remain serial to protect `applications.json`. `--quiet` suppresses per-source and per-score output while preserving the final summary and JSON report.
+
+The output remains track-centric: `matched_tracks` and `track_evaluations` power separate SDE, QA, AI/FDE, traditional IT, and data-center review views. Technical titles that do not match a configured track can enter the existing maybe bucket as `unclassified_technical`.
 
 Run fresh discovery against configured sources:
 
 ```bash
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --track general_sde --score
 ```
+
+The track-specific command remains available for targeted rescans or adapter debugging, but `discover-all` is the recommended daily workflow.
 
 Run only one source:
 
@@ -353,6 +375,7 @@ Discovery run reports preserve `status` and `result_status` and add `health` / `
 python3 job-search/scripts/job_search.py discovery-summary --latest
 python3 job-search/scripts/job_search.py source-health --latest
 python3 job-search/scripts/job_search.py application-backlog --bucket priority --preferred-locations --exclude-years 3 --hide-intern
+python3 job-search/scripts/job_search.py application-backlog --track qa_engineer --bucket priority --preferred-locations --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
 python3 job-search/scripts/job_search.py daily-review
 ```
@@ -380,11 +403,16 @@ The scoring step compares a job description with the profile and track resume. I
 
 - `fit_score`
 - `ats_score`
+- `track_evaluations`
 - `matched_keywords`
 - `resume_keyword_matches`
 - `missing_keywords`
 - `dealbreakers`
 - `action_items`
+
+Adapters only fetch and normalize jobs. Scoring happens after discovery filtering. When `discover-jobs --score` is used, those phases run in one command, but JD text is cached in `jd.md` and reused when another track later evaluates the same job. Each track also receives its own `score_report.<track>.md`; the selected best evaluation remains available at the legacy `score_report.md` path.
+
+Existing tracker records are migrated lazily. The first new track evaluation imports legacy top-level scores into the original track entry, so an older strong score is not lost. No destructive tracker migration is required.
 
 Scoring is a triage aid, not an automated decision maker. The intended workflow is to review high-scoring roles first, then manually decide whether to apply.
 
