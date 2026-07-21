@@ -235,6 +235,7 @@ The codebase also supports company-specific or platform-specific adapters, inclu
 - `microsoft_jobs`
 - `google_jobs`
 - `meta_jobs`
+- `jobsyn`
 - `oracle_cx`
 - `boa_careers`
 - RSS-based sources
@@ -307,6 +308,17 @@ python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --track ge
 
 The track-specific command remains available for targeted rescans or adapter debugging, but `discover-all` is the recommended daily workflow.
 
+Re-score recent tracker backlog after scoring or track rules change:
+
+```bash
+python3 job-search/scripts/job_search.py rescore-backlog \
+  --since-days 30 \
+  --all-tracks \
+  --score-workers 4
+```
+
+`rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed. Existing track evaluations are deliberately overwritten, while human notes are preserved. Use `--dry-run` to inspect the selected jobs and track evaluations first; pass repeatable `--track` or `--status` options for a narrower run.
+
 Run only one source:
 
 ```bash
@@ -375,12 +387,15 @@ Discovery run reports preserve `status` and `result_status` and add `health` / `
 python3 job-search/scripts/job_search.py discovery-summary --latest
 python3 job-search/scripts/job_search.py source-health --latest
 python3 job-search/scripts/job_search.py application-backlog --bucket priority --preferred-locations --exclude-years 3 --hide-intern
+python3 job-search/scripts/job_search.py application-backlog --bucket relocation --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --track qa_engineer --bucket priority --preferred-locations --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
 python3 job-search/scripts/job_search.py daily-review
 ```
 
 Priority recommendation views prefer `new grad`, `0-1`, and `1-2` year roles, then downrank `2+` and `2-5` year roles. They skip obvious `3+`, `Senior`, `III`, `Staff`, `Principal`, PhD-only, and internship roles by default. Priority and promoted-maybe lists cap output to three roles per company unless `--company-limit 0` is passed.
+
+Location filtering uses four additive buckets without changing application statuses: `priority` for Washington or Remote US, `relocation` for other US locations, `maybe` for unclear locations, and `rejected` for clearly non-US roles. Other US states remain discoverable and receive a smaller location score instead of a zero fit score. Sources that require a location query should include one `United States` query; the Washington-focused traditional IT source set remains intentionally regional.
 
 ## Freshness and Deduplication
 

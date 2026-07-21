@@ -74,6 +74,240 @@ def discover_args(**overrides):
 
 
 class DiscoveryCompatibilityTest(unittest.TestCase):
+    def test_location_tiers_accept_all_us_but_prefer_wa_and_remote_us(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            profile = {"preferences": {"location_tiers": {"preferred": ["Washington State", "Remote US"]}}}
+
+            self.assertEqual(job_search.location_preference_bucket("Seattle, WA", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("Remote - USA", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("San Francisco, CA", profile), "relocation")
+            self.assertEqual(job_search.location_preference_bucket("Charlotte, NC", profile), "relocation")
+            self.assertEqual(
+                job_search.location_preference_bucket("Washington, District of Columbia, United States", profile),
+                "relocation",
+            )
+            self.assertEqual(job_search.location_preference_bucket("Remote", profile), "maybe")
+            self.assertEqual(job_search.location_preference_bucket("", profile), "maybe")
+            self.assertEqual(job_search.location_preference_bucket("Toronto, Canada", profile), "rejected")
+            self.assertEqual(job_search.location_preference_bucket("Vancouver, WA", profile), "preferred")
+
+    def test_discovery_writes_relocation_and_unknown_location_buckets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            profile = job_search.load_profile()
+            posted_at = job_search.now_utc_iso()
+            candidates = [
+                {
+                    "company": "RelocateCo",
+                    "role": "Software Engineer",
+                    "url": "https://example.com/jobs/relocate",
+                    "platform": "custom",
+                    "location": "Austin, TX",
+                    "posted_at": posted_at,
+                },
+                {
+                    "company": "UnknownCo",
+                    "role": "Software Engineer",
+                    "url": "https://example.com/jobs/unknown",
+                    "platform": "custom",
+                    "location": "",
+                    "posted_at": posted_at,
+                },
+            ]
+
+            stats = job_search.process_discovered_candidates(
+                candidates,
+                discover_args(),
+                profile,
+                {"jobs": {}},
+                job_search.dt.datetime.now(job_search.dt.timezone.utc) - job_search.dt.timedelta(days=1),
+                job_search.now_utc_iso(),
+            )
+            apps = {app["company"]: app for app in job_search.load_tracker()["applications"]}
+
+            self.assertEqual(stats["added"], 2)
+            self.assertEqual(apps["RelocateCo"]["location_bucket"], "relocation")
+            self.assertEqual(apps["RelocateCo"]["status"], "found")
+            self.assertEqual(apps["UnknownCo"]["location_bucket"], "maybe")
+            self.assertEqual(apps["UnknownCo"]["status"], "needs_review")
+            self.assertEqual(apps["UnknownCo"]["review_bucket"], "maybe")
+
+    def test_bot_challenge_is_treated_as_a_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            reason = job_search.job_text_fetch_failure_reason(
+                "JavaScript is disabled. We need to verify that you're not a robot."
+            )
+            self.assertIn("verify", reason.lower())
+
+    def test_jobsyn_adapter_uses_origin_header_and_merges_locations_by_requisition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            source = {
+                "company": "Jacobs",
+                "platform": "jobsyn",
+                "url": "https://jacobs.jobs/jobs/",
+                "origin": "jacobs.jobs",
+                "job_url_template": "https://careers.jacobs.com/en_US/careers/JobDetail/{role_slug}/{reqid}",
+                "keywords": ["AI Engineer"],
+                "page_size": 20,
+                "max_pages": 1,
+            }
+            payload = {
+                "jobs": [
+                    {
+                        "title_exact": "AI Engineer",
+                        "location_exact": "Seattle, WA",
+                        "reqid": "42414",
+                        "guid": "SEATTLE-GUID",
+                        "title_slug": "ai-engineer",
+                        "date_new": "2026-07-18T03:36:08Z",
+                        "date_updated": "2026-07-18T03:36:08Z",
+                        "description": "<p>Build agentic AI systems.</p>",
+                    },
+                    {
+                        "title_exact": "AI Engineer",
+                        "location_exact": "San Francisco, CA",
+                        "reqid": "42414",
+                        "guid": "SF-GUID",
+                        "title_slug": "ai-engineer",
+                        "date_new": "2026-07-18T03:36:08Z",
+                        "date_updated": "2026-07-18T03:36:08Z",
+                        "description": "<p>Build agentic AI systems.</p>",
+                    },
+                ],
+                "pagination": {"has_more_pages": False},
+            }
+
+            class FakeResponse:
+                headers = mock.Mock()
+
+                def __enter__(self):
+                    self.headers.get_content_charset.return_value = "utf-8"
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return json.dumps(payload).encode()
+
+            with mock.patch.object(job_search.urllib.request, "urlopen", return_value=FakeResponse()) as urlopen:
+                jobs = job_search.discover_jobsyn_jobs(source)
+
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0]["job_number"], "42414")
+            self.assertEqual(jobs[0]["external_job_id"], "42414")
+            self.assertEqual(
+                jobs[0]["url"],
+                "https://careers.jacobs.com/en_US/careers/JobDetail/AI-Engineer/42414",
+            )
+            self.assertIn("Seattle, WA", jobs[0]["location"])
+            self.assertIn("San Francisco, CA", jobs[0]["location"])
+            self.assertIn("agentic AI systems", jobs[0]["_jd_text"])
+            request = urlopen.call_args.args[0]
+            self.assertEqual(request.get_header("X-origin"), "jacobs.jobs")
+
+    def test_workday_recruiting_url_preserves_tenant_and_enriches_multi_location_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            source = {
+                "company": "Snap Inc.",
+                "platform": "workday",
+                "host": "wd1.myworkdaysite.com",
+                "tenant": "snapchat",
+                "site": "snap",
+                "url": "https://wd1.myworkdaysite.com/recruiting/snapchat/snap",
+                "keywords": ["Software Engineer"],
+                "page_size": 20,
+                "max_pages": 1,
+            }
+            search_payload = {
+                "jobPostings": [
+                    {
+                        "title": "Software Engineer, Full Stack, Level 4",
+                        "externalPath": (
+                            "/job/Los-Angeles-California/"
+                            "Software-Engineer--Full-Stack--Level-4_Q326SWEFS2-1"
+                        ),
+                        "locationsText": "6 Locations",
+                        "postedOn": "Posted 18 Days Ago",
+                        "bulletFields": ["Q326SWEFS2"],
+                    }
+                ]
+            }
+            detail_payload = {
+                "jobPostingInfo": {
+                    "title": "Software Engineer, Full Stack, Level 4",
+                    "location": "Los Angeles, California",
+                    "additionalLocations": [
+                        "Bellevue - 110 110th Ave NE",
+                        "Seattle - 2025 1st Avenue",
+                    ],
+                    "postedOn": "Posted 18 Days Ago",
+                }
+            }
+
+            with mock.patch.object(job_search, "fetch_json_post", return_value=search_payload):
+                with mock.patch.object(job_search, "fetch_json", return_value=detail_payload) as fetch_detail:
+                    jobs = job_search.discover_workday_jobs(source)
+
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(
+                jobs[0]["url"],
+                (
+                    "https://wd1.myworkdaysite.com/recruiting/snapchat/snap/job/"
+                    "Los-Angeles-California/"
+                    "Software-Engineer--Full-Stack--Level-4_Q326SWEFS2-1"
+                ),
+            )
+            self.assertIn("Bellevue", jobs[0]["location"])
+            self.assertIn("Seattle", jobs[0]["location"])
+            fetch_detail.assert_called_once()
+
+    def test_workday_candidate_from_recruiting_url_keeps_board_and_all_locations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            url = (
+                "https://wd1.myworkdaysite.com/recruiting/snapchat/snap/job/"
+                "Los-Angeles-California/"
+                "Software-Engineer--Full-Stack--Level-4_Q326SWEFS2-1"
+            )
+            detail_payload = {
+                "hiringOrganization": {"name": "Snap Inc."},
+                "jobPostingInfo": {
+                    "title": "Software Engineer, Full Stack, Level 4",
+                    "jobReqId": "Q326SWEFS2",
+                    "location": "Los Angeles, California",
+                    "additionalLocations": ["Bellevue, Washington", "Seattle, Washington"],
+                    "postedOn": "Posted 18 Days Ago",
+                },
+            }
+
+            with mock.patch.object(job_search, "fetch_json", return_value=detail_payload):
+                candidate = job_search.workday_candidate_from_url(url)
+
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate["url"], url)
+            self.assertEqual(
+                candidate["source"],
+                "https://wd1.myworkdaysite.com/recruiting/snapchat/snap",
+            )
+            self.assertIn("Bellevue", candidate["location"])
+            self.assertIn("Seattle", candidate["location"])
+            self.assertEqual(
+                job_search.workday_human_url(
+                    "example.wd5.myworkdayjobs.com",
+                    "External",
+                    "/job/Seattle/Software-Engineer_R1",
+                    tenant="example",
+                ),
+                "https://example.wd5.myworkdayjobs.com/External/job/Seattle/Software-Engineer_R1",
+            )
+
     def test_write_json_atomically_replaces_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
@@ -582,6 +816,36 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(five_year["status"], "skipped")
             self.assertIn("skip threshold 5", " ".join(five_year["dealbreakers"]))
 
+    def test_score_location_tiers_do_not_zero_other_us_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            profile = job_search.load_profile()
+            jd = "Software Engineer role using Python APIs."
+
+            preferred = job_search.score_text(
+                {"company": "WA", "role": "Software Engineer", "location": "Seattle, WA"}, jd, profile
+            )
+            relocation = job_search.score_text(
+                {"company": "TX", "role": "Software Engineer", "location": "Austin, TX"}, jd, profile
+            )
+            unknown = job_search.score_text(
+                {"company": "Unknown", "role": "Software Engineer", "location": "Remote"}, jd, profile
+            )
+            rejected = job_search.score_text(
+                {"company": "EU", "role": "Software Engineer", "location": "Berlin, Germany"}, jd, profile
+            )
+
+            self.assertEqual(preferred["location_bucket"], "preferred")
+            self.assertEqual(relocation["location_bucket"], "relocation")
+            self.assertEqual(unknown["location_bucket"], "maybe")
+            self.assertEqual(rejected["location_bucket"], "rejected")
+            self.assertGreater(preferred["fit_score"], relocation["fit_score"])
+            self.assertGreater(relocation["fit_score"], unknown["fit_score"])
+            self.assertNotEqual(relocation["status"], "skipped")
+            self.assertEqual(rejected["status"], "skipped")
+
     def test_daily_review_priority_uses_strict_recommendation_filters(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
@@ -671,9 +935,11 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                 },
             ]
 
-            rows = job_search.daily_review_app_rows(apps, "priority", 8, 10)
+            priority = job_search.daily_review_app_rows(apps, "priority", 8, 10)
+            relocation = job_search.daily_review_app_rows(apps, "relocation", 8, 10)
 
-            self.assertEqual([row["id"] for row in rows], ["range-years", "good"])
+            self.assertEqual([row["id"] for row in priority], ["good"])
+            self.assertEqual({row["id"] for row in relocation}, {"range-years", "dc"})
 
     def test_daily_review_prioritizes_entry_level_and_caps_company(self):
         with tempfile.TemporaryDirectory() as tmp:

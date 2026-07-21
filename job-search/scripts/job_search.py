@@ -81,6 +81,7 @@ CSV_FIELDS = [
     "freshness_source",
     "review_bucket",
     "discovery_bucket",
+    "location_bucket",
     "target_track",
     "matched_tracks",
     "resume_file",
@@ -634,6 +635,8 @@ def detect_platform(url: str) -> str:
         return "apple_jobs"
     if "providence.jobs" in host or "prod-search-api.jobsyn.org" in host:
         return "providence_jobs"
+    if host == "jacobs.jobs":
+        return "jobsyn"
     if "careers.salesforce.com" in host:
         return "salesforce_jobs"
     if "governmentjobs.com" in host:
@@ -904,6 +907,13 @@ DEFAULT_DISCOVER_ALL_TRACKS = [
     "fde_ai_engineer",
     "traditional_it_wa",
     "data_center_infra",
+]
+
+DEFAULT_RESCORE_BACKLOG_STATUSES = [
+    "found",
+    "needs_review",
+    "needs_retry",
+    "scored",
 ]
 
 DISCOVER_ALL_ROLE_QUERIES = [
@@ -1381,10 +1391,30 @@ def workday_api_url(host: str, tenant: str, site: str, suffix: str) -> str:
     return f"https://{host}/wday/cxs/{urllib.parse.quote(tenant)}/{urllib.parse.quote(site)}{suffix}"
 
 
-def workday_human_url(host: str, site: str, external_path: str) -> str:
+def workday_board_url(host: str, tenant: str, site: str) -> str:
+    if "myworkdaysite.com" in host.lower():
+        return normalize_job_url(
+            f"https://{host}/recruiting/{urllib.parse.quote(tenant)}/{urllib.parse.quote(site)}"
+        )
+    return normalize_job_url(f"https://{host}/{urllib.parse.quote(site)}")
+
+
+def workday_human_url(host: str, site: str, external_path: str, tenant: str = "") -> str:
     if not external_path.startswith("/"):
         external_path = f"/{external_path}"
-    return normalize_job_url(f"https://{host}/{urllib.parse.quote(site)}{external_path}")
+    board_url = workday_board_url(host, tenant, site) if tenant else normalize_job_url(
+        f"https://{host}/{urllib.parse.quote(site)}"
+    )
+    return normalize_job_url(f"{board_url}{external_path}")
+
+
+def workday_location_text(info: dict[str, Any]) -> str:
+    values = [str(info.get("location") or "").strip()]
+    additional = info.get("additionalLocations") or []
+    if isinstance(additional, str):
+        additional = [additional]
+    values.extend(str(item).strip() for item in additional if str(item).strip())
+    return "; ".join(dict.fromkeys(value for value in values if value))
 
 
 def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1400,6 +1430,7 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     max_pages = int(source.get("max_pages", 5))
     candidates: dict[str, dict[str, Any]] = {}
     endpoint = workday_api_url(host, tenant, site, "/jobs")
+    detail_cache: dict[str, dict[str, Any]] = {}
 
     for keyword in [str(item) for item in keywords if str(item).strip() or len(keywords) == 1]:
         for page_index in range(max_pages):
@@ -1421,10 +1452,24 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 external_path = str(job.get("externalPath") or job.get("externalPathname") or "").strip()
                 if not external_path:
                     continue
-                url = workday_human_url(host, site, external_path)
+                url = workday_human_url(host, site, external_path, tenant=tenant)
                 title = job.get("title") or job.get("jobTitle") or infer_role_from_url(url)
                 locations = job.get("locationsText") or job.get("locationsDisplayText") or job.get("location") or ""
                 posted_at = parse_workday_posted_on(job.get("postedOn") or job.get("postedOnDate"))
+                if not locations or re.fullmatch(r"\s*\d+\s+locations?\s*", str(locations), flags=re.I):
+                    if external_path not in detail_cache:
+                        try:
+                            detail_cache[external_path] = fetch_json(
+                                workday_api_url(host, tenant, site, external_path)
+                            )
+                        except Exception:  # noqa: BLE001
+                            detail_cache[external_path] = {}
+                    info = detail_cache[external_path].get("jobPostingInfo", {})
+                    if isinstance(info, dict):
+                        locations = workday_location_text(info) or locations
+                        posted_at = parse_workday_posted_on(
+                            info.get("postedOn") or info.get("startDate")
+                        ) or posted_at
                 candidates[url] = {
                     "company": company,
                     "role": title,
@@ -2941,6 +2986,110 @@ def discover_providence_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "source": source.get("url", "https://providence.jobs/jobs/"),
                     "source_query": keyword,
                     "notes": "Providence/jobsyn Google Talent direct adapter.",
+                    "_jd_text": html_to_text(str(job.get("description") or "")),
+                }
+            pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
+            if not pagination.get("has_more_pages") or len(jobs) < page_size:
+                break
+    return list(candidates.values())
+
+
+def jobsyn_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
+    req_id = str(job.get("reqid") or "").strip()
+    guid = str(job.get("guid") or "").strip()
+    role = str(job.get("title_exact") or job.get("title") or "job").strip()
+    role_slug = re.sub(r"[^A-Za-z0-9]+", "-", role).strip("-")
+    title_slug = str(job.get("title_slug") or slugify(role)).strip("/")
+    city = str(job.get("city_exact") or "remote").strip()
+    city_slug = slugify(city)
+    template = str(source.get("job_url_template") or "").strip()
+    if template:
+        return normalize_job_url(
+            template.format(
+                reqid=urllib.parse.quote(req_id),
+                guid=urllib.parse.quote(guid),
+                role_slug=urllib.parse.quote(role_slug),
+                title_slug=urllib.parse.quote(title_slug),
+                city_slug=urllib.parse.quote(city_slug),
+            )
+        )
+    origin = str(source.get("origin") or urllib.parse.urlparse(str(source.get("url") or "")).netloc).strip()
+    if origin and guid:
+        return normalize_job_url(f"https://{origin}/{city_slug}/{title_slug}/{urllib.parse.quote(guid)}/job/")
+    return normalize_job_url(str(source.get("url") or ""))
+
+
+def discover_jobsyn_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "").strip()
+    origin = str(source.get("origin") or urllib.parse.urlparse(str(source.get("url") or "")).netloc).strip()
+    if not origin:
+        raise ValueError("Jobsyn source requires origin or a source URL with a hostname")
+    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    page_size = int(source.get("page_size", 20))
+    max_pages = int(source.get("max_pages", 3))
+    api_base = str(source.get("api_url") or "https://prod-search-api.jobsyn.org/api/v1/google-talent/search")
+    candidates: dict[str, dict[str, Any]] = {}
+    for keyword in [str(item) for item in keywords if str(item).strip()]:
+        for page_index in range(max_pages):
+            params = {
+                "q": keyword,
+                "page": str(page_index + 1),
+                "num_items": str(page_size),
+                "source": str(source.get("search_source") or "solr"),
+                "use_solr_filters": "true",
+            }
+            api_url = api_base + ("&" if "?" in api_base else "?") + urllib.parse.urlencode(params)
+            request = urllib.request.Request(
+                api_url,
+                headers={
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Accept": "application/json,*/*;q=0.8",
+                    "X-Origin": origin,
+                    "Referer": f"https://{origin}/jobs/",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    data = json.loads(response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace"))
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Jobsyn API for {company or origin} / {keyword}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            if not jobs:
+                break
+            for raw_job in jobs:
+                job = raw_job.get("job", {}) if isinstance(raw_job, dict) and isinstance(raw_job.get("job"), dict) else raw_job
+                if not isinstance(job, dict):
+                    continue
+                req_id = str(job.get("reqid") or job.get("requisitionId") or "").strip()
+                guid = str(job.get("guid") or "").strip()
+                url = jobsyn_job_url(source, job)
+                if not url:
+                    continue
+                location = str(job.get("location_exact") or "").strip()
+                if not location:
+                    locations = job.get("all_locations", []) if isinstance(job.get("all_locations"), list) else []
+                    location = ", ".join(str(item) for item in locations if item)
+                candidate_key = req_id or guid or url
+                existing = candidates.get(candidate_key)
+                if existing:
+                    existing["location"] = "; ".join(merge_unique(str(existing.get("location") or "").split("; "), [location]))
+                    continue
+                candidates[candidate_key] = {
+                    "company": company or str(job.get("company_exact") or origin).strip(),
+                    "role": str(job.get("title_exact") or job.get("title") or infer_role_from_url(url)).strip(),
+                    "url": url,
+                    "platform": "jobsyn",
+                    "location": location,
+                    "job_number": req_id,
+                    "external_job_id": req_id or guid or str(job.get("id") or ""),
+                    "posted_at": normalize_datetime(job.get("date_new") or job.get("date_added")),
+                    "updated_at": normalize_datetime(job.get("date_updated")),
+                    "source": source.get("url", f"https://{origin}/jobs/"),
+                    "source_query": keyword,
+                    "notes": "Jobsyn direct search API adapter.",
                     "_jd_text": html_to_text(str(job.get("description") or "")),
                 }
             pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
@@ -4836,6 +4985,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_apple_jobs(source)
     if platform == "providence_jobs":
         return discover_providence_jobs(source)
+    if platform == "jobsyn":
+        return discover_jobsyn_jobs(source)
     if platform == "salesforce_jobs":
         return discover_salesforce_jobs(source)
     if platform == "smartrecruiters":
@@ -4995,16 +5146,16 @@ def workday_candidate_from_url(url: str) -> dict[str, Any] | None:
     except Exception:
         return None
     info = data.get("jobPostingInfo", {}) if isinstance(data, dict) else {}
-    normalized_url = workday_human_url(host, site, external_path)
+    normalized_url = workday_human_url(host, site, external_path, tenant=tenant)
     return {
         "company": data.get("hiringOrganization", {}).get("name") if isinstance(data.get("hiringOrganization"), dict) else tenant,
         "role": info.get("title") or infer_role_from_url(normalized_url),
         "url": normalized_url,
         "platform": "workday",
-        "location": info.get("location", "") or "",
+        "location": workday_location_text(info),
         "posted_at": parse_workday_posted_on(info.get("postedOn") or info.get("startDate")),
         "updated_at": normalize_datetime(info.get("startDate")),
-        "source": f"https://{host}/{site}",
+        "source": workday_board_url(host, tenant, site),
         "job_number": info.get("jobReqId", ""),
         "external_job_id": info.get("jobPostingId", ""),
         "notes": "",
@@ -5156,62 +5307,96 @@ def unclassified_technical_title_relevant(candidate: dict[str, Any]) -> bool:
     )
 
 
-def location_allowed(location: str, profile: dict[str, Any]) -> bool:
-    value = str(location or "").strip().lower()
+US_STATE_NAMES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware",
+    "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky",
+    "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico",
+    "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+    "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont",
+    "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
+}
+US_STATE_ABBREVIATIONS = {
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia",
+    "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+    "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt",
+    "va", "wa", "wv", "wi", "wy", "dc",
+}
+WA_LOCATION_PATTERN = re.compile(
+    r"\b(?:washington state|seattle|bellevue|redmond|kirkland|tacoma|everett|renton|bothell|olympia|"
+    r"spokane|vancouver,?\s+wa|washington,?\s+(?:united states|usa|u\.s\.)|"
+    r"wa,?\s+(?:united states|usa|u\.s\.))\b",
+    flags=re.I,
+)
+REMOTE_US_PATTERN = re.compile(
+    r"\b(?:remote\s*(?:[-,(]|in\s+)?\s*(?:united states|usa|u\.s\.|us)\b|"
+    r"(?:united states|usa|u\.s\.|us)\s*[-,()]?\s*remote\b|us[- ]based remote|remote us[- ]based)\b",
+    flags=re.I,
+)
+FOREIGN_LOCATION_PATTERN = re.compile(
+    r"(?:\b(?:canada|toronto|montreal|calgary|edmonton|british columbia|ontario|quebec|india|argentina|"
+    r"colombia|mexico|spain|germany|poland|egypt|japan|france|ireland|netherlands|singapore|australia|"
+    r"new zealand|brazil|vancouver|london|paris|berlin|latam|latin america|emea|apac|europe|"
+    r"european union|united kingdom|uk only|eu only)\b|\bremote\s*\(ca\))",
+    flags=re.I,
+)
+US_LOCATION_PATTERN = re.compile(
+    r"(?:\b(?:united states(?: of america)?|usa|us[- ]based)\b|\bu\.s\.?(?:\b|$))",
+    flags=re.I,
+)
+
+
+def location_preference_bucket(location: str, profile: dict[str, Any] | None = None, context: str = "") -> str:
+    """Classify location without treating accepted US relocation roles as dealbreakers."""
+    value = re.sub(r"\s+", " ", str(location or "")).strip()
+    context_value = re.sub(r"\s+", " ", str(context or "")).strip()
     if not value:
-        return True
-    foreign_markers = [
-        "canada",
-        "remote (ca)",
-        "edmonton",
-        "toronto",
-        "vancouver",
-        "montreal",
-        "calgary",
-        "india",
-        "argentina",
-        "colombia",
-        "mexico",
-        "spain",
-        "germany",
-        "poland",
-        "egypt",
-        "japan",
-        "latam",
-        "europe",
-        "worldwide",
-        "global",
-        "united kingdom",
-    ]
-    if any(marker in value for marker in foreign_markers) and not re.search(
-        r"\b(united states|usa|u\.s\.|us|remote \(us|california|san francisco|san jose|palo alto|mountain view|sunnyvale|los angeles|wa|washington|seattle|bellevue|redmond|kirkland)\b",
-        value,
-    ):
-        return False
-    if re.search(r"\b(ab|bc|on|qc),\s*ca\b", value) and not re.search(r"\b(united states|usa|u\.s\.|us|california)\b", value):
-        return False
-    if re.search(r"\b(remote|us based|us-based)\b", value):
-        return True
-    if re.fullmatch(r"(united states|usa|u\.s\.|us|united states of america)", value):
-        return True
+        return "maybe"
 
-    preferences = profile.get("preferences", {})
-    allowed_locations = [
-        str(item).lower()
-        for item in preferences.get("relocation_allowed_locations", []) + preferences.get("preferred_locations_order", [])
-    ]
-    if any(item and item in value for item in allowed_locations):
-        return True
-
-    allowed_states = {str(item).lower() for item in preferences.get("relocation_allowed_states", [])}
-    if "wa" in allowed_states and re.search(r"\b(wa|washington|seattle|bellevue|redmond|kirkland)\b", value):
-        return True
-    if "ca" in allowed_states and re.search(
-        r"\b(ca|california|san francisco|sf|san jose|palo alto|mountain view|sunnyvale|los angeles)\b",
-        value,
+    lower = value.lower()
+    is_washington_dc = bool(
+        re.search(r"\b(?:washington,?\s+(?:district of columbia|dc)|district of columbia|washington dc)\b", lower)
+    )
+    explicit_us = bool(US_LOCATION_PATTERN.search(lower)) or lower in {"us", "u.s", "u.s."}
+    if REMOTE_US_PATTERN.search(lower):
+        return "preferred"
+    if not is_washington_dc and (
+        lower == "washington"
+        or WA_LOCATION_PATTERN.search(lower)
+        or re.search(r"(?:^|[,;/])\s*wa(?:\s+state)?\s*(?:[,;/]|$)", lower)
     ):
-        return True
-    return False
+        return "preferred"
+
+    state_name = any(re.search(rf"\b{re.escape(state)}\b", lower) for state in US_STATE_NAMES)
+    state_code = bool(
+        re.search(
+            rf"(?:^|[,;/])\s*(?:{'|'.join(sorted(US_STATE_ABBREVIATIONS))})\s*(?:[,;/]|$)",
+            lower,
+        )
+    )
+    explicit_us_location = explicit_us or state_name or state_code
+    foreign_location = bool(FOREIGN_LOCATION_PATTERN.search(lower)) or bool(
+        re.search(r"\b(?:ab|bc|on|qc),\s*ca\b", lower)
+    )
+    if foreign_location and not explicit_us_location:
+        return "rejected"
+    if explicit_us_location:
+        return "relocation"
+
+    if context_value and re.search(
+        r"\b(?:must|need to|required to)\s+(?:already\s+)?(?:have|hold)\s+(?:the\s+)?(?:right|authorization)\s+to\s+work\s+in\s+(?!the united states|united states|usa|u\.s\.)",
+        context_value,
+        flags=re.I,
+    ):
+        return "rejected"
+    if re.search(r"\bremote\b", lower):
+        return "maybe"
+    return "maybe"
+
+
+def location_allowed(location: str, profile: dict[str, Any]) -> bool:
+    """Backward-compatible boolean gate; only clearly non-US locations are rejected."""
+    return location_preference_bucket(location, profile) != "rejected"
 
 
 def hn_review_decision(app: dict[str, Any]) -> tuple[str, int, list[str]]:
@@ -5475,9 +5660,14 @@ def process_discovered_candidates(
             else:
                 stats["skipped_title"] += 1
                 continue
-        if not location_allowed(candidate.get("location", ""), profile):
+        location_bucket = location_preference_bucket(candidate.get("location", ""), profile)
+        candidate["location_bucket"] = location_bucket
+        seen_record["location_bucket"] = location_bucket
+        if location_bucket == "rejected":
             stats["skipped_location"] += 1
             continue
+        if location_bucket == "maybe":
+            maybe_reasons.append("unknown_location")
         if maybe_reasons:
             candidate["review_bucket"] = "maybe"
             candidate["discovery_bucket"] = "maybe_backlog"
@@ -5499,6 +5689,7 @@ def process_discovered_candidates(
                     "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
                     "review_bucket": "maybe",
                     "discovery_bucket": "maybe_backlog",
+                    "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
                 },
             )
@@ -5608,7 +5799,13 @@ def process_discovered_candidates_all_tracks(
         if not matched_tracks and not unclassified_technical:
             stats["skipped_title"] += 1
             continue
-        if not any(location_allowed(candidate.get("location", ""), profile) for profile in profiles.values()):
+        location_bucket = location_preference_bucket(
+            candidate.get("location", ""),
+            next(iter(profiles.values()), {}),
+        )
+        candidate["location_bucket"] = location_bucket
+        seen_record["location_bucket"] = location_bucket
+        if location_bucket == "rejected":
             stats["skipped_location"] += 1
             continue
 
@@ -5645,6 +5842,8 @@ def process_discovered_candidates_all_tracks(
             maybe_reasons.append("fuzzy_title")
         if unclassified_technical:
             maybe_reasons.append("unclassified_technical")
+        if location_bucket == "maybe":
+            maybe_reasons.append("unknown_location")
 
         candidate["matched_tracks"] = matched_tracks
         selected_track = str((existing_app or {}).get("target_track") or "")
@@ -5681,6 +5880,7 @@ def process_discovered_candidates_all_tracks(
                     "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
                     "review_bucket": "maybe",
                     "discovery_bucket": "maybe_backlog",
+                    "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
                 },
             )
@@ -5862,13 +6062,22 @@ def execute_discovery_score_queue(
                     jd_file=jd_paths.get(app_id) or None,
                     track=task.get("track"),
                     quiet=True,
+                    preserve_notes=bool(getattr(args, "preserve_notes", False)),
                 )
             )
             if task.get("maybe"):
                 maybe_scored_apps.add(app_id)
         except Exception as error:  # noqa: BLE001
             summary["scoring_failed"] += 1
-            update_application(app_id, {"status": "needs_review", "notes": f"Scoring failed: {error}"})
+            failure_note = f"Scoring failed: {error}"
+            updates = {"status": "needs_review", "notes": failure_note}
+            if bool(getattr(args, "preserve_notes", False)):
+                existing_notes = str(get_application(app_id).get("notes") or "").strip()
+                if existing_notes and failure_note not in existing_notes:
+                    updates["notes"] = f"{existing_notes}\n{failure_note}"
+                elif existing_notes:
+                    updates["notes"] = existing_notes
+            update_application(app_id, updates)
     summary["maybe_scored"] = len(maybe_scored_apps)
     return summary
 
@@ -6442,6 +6651,33 @@ def fetch_providence_job_text(url: str) -> str | None:
     return html_to_text(fetch_url(url))
 
 
+def fetch_jobsyn_job_text(app: dict[str, Any]) -> str | None:
+    if str(app.get("platform") or "") != "jobsyn":
+        return None
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    company = str(app.get("company") or "").strip().lower()
+    source = next(
+        (
+            item
+            for item in sources
+            if source_platform(item) == "jobsyn"
+            and str(item.get("company") or "").strip().lower() == company
+        ),
+        None,
+    )
+    if not source:
+        return None
+    probe = dict(source)
+    probe["keywords"] = [str(app.get("role") or app.get("job_number") or app.get("external_job_id") or "").strip()]
+    probe["max_pages"] = 1
+    for candidate in discover_jobsyn_jobs(probe):
+        if str(candidate.get("job_number") or "") == str(app.get("job_number") or ""):
+            return str(candidate.get("_jd_text") or "").strip() or None
+        if normalize_job_url(str(candidate.get("url") or "")) == normalize_job_url(str(app.get("url") or "")):
+            return str(candidate.get("_jd_text") or "").strip() or None
+    return None
+
+
 def parse_ripplehire_url(url: str) -> tuple[str, str, str] | None:
     parsed = urllib.parse.urlparse(url)
     if "ripplehire.com" not in parsed.netloc.lower() or "/candidate" not in parsed.path.lower():
@@ -6659,6 +6895,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
                 "external_job_id",
                 "review_bucket",
                 "discovery_bucket",
+                "location_bucket",
             ]:
                 if candidate.get(field) and app.get(field) != candidate[field]:
                     app[field] = candidate[field]
@@ -6702,6 +6939,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "freshness_source": candidate.get("freshness_source", ""),
         "review_bucket": candidate.get("review_bucket", ""),
         "discovery_bucket": candidate.get("discovery_bucket", ""),
+        "location_bucket": candidate.get("location_bucket", ""),
         "target_track": candidate.get("target_track", ""),
         "matched_tracks": candidate.get("matched_tracks", []),
         "track_evaluations": candidate.get("track_evaluations", {}),
@@ -6924,7 +7162,13 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     role_text = f"{app.get('role', '')} {jd_text}".lower()
     role_score = 2.5 if any(role.lower() in role_text for role in profile.get("targets", {}).get("roles", [])) else 1.0
     tech_score = min(4.0, len(matched) * 0.45)
-    location_score = 1.5 if location_matches(app, jd_text, profile) else 0.7
+    location_bucket = location_preference_bucket(app.get("location", ""), profile, jd_text)
+    location_score = {
+        "preferred": 1.5,
+        "relocation": 1.0,
+        "maybe": 0.7,
+        "rejected": 0.0,
+    }[location_bucket]
     level_score = 2.0
 
     dealbreakers: list[str] = []
@@ -6974,8 +7218,12 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     if re.search(r"we do not sponsor|no sponsorship|unable to sponsor", jd_text, re.I):
         if profile.get("work_authorization", {}).get("requires_sponsorship"):
             dealbreakers.append("JD says sponsorship is unavailable.")
-    if not location_allowed(app.get("location", ""), profile):
-        dealbreakers.append(f"Location is outside allowed WA/CA/Remote preferences: {app.get('location')}.")
+    if location_bucket == "rejected":
+        dealbreakers.append(f"Location appears outside the United States: {app.get('location')}.")
+    elif location_bucket == "relocation":
+        action_items.append("US relocation role; rank below Washington and Remote US opportunities.")
+    elif location_bucket == "maybe":
+        action_items.append("Location is unclear; confirm US eligibility and onsite expectations.")
 
     fit_score = 0.0 if dealbreakers else round(min(10.0, role_score + tech_score + location_score + level_score), 1)
     status = "skipped" if dealbreakers else ("needs_review" if fit_score < 6.0 or ats_score < 60 else "scored")
@@ -6988,6 +7236,7 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
         "fit_score": fit_score,
         "ats_score": ats_score,
         "status": status,
+        "location_bucket": location_bucket,
         "experience_bucket": experience_bucket,
         "experience_requirements": [str(item.get("text") or "") for item in experience_requirements if item.get("text")]
         + [f"{months} months" for months in month_requirements],
@@ -7025,6 +7274,7 @@ def track_evaluations_with_legacy(app: dict[str, Any]) -> dict[str, dict[str, An
         "ats_score": app.get("ats_score", ""),
         "status": legacy_status,
         "eligible": legacy_status not in {"skipped", "needs_retry"} and not legacy_dealbreakers,
+        "location_bucket": app.get("location_bucket", ""),
         "experience_bucket": app.get("experience_bucket", ""),
         "experience_requirements": list(app.get("experience_requirements") or []),
         "dealbreakers": legacy_dealbreakers,
@@ -7054,6 +7304,7 @@ def build_track_evaluation(
         "ats_score": score.get("ats_score", ""),
         "status": status,
         "eligible": status not in {"skipped", "needs_retry"} and not dealbreakers,
+        "location_bucket": score.get("location_bucket", ""),
         "experience_bucket": score.get("experience_bucket", ""),
         "experience_requirements": list(score.get("experience_requirements") or []),
         "dealbreakers": dealbreakers,
@@ -7115,12 +7366,7 @@ def cached_job_text_for_scoring(app: dict[str, Any], jd_file: str | None = None)
 
 
 def location_matches(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> bool:
-    if not location_allowed(app.get("location", ""), profile):
-        return False
-    combined = f"{app.get('location', '')} {jd_text}".lower()
-    if "remote" in combined or "united states" in combined or "usa" in combined:
-        return True
-    return location_allowed(app.get("location", ""), profile)
+    return location_preference_bucket(app.get("location", ""), profile, jd_text) == "preferred"
 
 
 def app_output_dir(app: dict[str, Any]) -> Path:
@@ -7153,6 +7399,12 @@ def template_path(name: str) -> Path:
 def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
     if jd_file:
         return Path(jd_file).read_text(encoding="utf-8", errors="replace")
+    try:
+        jobsyn_text = fetch_jobsyn_job_text(app)
+        if jobsyn_text:
+            return jobsyn_text
+    except Exception:
+        pass
     for fetcher in [
         fetch_ashby_job_text,
         fetch_greenhouse_job_text,
@@ -7541,7 +7793,7 @@ def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
             "host": host,
             "tenant": tenant,
             "site": site,
-            "url": f"https://{host}/{site}",
+            "url": workday_board_url(host, tenant, site),
         }
     return None
 
@@ -7578,7 +7830,7 @@ def source_from_workday_url(company: str, url: str) -> dict[str, Any] | None:
         "host": host,
         "tenant": tenant,
         "site": site,
-        "url": f"https://{host}/{site}",
+        "url": workday_board_url(host, tenant, site),
         "page_size": 20,
         "max_pages": 5,
         "keywords": DEFAULT_WORKDAY_KEYWORDS,
@@ -7682,6 +7934,7 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "eightfold",
         "apple_jobs",
         "providence_jobs",
+        "jobsyn",
         "smartrecruiters",
         "icims",
         "oracle_cx",
@@ -7781,6 +8034,14 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company or "Apple", "platform": "apple_jobs", "url": detected_url}
     elif platform == "providence_jobs":
         result["source"] = {"company": company or "Providence", "platform": "providence_jobs", "url": detected_url}
+    elif platform == "jobsyn":
+        origin = urllib.parse.urlparse(detected_url).netloc.lower()
+        result["source"] = {
+            "company": company or origin,
+            "platform": "jobsyn",
+            "url": detected_url,
+            "origin": origin,
+        }
     elif platform == "salesforce_jobs":
         result["source"] = {"company": company or "Salesforce", "platform": "salesforce_jobs", "url": "https://careers.salesforce.com/en/jobs/"}
     elif platform == "smartrecruiters":
@@ -7863,6 +8124,7 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "workable",
         "bamboohr",
         "jobvite",
+        "jobsyn",
     }
     api_ok = {
         "phenom",
@@ -7905,6 +8167,7 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "bamboohr",
         "careerpuck",
         "governmentjobs",
+        "jobsyn",
     }
     if platform in api_good:
         quality = "api_good"
@@ -8442,6 +8705,132 @@ def command_discover_all(args: argparse.Namespace) -> None:
     command_discover_jobs(args)
 
 
+def application_rescore_datetime(app: dict[str, Any]) -> tuple[dt.datetime | None, str]:
+    candidates: list[tuple[dt.datetime, str]] = []
+    for field in ("posted_at", "first_seen", "date_found"):
+        parsed = parse_datetime(app.get(field))
+        if parsed:
+            candidates.append((parsed, field))
+    if not candidates:
+        return None, ""
+    return max(candidates, key=lambda item: item[0])
+
+
+def select_rescore_backlog_applications(
+    applications: list[dict[str, Any]],
+    cutoff: dt.datetime,
+    statuses: set[str],
+    limit: int = 0,
+) -> list[tuple[dict[str, Any], dt.datetime, str]]:
+    selected: list[tuple[dict[str, Any], dt.datetime, str]] = []
+    for app in applications:
+        if str(app.get("date_applied") or "").strip():
+            continue
+        if str(app.get("status") or "") not in statuses:
+            continue
+        reference_at, reference_field = application_rescore_datetime(app)
+        if reference_at is None or reference_at < cutoff:
+            continue
+        selected.append((app, reference_at, reference_field))
+    selected.sort(key=lambda item: (item[1], str(item[0].get("id") or "")), reverse=True)
+    if limit > 0:
+        return selected[:limit]
+    return selected
+
+
+def rescore_tracks_for_application(
+    app: dict[str, Any],
+    requested_tracks: list[str],
+    all_tracks: bool,
+) -> list[str | None]:
+    if all_tracks:
+        return list(DEFAULT_DISCOVER_ALL_TRACKS)
+    if requested_tracks:
+        return list(dict.fromkeys(requested_tracks))
+
+    tracks: list[str] = []
+    tracks.extend(str(item) for item in app.get("matched_tracks", []) if str(item).strip())
+    tracks.extend(
+        str(item)
+        for item in track_evaluations_with_legacy(app)
+        if str(item).strip() and str(item) != "default"
+    )
+    target_track = str(app.get("target_track") or "").strip()
+    if target_track:
+        tracks.append(target_track)
+    deduplicated = list(dict.fromkeys(tracks))
+    return deduplicated or [None]
+
+
+def command_rescore_backlog(args: argparse.Namespace) -> None:
+    require_person_files()
+    if args.since_hours is None and args.since_days is None:
+        args.since_days = 30
+    cutoff = discovery_cutoff(args)
+    statuses = set(args.status or DEFAULT_RESCORE_BACKLOG_STATUSES)
+    requested_tracks = list(args.tracks or [])
+    if args.all_tracks and requested_tracks:
+        raise SystemExit("Use either --all-tracks or --track, not both.")
+    tracks_to_validate = DEFAULT_DISCOVER_ALL_TRACKS if args.all_tracks else requested_tracks
+    for track_id in tracks_to_validate:
+        load_track(track_id)
+
+    tracker = load_tracker()
+    selected = select_rescore_backlog_applications(
+        tracker.get("applications", []),
+        cutoff,
+        statuses,
+        max(0, int(args.limit or 0)),
+    )
+    score_queue: list[dict[str, Any]] = []
+    selected_rows: list[tuple[dict[str, Any], dt.datetime, str, list[str | None]]] = []
+    for app, reference_at, reference_field in selected:
+        tracks = rescore_tracks_for_application(
+            app,
+            requested_tracks,
+            bool(args.all_tracks),
+        )
+        selected_rows.append((app, reference_at, reference_field, tracks))
+        for track_id in tracks:
+            score_queue.append(
+                {
+                    "app_id": app["id"],
+                    "track": track_id,
+                    "maybe": False,
+                    "priority": reference_at.timestamp(),
+                    "posted_timestamp": reference_at.timestamp(),
+                }
+            )
+
+    if args.dry_run:
+        print(
+            "Backlog rescore dry run. "
+            f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+            f"Statuses: {', '.join(sorted(statuses))}. "
+            f"Jobs: {len(selected_rows)}. Track evaluations: {len(score_queue)}."
+        )
+        if not args.quiet:
+            for app, reference_at, reference_field, tracks in selected_rows:
+                track_text = ", ".join(track or "default" for track in tracks)
+                print(
+                    f"- {app.get('company', 'Unknown')} - {app.get('role', '')} "
+                    f"[{reference_field}={reference_at.date().isoformat()}] "
+                    f"tracks={track_text} id={app.get('id', '')}"
+                )
+        return
+
+    args.max_maybe_scores = 0
+    args.preserve_notes = True
+    summary = execute_discovery_score_queue(score_queue, args)
+    print(
+        "Backlog rescore complete. "
+        f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Jobs: {len(selected_rows)}. "
+        f"Track evaluations: {summary['selected_tasks']}. "
+        f"Failures: {summary['scoring_failed']}."
+    )
+
+
 def command_discover_web_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     if args.since_hours is None and args.since_days is None:
@@ -8651,6 +9040,7 @@ def command_score_job(args: argparse.Namespace) -> None:
                 "ats_score": best_evaluation.get("ats_score", ""),
                 "experience_bucket": best_evaluation.get("experience_bucket", ""),
                 "experience_requirements": list(best_evaluation.get("experience_requirements") or []),
+                "location_bucket": best_evaluation.get("location_bucket", app.get("location_bucket", "")),
                 "status": selected_status,
                 "dealbreakers": list(best_evaluation.get("dealbreakers") or []),
                 "action_items": list(best_evaluation.get("action_items") or []),
@@ -8666,6 +9056,7 @@ def command_score_job(args: argparse.Namespace) -> None:
             updates = {
                 "fit_score": "",
                 "ats_score": "",
+                "location_bucket": location_preference_bucket(app.get("location", ""), profile),
                 "status": "needs_retry",
                 "dealbreakers": [],
                 "action_items": [
@@ -8714,6 +9105,12 @@ def command_score_job(args: argparse.Namespace) -> None:
     selected_status = str(best_evaluation.get("status") or "needs_review")
     if app.get("status") in {"applied", "prepared"}:
         selected_status = str(app["status"])
+    score_notes = "; ".join(
+        list(best_evaluation.get("dealbreakers") or [])
+        or list(best_evaluation.get("action_items") or [])
+    )
+    existing_notes = str(app.get("notes") or "")
+    notes = existing_notes if bool(getattr(args, "preserve_notes", False)) and existing_notes else score_notes
     update_application(
         app["id"],
         {
@@ -8721,6 +9118,7 @@ def command_score_job(args: argparse.Namespace) -> None:
             "ats_score": best_evaluation.get("ats_score", ""),
             "experience_bucket": best_evaluation.get("experience_bucket", ""),
             "experience_requirements": list(best_evaluation.get("experience_requirements") or []),
+            "location_bucket": best_evaluation.get("location_bucket", app.get("location_bucket", "")),
             "status": selected_status,
             "dealbreakers": list(best_evaluation.get("dealbreakers") or []),
             "action_items": list(best_evaluation.get("action_items") or []),
@@ -8732,10 +9130,7 @@ def command_score_job(args: argparse.Namespace) -> None:
             "target_track": "" if best_track_id == "default" else best_track_id,
             "matched_tracks": matched_tracks,
             "resume_file": best_evaluation.get("resume_file", ""),
-            "notes": "; ".join(
-                list(best_evaluation.get("dealbreakers") or [])
-                or list(best_evaluation.get("action_items") or [])
-            ),
+            "notes": notes,
             "track_evaluations": evaluations,
             "last_scored_at": now_utc_iso(),
         },
@@ -8756,6 +9151,8 @@ def job_text_fetch_failure_reason(jd_text: str) -> str:
     if len(text) <= 300:
         transient_markers = [
             "workday is currently unavailable",
+            "javascript is disabled",
+            "verify that you're not a robot",
             "bad gateway",
             "service unavailable",
             "gateway timeout",
@@ -8803,6 +9200,7 @@ def render_score_report(app: dict[str, Any], score: dict[str, Any]) -> str:
         - Fit score: {score['fit_score']}/10
         - ATS score: {score['ats_score']}/100
         - Status: {score['status']}
+        - Location bucket: {score.get('location_bucket', 'maybe')}
         - Experience bucket: {score.get('experience_bucket', 'unknown')}
         - Experience requirements: {experience_requirements}
 
@@ -9110,6 +9508,8 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         statuses = {"needs_retry"}
     elif not args.status and bucket == "skipped":
         statuses = {"skipped"}
+    elif not args.status and bucket == "rejected":
+        statuses = {"found", "prepared", "needs_review", "scored", "skipped"}
     else:
         statuses = set(args.status or ["prepared", "needs_review", "scored"])
     tracker = load_tracker()
@@ -9140,47 +9540,57 @@ def command_application_backlog(args: argparse.Namespace) -> None:
                 if field in evaluation:
                     candidate_app[field] = evaluation[field]
             candidate_app["target_track"] = requested_track
-        if bucket == "maybe" and app.get("review_bucket") != "maybe" and app.get("discovery_bucket") != "maybe_backlog":
+        location_bucket = application_location_bucket(candidate_app)
+        rejection_reasons = recommendation_rejection_reasons(candidate_app)
+        if bucket == "maybe" and not is_maybe_backlog_app(app) and location_bucket != "maybe":
+            continue
+        if bucket == "maybe" and rejection_reasons:
             continue
         if bucket == "retry" and candidate_app.get("status") != "needs_retry":
             continue
         if bucket == "skipped" and candidate_app.get("status") != "skipped":
             continue
-        if bucket == "priority" and (
+        if bucket == "rejected" and not rejection_reasons:
+            continue
+        if bucket in {"priority", "relocation"} and (
             app.get("review_bucket") == "maybe"
             or app.get("discovery_bucket") == "maybe_backlog"
             or candidate_app.get("status") in {"needs_retry", "skipped"}
         ):
             continue
+        if bucket == "priority" and location_bucket != "preferred":
+            continue
+        if bucket == "relocation" and location_bucket != "relocation":
+            continue
         if candidate_app.get("status") not in statuses:
             continue
-        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped"} else args.min_fit
+        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped", "rejected"} else args.min_fit
         if numeric_score(candidate_app.get("fit_score")) < min_fit:
             continue
         filter_text = application_filter_text(candidate_app)
-        if args.preferred_locations and not matches_preferred_location(filter_text):
+        if args.preferred_locations and location_bucket != "preferred":
             continue
         if args.exclude_years and has_year_requirement(filter_text, args.exclude_years):
             continue
-        if bucket == "priority" and experience_requirement_bucket(candidate_app) == "3_plus":
+        if bucket in {"priority", "relocation"} and experience_requirement_bucket(candidate_app) == "3_plus":
             continue
-        if bucket == "priority" and has_seniority_title_signal(candidate_app):
+        if bucket in {"priority", "relocation"} and has_seniority_title_signal(candidate_app):
             continue
-        if bucket == "priority" and has_phd_signal(candidate_app):
+        if bucket in {"priority", "relocation"} and has_phd_signal(candidate_app):
             continue
         if args.hide_intern and re.search(r"\bintern(ship)?\b", filter_text):
             continue
         apps.append(candidate_app)
 
     apps.sort(key=recommendation_sort_key, reverse=True)
-    if bucket == "priority":
+    if bucket in {"priority", "relocation"}:
         apps = cap_recommendations_by_company(apps, getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT))
     if args.limit and args.limit > 0:
         apps = apps[: args.limit]
 
     rows = [
-        "| Fit | ATS | Experience | Status | Bucket | Company | Role | Location | Posted/Found | ID |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Fit | ATS | Experience | Status | Review Bucket | Location Bucket | Company | Role | Location | Posted/Found | ID |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for app in apps:
         posted = app.get("posted_at") or app.get("date_found") or ""
@@ -9193,6 +9603,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
                     experience_requirement_bucket(app),
                     str(app.get("status", "")),
                     str(app.get("review_bucket") or app.get("discovery_bucket") or "").replace("|", "\\|"),
+                    application_location_bucket(app),
                     str(app.get("company", "")).replace("|", "\\|"),
                     str(app.get("role", "")).replace("|", "\\|"),
                     str(app.get("location", "")).replace("|", "\\|"),
@@ -9214,7 +9625,7 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         - hide_intern: {bool(args.hide_intern)}
         - bucket: {getattr(args, "bucket", "") or "default"}
         - track: {requested_track or "all"}
-        - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket == "priority" else "none"}
+        - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket in {"priority", "relocation"} else "none"}
         - count: {len(apps)}
 
         """
@@ -9244,35 +9655,36 @@ def application_filter_text(app: dict[str, Any]) -> str:
 
 
 def matches_preferred_location(text: str) -> bool:
-    if re.search(r"\b(washington,\s*(?:district of columbia|dc)|district of columbia|washington\s+dc)\b", text):
-        if not re.search(r"\b(seattle|bellevue|redmond|kirkland|wa\b|washington state)\b", text):
-            return False
-    patterns = [
-        r"\bwa\b",
-        r"\bwashington\b",
-        r"\bseattle\b",
-        r"\bbellevue\b",
-        r"\bredmond\b",
-        r"\bkirkland\b",
-        r"\bca\b",
-        r"\bcalifornia\b",
-        r"\bsan francisco\b",
-        r"\bbay area\b",
-        r"\bsan jose\b",
-        r"\bmountain view\b",
-        r"\bsunnyvale\b",
-        r"\bpalo alto\b",
-        r"\bremote\s*-\s*usa\b",
-        r"\bremote\s*-\s*us\b",
-        r"\bremote,\s*usa\b",
-        r"\bremote,\s*us\b",
-        r"\bremote us\b",
-        r"\bremote usa\b",
-        r"\bus remote\b",
-        r"\bunited states remote\b",
-        r"\bremote \(us\)\b",
-    ]
-    return any(re.search(pattern, text) for pattern in patterns)
+    return location_preference_bucket(text, {}) == "preferred"
+
+
+def application_location_bucket(app: dict[str, Any]) -> str:
+    stored = str(app.get("location_bucket") or "").strip().lower()
+    if stored in {"preferred", "relocation", "maybe", "rejected"}:
+        return stored
+    return location_preference_bucket(str(app.get("location") or ""), {})
+
+
+def location_bucket_priority_score(bucket: str) -> int:
+    return {"preferred": 3, "relocation": 2, "maybe": 1, "rejected": 0}.get(bucket, 1)
+
+
+def recommendation_rejection_reasons(app: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    filter_text = application_filter_text(app)
+    if application_location_bucket(app) == "rejected":
+        reasons.append("outside_us")
+    if has_seniority_title_signal(app):
+        reasons.append("senior_or_level_iii")
+    if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
+        reasons.append("3_plus_years")
+    if has_phd_signal(app):
+        reasons.append("phd")
+    if re.search(r"\b(?:security clearance|active clearance|secret clearance|top secret|u\.s\. citizen|us citizen)\b", filter_text):
+        reasons.append("clearance_or_citizenship")
+    if app.get("dealbreakers") and not reasons:
+        reasons.append("dealbreaker")
+    return reasons
 
 
 def has_year_requirement(text: str, minimum: int) -> bool:
@@ -9416,6 +9828,7 @@ def recommendation_sort_key(app: dict[str, Any]) -> tuple[Any, ...]:
     return (
         -recommendation_risk_penalty(app),
         experience_bucket_priority_score(experience_requirement_bucket(app)),
+        location_bucket_priority_score(application_location_bucket(app)),
         numeric_score(app.get("fit_score")),
         numeric_score(app.get("ats_score")),
         str(app.get("posted_at") or app.get("date_found") or ""),
@@ -9452,7 +9865,9 @@ def daily_review_app_rows(
     for app in apps:
         if str(app.get("date_applied") or "").strip():
             continue
-        if bucket == "priority":
+        location_bucket = application_location_bucket(app)
+        rejection_reasons = recommendation_rejection_reasons(app)
+        if bucket in {"priority", "relocation"}:
             if app.get("status") not in {"prepared", "needs_review", "scored"}:
                 continue
             if is_maybe_backlog_app(app):
@@ -9461,9 +9876,10 @@ def daily_review_app_rows(
                 continue
             if numeric_score(app.get("fit_score")) < min_fit:
                 continue
-            filter_text = application_filter_text(app)
-            if not matches_preferred_location(filter_text):
+            expected_location_bucket = "preferred" if bucket == "priority" else "relocation"
+            if location_bucket != expected_location_bucket:
                 continue
+            filter_text = application_filter_text(app)
             if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
                 continue
             if has_seniority_title_signal(app):
@@ -9479,6 +9895,8 @@ def daily_review_app_rows(
                 continue
             if app.get("dealbreakers"):
                 continue
+            if rejection_reasons:
+                continue
             if numeric_score(app.get("fit_score")) < min_fit:
                 continue
             if numeric_score(app.get("ats_score")) < PROMOTED_MAYBE_MIN_ATS:
@@ -9493,7 +9911,14 @@ def daily_review_app_rows(
             if re.search(r"\bintern(ship)?\b", filter_text):
                 continue
         elif bucket == "maybe":
-            if not is_maybe_backlog_app(app):
+            if rejection_reasons:
+                continue
+            if not is_maybe_backlog_app(app) and location_bucket != "maybe":
+                continue
+        elif bucket == "rejected":
+            if app.get("status") not in {"found", "prepared", "needs_review", "scored", "skipped"}:
+                continue
+            if not rejection_reasons:
                 continue
         elif bucket == "retry":
             if app.get("status") != "needs_retry":
@@ -9511,7 +9936,7 @@ def daily_review_app_rows(
             continue
         rows.append(app)
     rows.sort(key=recommendation_sort_key, reverse=True)
-    if bucket in {"priority", "promoted_maybe"}:
+    if bucket in {"priority", "relocation", "promoted_maybe"}:
         rows = cap_recommendations_by_company(rows, company_limit)
     return rows[:limit] if limit > 0 else rows
 
@@ -9527,7 +9952,14 @@ def render_daily_review_app_section(title: str, apps: list[dict[str, Any]]) -> l
             f"{index}. [{app.get('fit_score', '')}/10 fit, {app.get('ats_score', '')}/100 ATS] "
             f"{app.get('company', '')} - {app.get('role', '')}"
         )
-        lines.append(f"   - Status: {app.get('status', '')}; bucket: {app.get('review_bucket') or app.get('discovery_bucket') or ''}")
+        lines.append(
+            f"   - Status: {app.get('status', '')}; review bucket: "
+            f"{app.get('review_bucket') or app.get('discovery_bucket') or ''}; "
+            f"location bucket: {application_location_bucket(app)}"
+        )
+        rejection_reasons = recommendation_rejection_reasons(app)
+        if rejection_reasons:
+            lines.append(f"   - Rejected because: {', '.join(rejection_reasons)}")
         lines.append(f"   - Experience: {experience_requirement_bucket(app)}")
         lines.append(f"   - Location: {app.get('location', '')}; posted/found: {posted}")
         lines.append(f"   - ID: {app.get('id', '')}")
@@ -9583,10 +10015,12 @@ def command_daily_review(args: argparse.Namespace) -> None:
     reports = discovery_reports_for_date(review_date, latest_only=not all_reports)
     reports_for_resolution = discovery_reports_for_date(review_date, latest_only=False) if not all_reports else reports
     priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit, args.company_limit)
+    relocation = daily_review_app_rows(apps, "relocation", args.min_fit, args.limit, args.company_limit)
     promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit, args.company_limit)
     promoted_ids = {str(app.get("id", "")) for app in promoted_maybe}
     maybe = daily_review_app_rows(apps, "maybe", 0, args.limit)
     maybe = [app for app in maybe if str(app.get("id", "")) not in promoted_ids]
+    rejected = daily_review_app_rows(apps, "rejected", 0, args.limit)
     retry = daily_review_app_rows(apps, "retry", 0, args.limit)
     source_issues: list[dict[str, Any]] = []
     for report in reports:
@@ -9603,16 +10037,20 @@ def command_daily_review(args: argparse.Namespace) -> None:
         "",
         f"- Discovery reports: {len(reports)}",
         f"- Priority candidates: {len(priority)}",
+        f"- Relocation candidates: {len(relocation)}",
         f"- Promoted maybe: {len(promoted_maybe)}",
         f"- Maybe backlog: {len(maybe)}",
+        f"- Rejected candidates: {len(rejected)}",
         f"- Retry needed: {len(retry)}",
         f"- Source issues: {len(source_issues)}",
         f"- Company limit: {args.company_limit if args.company_limit > 0 else 'none'}",
         "",
     ]
-    lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
     lines.extend(render_daily_review_app_section("Priority", priority))
+    lines.extend(render_daily_review_app_section("Relocation", relocation))
+    lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
     lines.extend(render_daily_review_app_section("Maybe Backlog", maybe))
+    lines.extend(render_daily_review_app_section("Rejected", rejected))
     lines.extend(render_daily_review_app_section("Retry Needed", retry))
     lines.extend(["## Source Health Issues", ""])
     if not source_issues:
@@ -10045,6 +10483,42 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--jd-file")
     score.add_argument("--track", help="Override the application target track while scoring.")
 
+    rescore = subcommands.add_parser(
+        "rescore-backlog",
+        help="Re-score recent unsubmitted tracker jobs without changing daily discovery behavior.",
+    )
+    rescore.add_argument("--since-hours", type=float, help="Re-score jobs posted or first found within this many hours.")
+    rescore.add_argument(
+        "--since-days",
+        type=float,
+        help="Re-score jobs posted or first found within this many days. Defaults to 30.",
+    )
+    rescore.add_argument(
+        "--status",
+        action="append",
+        help="Application status to include. Repeatable. Defaults to found, needs_review, needs_retry, and scored.",
+    )
+    rescore.add_argument(
+        "--track",
+        dest="tracks",
+        action="append",
+        help="Track to refresh. Repeatable. Defaults to each application's existing matched/evaluated tracks.",
+    )
+    rescore.add_argument(
+        "--all-tracks",
+        action="store_true",
+        help="Refresh every configured primary track for each selected job.",
+    )
+    rescore.add_argument("--limit", type=int, default=0, help="Maximum jobs to re-score. Use 0 for no limit.")
+    rescore.add_argument(
+        "--score-workers",
+        type=int,
+        default=4,
+        help="Number of concurrent JD fetch workers. Tracker writes remain serial.",
+    )
+    rescore.add_argument("--dry-run", action="store_true", help="Print selected jobs and tracks without changing files.")
+    rescore.add_argument("--quiet", action="store_true", help="Suppress per-job dry-run rows.")
+
     prepare = subcommands.add_parser("prepare-application", help="Generate local application materials.")
     prepare.add_argument("--id", required=True)
     prepare.add_argument("--track", help="Override the application target track while preparing materials.")
@@ -10101,7 +10575,7 @@ def build_parser() -> argparse.ArgumentParser:
     backlog.add_argument(
         "--preferred-locations",
         action="store_true",
-        help="Only include WA, CA, or Remote US roles.",
+        help="Only include preferred WA or Remote US roles.",
     )
     backlog.add_argument(
         "--exclude-years",
@@ -10111,7 +10585,7 @@ def build_parser() -> argparse.ArgumentParser:
     backlog.add_argument("--hide-intern", action="store_true", help="Hide internship/intern roles.")
     backlog.add_argument(
         "--bucket",
-        choices=["priority", "maybe", "retry", "skipped"],
+        choices=["priority", "relocation", "maybe", "rejected", "retry", "skipped"],
         help="Optional compatibility bucket view. Defaults to the original high-fit backlog behavior.",
     )
     backlog.add_argument(
@@ -10180,6 +10654,8 @@ def main() -> None:
         command_add_url(args)
     elif args.command == "score-job":
         command_score_job(args)
+    elif args.command == "rescore-backlog":
+        command_rescore_backlog(args)
     elif args.command == "prepare-application":
         command_prepare_application(args)
     elif args.command == "notify":

@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -113,6 +114,139 @@ def base_application() -> dict:
 
 
 class TrackEvaluationTest(unittest.TestCase):
+    def test_rescore_backlog_selects_recent_unsubmitted_supported_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            cutoff = job_search.parse_datetime("2026-07-01T00:00:00+00:00")
+            applications = [
+                {
+                    "id": "recent-found",
+                    "status": "found",
+                    "posted_at": "2026-06-01",
+                    "first_seen": "2026-07-16T12:00:00+00:00",
+                    "date_applied": "",
+                },
+                {
+                    "id": "recent-scored",
+                    "status": "scored",
+                    "date_found": "2026-07-15",
+                    "date_applied": "",
+                },
+                {
+                    "id": "already-applied",
+                    "status": "scored",
+                    "date_found": "2026-07-17",
+                    "date_applied": "2026-07-17",
+                },
+                {
+                    "id": "prepared-by-default",
+                    "status": "prepared",
+                    "date_found": "2026-07-17",
+                    "date_applied": "",
+                },
+                {
+                    "id": "old-scored",
+                    "status": "scored",
+                    "date_found": "2026-06-01",
+                    "date_applied": "",
+                },
+            ]
+
+            selected = job_search.select_rescore_backlog_applications(
+                applications,
+                cutoff,
+                set(job_search.DEFAULT_RESCORE_BACKLOG_STATUSES),
+            )
+
+            self.assertEqual([item[0]["id"] for item in selected], ["recent-found", "recent-scored"])
+            self.assertEqual(selected[0][2], "first_seen")
+
+    def test_rescore_all_tracks_forces_every_primary_track(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            app = {
+                "target_track": "general_sde",
+                "matched_tracks": ["general_sde"],
+                "track_evaluations": {"general_sde": {"fit_score": 9.0}},
+            }
+
+            tracks = job_search.rescore_tracks_for_application(app, [], all_tracks=True)
+
+            self.assertEqual(tracks, job_search.DEFAULT_DISCOVER_ALL_TRACKS)
+
+    def test_rescore_command_queues_existing_evaluation_and_preserves_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update(
+                {
+                    "status": "scored",
+                    "date_found": dt.date.today().isoformat(),
+                    "notes": "Human review note",
+                    "track_evaluations": {
+                        "general_sde": {
+                            **score_result(8.0, 75),
+                            "track_id": "general_sde",
+                        }
+                    },
+                }
+            )
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                since_hours=None,
+                since_days=30,
+                status=None,
+                tracks=["general_sde"],
+                all_tracks=False,
+                limit=0,
+                score_workers=2,
+                dry_run=False,
+                quiet=True,
+            )
+
+            with mock.patch.object(
+                job_search,
+                "execute_discovery_score_queue",
+                return_value={"selected_tasks": 1, "scoring_failed": 0},
+            ) as execute:
+                job_search.command_rescore_backlog(args)
+
+            queue, forwarded_args = execute.call_args.args
+            self.assertEqual(
+                [(task["app_id"], task["track"]) for task in queue],
+                [(app["id"], "general_sde")],
+            )
+            self.assertTrue(forwarded_args.preserve_notes)
+            self.assertEqual(forwarded_args.max_maybe_scores, 0)
+
+    def test_rescore_command_dry_run_does_not_execute_scoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update({"date_found": dt.date.today().isoformat()})
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                since_hours=None,
+                since_days=30,
+                status=None,
+                tracks=["general_sde"],
+                all_tracks=False,
+                limit=0,
+                score_workers=2,
+                dry_run=True,
+                quiet=False,
+            )
+
+            with mock.patch.object(job_search, "execute_discovery_score_queue") as execute:
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    job_search.command_rescore_backlog(args)
+
+            execute.assert_not_called()
+            self.assertIn("Backlog rescore dry run.", stdout.getvalue())
+            self.assertIn(app["id"], stdout.getvalue())
+
     def test_source_for_tracks_unions_track_queries_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -167,6 +301,31 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertEqual(saved["fit_score"], 9.1)
             self.assertEqual(saved["ats_score"], 82)
             self.assertTrue(Path(saved["score_report_path"]).exists())
+
+    def test_score_job_can_preserve_existing_human_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app["notes"] = "Keep this manual review note."
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+            score = score_result(8.8, 81)
+            score["action_items"] = ["Review one missing keyword."]
+
+            with mock.patch.object(job_search, "read_job_text", return_value="Real Python software engineer JD."):
+                with mock.patch.object(job_search, "score_text", return_value=score):
+                    job_search.command_score_job(
+                        argparse.Namespace(
+                            id=app["id"],
+                            jd_file=None,
+                            track="general_sde",
+                            preserve_notes=True,
+                            quiet=True,
+                        )
+                    )
+
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            self.assertEqual(tracker["applications"][0]["notes"], "Keep this manual review note.")
 
     def test_higher_new_track_becomes_legacy_top_level_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,6 +645,45 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertTrue(all(call.args[0].quiet for call in score_job.call_args_list))
             self.assertEqual(summary["unique_apps"], 1)
             self.assertEqual(summary["selected_tasks"], 2)
+
+    def test_rescore_queue_preserves_notes_when_scoring_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app["notes"] = "Keep this note."
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+            queue = [
+                {
+                    "app_id": app["id"],
+                    "track": "general_sde",
+                    "maybe": False,
+                    "priority": 1,
+                    "posted_timestamp": 1,
+                }
+            ]
+            args = argparse.Namespace(
+                max_maybe_scores=0,
+                score_workers=1,
+                preserve_notes=True,
+            )
+
+            with mock.patch.object(
+                job_search,
+                "prefetch_job_description",
+                return_value="/tmp/jd.md",
+            ):
+                with mock.patch.object(
+                    job_search,
+                    "command_score_job",
+                    side_effect=RuntimeError("test failure"),
+                ):
+                    summary = job_search.execute_discovery_score_queue(queue, args)
+
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["scoring_failed"], 1)
+            self.assertIn("Keep this note.", tracker["applications"][0]["notes"])
+            self.assertIn("Scoring failed: test failure", tracker["applications"][0]["notes"])
 
     def test_discover_all_quiet_suppresses_per_source_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
