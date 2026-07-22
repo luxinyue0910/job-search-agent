@@ -273,6 +273,10 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertIn("Forward Deployed Engineer", combined["keywords"])
             self.assertEqual(combined["keywords"].count("Software Engineer"), 1)
 
+            source["include_default_union_queries"] = False
+            compact = job_search.source_for_tracks(source, ["general_sde"])
+            self.assertEqual(compact["keywords"], ["Software Engineer"])
+
     def test_scores_each_track_from_one_cached_jd_and_keeps_higher_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)

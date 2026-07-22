@@ -91,6 +91,116 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(job_search.location_preference_bucket("", profile), "maybe")
             self.assertEqual(job_search.location_preference_bucket("Toronto, Canada", profile), "rejected")
             self.assertEqual(job_search.location_preference_bucket("Vancouver, WA", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("Spokane Valley", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("Richland, Washington", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("Wenatchee, WA", profile), "preferred")
+
+    def test_wa_traditional_it_titles_include_gis_security_erp_and_cloud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            profile = {"_track": {"id": "traditional_it_wa"}}
+
+            for role in [
+                "GIS Developer",
+                "Information Security Analyst",
+                "ERP Administrator",
+                "Cloud Administrator",
+                "DevOps Engineer",
+            ]:
+                with self.subTest(role=role):
+                    self.assertTrue(job_search.maybe_backlog_title_relevant({"role": role}, profile))
+
+    def test_classify_source_ignores_static_ats_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            pnnl_html = """
+                <link rel="icon" href="https://cms.jibecdn.com/prod/pnnl/assets/FAVICON.ico">
+                <script>window.jobsApi = '/api/jobs';</script>
+            """
+            with mock.patch.object(job_search, "fetch_url", return_value=pnnl_html):
+                result = job_search.classify_source(
+                    {"company": "PNNL", "platform": "custom", "url": "https://careers.pnnl.gov/"}
+                )
+
+            self.assertEqual(result["detected_platform"], "jibe")
+            self.assertEqual(result["detected_url"], "https://careers.pnnl.gov/")
+            self.assertEqual(result["source"]["api_url"], "https://careers.pnnl.gov/api/jobs")
+
+            talentbrew_html = """
+                <meta property="og:image" content="https://tbcdn.talentbrew.com/company/1/og-image.jpg">
+                <script>window.vendor = 'talentbrew';</script>
+            """
+            with mock.patch.object(job_search, "fetch_url", return_value=talentbrew_html):
+                result = job_search.classify_source(
+                    {"company": "Lamb Weston", "platform": "custom", "url": "https://careers.lambweston.com/"}
+                )
+
+            self.assertEqual(result["detected_platform"], "talentbrew")
+            self.assertEqual(result["detected_url"], "https://careers.lambweston.com/")
+            self.assertEqual(result["source"]["results_url"], "https://careers.lambweston.com/en/search-jobs/results")
+
+    def test_custom_source_prioritizes_technical_details_without_dropping_other_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            source = {
+                "company": "Example University",
+                "platform": "custom",
+                "url": "https://example.edu/postings/search",
+                "max_detail_pages": 1,
+            }
+            listing = """
+                <a href="/postings/search?sort=title">Applicant Portal</a>
+                <a href="/postings/1">Accountant</a>
+                <a href="/postings/2">Nurse</a>
+                <a href="/postings/3">GIS Developer</a>
+                <a href="/postings/3">View Details</a>
+            """
+            detail = """
+                <title>GIS Developer | Example University</title>
+                <script type="application/ld+json">{"datePosted":"2026-07-22"}</script>
+            """
+
+            def fake_fetch(url, timeout=30):
+                return listing if url.endswith("/postings/search") else detail
+
+            with mock.patch.object(job_search, "fetch_url", side_effect=fake_fetch):
+                jobs = job_search.find_links_for_source(source)
+
+            self.assertEqual(len(jobs), 3)
+            technical = next(job for job in jobs if "GIS Developer" in job["role"])
+            self.assertEqual(technical["posted_at"], "2026-07-22T00:00:00+00:00")
+            self.assertEqual(sum(bool(job.get("posted_at")) for job in jobs), 1)
+
+    def test_eightfold_source_can_filter_shared_board_by_operating_company(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            source = {"operating_companies": ["Fluke"]}
+
+            self.assertTrue(
+                job_search.eightfold_job_matches_source(
+                    source, {"efcustomTextOperatingcompany": ["Fluke"]}
+                )
+            )
+            self.assertFalse(
+                job_search.eightfold_job_matches_source(
+                    source, {"efcustomTextOperatingcompany": ["ServiceChannel"]}
+                )
+            )
+
+    def test_json_ld_parser_preserves_html_entities_inside_json_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            raw = """
+                <script type="application/ld+json">
+                {"@type":"JobPosting","title":"Data Analyst","datePosted":"2026-07-22",
+                 "description":"Use &quot;quoted&quot; values","url":"https://example.com/jobs/1"}
+                </script>
+            """
+
+            jobs = job_search.parse_json_ld_jobs(raw, "https://example.com/jobs/1", "Example")
+
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0]["posted_at"], "2026-07-22T00:00:00+00:00")
 
     def test_discovery_writes_relocation_and_unknown_location_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:
