@@ -196,15 +196,15 @@ DEFAULT_WORKDAY_KEYWORDS = [
 
 DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS = [
     "technical support",
-    "application support",
-    "help desk",
-    "service desk",
-    "desktop support",
-    "IT support",
-    "systems administrator",
-    "IT operations",
-    "implementation specialist",
-    "AI transformation",
+    "information technology",
+    "application",
+    "systems",
+    "data",
+    "network",
+    "security",
+    "GIS",
+    "ERP",
+    "DevOps",
 ]
 
 ATS_SEARCH_SITES = [
@@ -940,7 +940,9 @@ def source_for_tracks(source: dict[str, Any], track_ids: list[str]) -> dict[str,
             locations,
             [str(item) for item in track_source.get("locations", []) if str(item).strip()],
         )
-    selected["keywords"] = merge_unique(keywords, DISCOVER_ALL_ROLE_QUERIES)
+    if truthy_source_flag(source.get("include_default_union_queries"), default=True):
+        keywords = merge_unique(keywords, DISCOVER_ALL_ROLE_QUERIES)
+    selected["keywords"] = keywords
     if locations:
         selected["locations"] = locations
     return selected
@@ -2766,11 +2768,27 @@ def discover_eightfold_html_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
     for job in positions if isinstance(positions, list) else []:
         if not isinstance(job, dict):
             continue
+        if not eightfold_job_matches_source(source, job):
+            continue
         candidate = eightfold_candidate_from_job(source, job)
         if candidate:
             candidate["notes"] = "Eightfold HTML fallback; API was unavailable or blocked."
             candidates[candidate["url"]] = candidate
     return list(candidates.values())
+
+
+def eightfold_job_matches_source(source: dict[str, Any], job: dict[str, Any]) -> bool:
+    allowed = source.get("operating_companies") or source.get("operating_company") or []
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    allowed_values = {str(item).strip().lower() for item in allowed if str(item).strip()}
+    if not allowed_values:
+        return True
+    actual = job.get("efcustomTextOperatingcompany") or job.get("operatingCompany") or []
+    if isinstance(actual, str):
+        actual = [actual]
+    actual_values = {str(item).strip().lower() for item in actual if str(item).strip()}
+    return bool(allowed_values & actual_values)
 
 
 def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2819,6 +2837,8 @@ def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     break
                 for job in jobs:
                     if not isinstance(job, dict):
+                        continue
+                    if not eightfold_job_matches_source(source, job):
                         continue
                     candidate = eightfold_candidate_from_job(source, job, keyword=keyword, queried_location=location)
                     if candidate:
@@ -3322,10 +3342,14 @@ def discover_ripplehire_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
 def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unknown Company") -> list[dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     for match in re.finditer(r'<script[^>]+type=["\']application/(?:ld\+json|ld&#x2B;json)["\'][^>]*>(.*?)</script>', raw, flags=re.I | re.S):
+        payload = match.group(1).strip()
         try:
-            data = json.loads(html.unescape(match.group(1)).strip())
+            data = json.loads(payload)
         except json.JSONDecodeError:
-            continue
+            try:
+                data = json.loads(html.unescape(payload))
+            except json.JSONDecodeError:
+                continue
         items = data if isinstance(data, list) else [data]
         for item in items:
             if not isinstance(item, dict):
@@ -4669,7 +4693,10 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 if not link_match:
                     continue
                 url = normalize_job_url(urllib.parse.urljoin(results_url, html.unescape(link_match.group(1))))
-                role = html_to_text(re.search(r"<h2\b[^>]*>(.*?)</h2>", item, flags=re.I | re.S).group(1)) if re.search(r"<h2\b[^>]*>(.*?)</h2>", item, flags=re.I | re.S) else infer_role_from_url(url)
+                if url in candidates:
+                    continue
+                role_match = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", item, flags=re.I | re.S)
+                role = html_to_text(role_match.group(1)) if role_match else infer_role_from_url(url)
                 location = html_to_text(re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S).group(1)) if re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S) else ""
                 list_posted_at_match = re.search(r'<span\b[^>]*class=["\'][^"\']*job-date-posted[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S)
                 list_posted_at = normalize_datetime(html_to_text(list_posted_at_match.group(1))) if list_posted_at_match else ""
@@ -4678,7 +4705,11 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "job_number": str(link_match.group(2)),
                     "external_job_id": str(link_match.group(2)),
                 }
-                detail = talentbrew_detail_from_url(url, fallback)
+                detail = (
+                    talentbrew_detail_from_url(url, fallback)
+                    if truthy_source_flag(source.get("fetch_details"), default=True)
+                    else {}
+                )
                 candidates[url] = {
                     "company": company,
                     "role": role,
@@ -4698,6 +4729,20 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 found_this_page += 1
             if found_this_page == 0 or page_index >= total_pages:
                 break
+    detail_limit = int(source.get("fetch_detail_limit", 0) or 0)
+    if not truthy_source_flag(source.get("fetch_details"), default=True) and detail_limit > 0:
+        relevant = [candidate for candidate in candidates.values() if unclassified_technical_title_relevant(candidate)]
+        for candidate in relevant[:detail_limit]:
+            detail = talentbrew_detail_from_url(candidate["url"], candidate)
+            if not detail:
+                continue
+            candidate["posted_at"] = detail.get("posted_at", "") or candidate.get("posted_at", "")
+            candidate["updated_at"] = detail.get("updated_at", "") or candidate.get("updated_at", "")
+            candidate["job_number"] = detail.get("job_number", "") or candidate.get("job_number", "")
+            candidate["external_job_id"] = detail.get("external_job_id", "") or candidate.get("external_job_id", "")
+            candidate["_jd_text"] = detail.get("_jd_text", "") or candidate.get("_jd_text", "")
+            if detail.get("posted_at"):
+                candidate["freshness_source"] = "json_ld_datePosted"
     return list(candidates.values())
 
 
@@ -5253,9 +5298,12 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\b(?:help|service) desk (?:engineer|analyst|specialist|technician)\b",
         r"\bit operations (?:engineer|analyst|specialist|technician)\b",
         r"\b(?:systems?|business systems|application systems|it systems) (?:analyst|administrator|specialist)\b",
+        r"\b(?:network|cloud|server|infrastructure) (?:analyst|administrator|specialist|engineer)\b",
+        r"\b(?:information|cyber) security (?:analyst|administrator|specialist|engineer)\b",
         r"\b(?:database|data systems|data management|business intelligence|reporting|technology) analyst\b",
-        r"\b(?:application|applications|data systems|database|report|bi|integration) developer\b",
-        r"\b(?:workday|erp) (?:developer|analyst|specialist)\b",
+        r"\b(?:application|applications|data systems|database|report|bi|integration|gis) developer\b",
+        r"\b(?:workday|erp|gis) (?:developer|analyst|administrator|specialist)\b",
+        r"\b(?:devops|cloud operations) (?:engineer|analyst|specialist)\b",
         r"\b(?:qa|quality assurance) analyst\b",
         r"\b(?:technology|it|ai transformation|ai operations|ai enablement) coordinator\b",
         r"\b(?:implementation|integration|integrations|technical support|customer support) specialist\b",
@@ -5324,7 +5372,10 @@ US_STATE_ABBREVIATIONS = {
 }
 WA_LOCATION_PATTERN = re.compile(
     r"\b(?:washington state|seattle|bellevue|redmond|kirkland|tacoma|everett|renton|bothell|olympia|"
-    r"spokane|vancouver,?\s+wa|washington,?\s+(?:united states|usa|u\.s\.)|"
+    r"spokane|spokane valley|liberty lake|pullman|cheney|lacey|tumwater|bellingham|mount vernon|"
+    r"bremerton|silverdale|poulsbo|yakima|richland|kennewick|pasco|tri[- ]cities|wenatchee|"
+    r"ellensburg|moses lake|quincy|longview|centralia|aberdeen|walla walla|sunnyside|"
+    r"vancouver,?\s+wa|washington,?\s+(?:united states|usa|u\.s\.)|"
     r"wa,?\s+(?:united states|usa|u\.s\.))\b",
     flags=re.I,
 )
@@ -6726,6 +6777,7 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     platform = source.get("platform") or detect_platform(source["url"])
     base_url = source["url"].rstrip("/")
+    base_parsed = urllib.parse.urlparse(base_url)
     try:
         raw = fetch_url(base_url)
     except (urllib.error.URLError, TimeoutError) as error:
@@ -6749,9 +6801,14 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
         parsed_link = urllib.parse.urlparse(url)
         if parsed_link.scheme not in {"http", "https"}:
             continue
-        if re.search(r"\.(?:css|js|map|png|jpe?g|gif|svg|ico|pdf|zip)(?:$|[?#])", parsed_link.path, flags=re.I):
+        if re.search(r"\.(?:css|js|map|png|jpe?g|gif|svg|ico|pdf|zip|atom|rss|xml)(?:$|[?#])", parsed_link.path, flags=re.I):
             continue
         if platform == "custom":
+            if (
+                parsed_link.netloc.lower() == base_parsed.netloc.lower()
+                and parsed_link.path.rstrip("/") == base_parsed.path.rstrip("/")
+            ):
+                continue
             detail_hint = re.search(
                 r"(?:/job/|/jobs/|/position/|/positions/|/opening/|/openings/|requisition|posting)",
                 parsed_link.path,
@@ -6766,7 +6823,7 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
         text = html_to_text(label)
         role = text if 4 <= len(text) <= 120 else infer_role_from_url(url)
-        if not role or role.lower() in {"apply", "learn more", "view job"}:
+        if not role or role.lower() in {"apply", "learn more", "view job", "view details", "applicant portal"}:
             role = infer_role_from_url(url)
         links.append(
             {
@@ -6781,13 +6838,32 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
 
     unique: dict[str, dict[str, Any]] = {}
     for link in links:
+        existing = unique.get(link["url"])
+        generic_roles = {"apply", "learn more", "view job", "view details", "applicant portal"}
+        existing_role = str((existing or {}).get("role") or "").strip().lower()
+        new_role = str(link.get("role") or "").strip().lower()
+        if existing and existing_role not in generic_roles and new_role in generic_roles:
+            continue
+        if existing and existing_role and not re.fullmatch(r"(?:Posting )?\d+", existing_role, flags=re.I) and re.fullmatch(
+            r"(?:Posting )?\d+", new_role, flags=re.I
+        ):
+            continue
         unique[link["url"]] = link
     if platform != "custom" or source.get("parse_job_details", True) is False:
         return list(unique.values())
 
+    all_links = list(unique.values())
+    if truthy_source_flag(source.get("prioritize_technical_titles"), default=True):
+        all_links.sort(
+            key=lambda item: (
+                0 if unclassified_technical_title_relevant(item) else 1,
+                str(item.get("role") or "").lower(),
+            )
+        )
     max_detail_pages = int(source.get("max_detail_pages", 40))
+    detail_links = all_links[:max_detail_pages]
     enriched: list[dict[str, Any]] = []
-    for link in list(unique.values())[:max_detail_pages]:
+    for link in detail_links:
         try:
             detail_raw = fetch_url(link["url"], timeout=12)
         except Exception:  # noqa: BLE001
@@ -6824,7 +6900,8 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
         enriched.append(link)
-    return enriched
+    enriched_urls = {str(link.get("url") or "") for link in enriched}
+    return enriched + [link for link in all_links if str(link.get("url") or "") not in enriched_urls]
 
 
 def discover_static_job_board_jobs(source: dict[str, Any], platform: str, note: str) -> list[dict[str, Any]]:
@@ -7964,7 +8041,12 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         links.extend(re.findall(r'href=["\']([^"\']+)', raw, flags=re.I))
         links = [urllib.parse.urljoin(url, html.unescape(candidate)) for candidate in links if candidate]
         for candidate in links:
-            candidate_host = urllib.parse.urlparse(candidate).netloc.lower()
+            candidate_parsed = urllib.parse.urlparse(candidate)
+            candidate_host = candidate_parsed.netloc.lower()
+            if candidate_host in {"cms.jibecdn.com", "tbcdn.talentbrew.com", "static.careerpuck.com"}:
+                continue
+            if re.search(r"\.(?:css|js|map|png|jpe?g|gif|svg|ico|woff2?|ttf)(?:$|[?#])", candidate_parsed.path, flags=re.I):
+                continue
             if "careerpuck.com" in candidate_host and not (
                 candidate_host.startswith("app.") or candidate_host.startswith("api.")
             ):
@@ -7974,6 +8056,10 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
                 result["detected_platform"] = platform
                 result["detected_url"] = normalize_job_url(candidate)
                 break
+        if not result["detected_platform"] and re.search(r"jibecdn|jibeapply|/api/jobs", raw, flags=re.I):
+            result["detected_platform"] = "jibe"
+            result["detected_url"] = url
+            result["notes"] = "Jibe careers site detected from page assets/API references."
         if not result["detected_platform"] and re.search(r"phenom|phenompeople|phenom-people", raw, flags=re.I):
             result["detected_platform"] = "phenom"
             result["detected_url"] = url
