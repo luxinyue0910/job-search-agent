@@ -21,6 +21,7 @@ import html
 import io
 import http.cookiejar
 import json
+import math
 import os
 import re
 import signal
@@ -196,6 +197,17 @@ DEFAULT_WORKDAY_KEYWORDS = [
 
 DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS = [
     "technical support",
+    "application support",
+    "help desk",
+    "service desk",
+    "desktop support",
+    "IT support",
+    "systems administrator",
+    "IT operations",
+    "implementation specialist",
+    "implementation engineer",
+    "IT service engineer",
+    "AI transformation",
     "information technology",
     "application",
     "systems",
@@ -635,7 +647,7 @@ def detect_platform(url: str) -> str:
         return "apple_jobs"
     if "providence.jobs" in host or "prod-search-api.jobsyn.org" in host:
         return "providence_jobs"
-    if host == "jacobs.jobs":
+    if host in {"jacobs.jobs", "ironmountain.jobs"}:
         return "jobsyn"
     if "careers.salesforce.com" in host:
         return "salesforce_jobs"
@@ -643,16 +655,109 @@ def detect_platform(url: str) -> str:
         return "governmentjobs"
     if host == "careers.zoom.us":
         return "zoom_careers"
+    if host == "pm.healthcaresource.com" and path.startswith("/cs/"):
+        return "healthcaresource"
     if "smartrecruiters.com" in host:
         return "smartrecruiters"
+    if host == "bb3jobboard.topechelon.com":
+        return "topechelon"
+    if host == "sta.smithgardens.com" and path.startswith("/careers"):
+        return "cyber_recruiter"
+    if path.endswith("/careers.aspx") and re.search(
+        r"(?:^|&)(?:type|req)=",
+        urllib.parse.urlparse(url).query,
+        flags=re.I,
+    ):
+        return "cyber_recruiter"
+    if "applicantpro.com" in host:
+        return "applicantpro"
+    if host.endswith(".viewpointhr-ats.com") or host.endswith(".hiringthing.com"):
+        return "hiringthing"
+    if host.endswith(".viewpointforcloud.com") and path.startswith("/careers"):
+        return "viewpoint_for_cloud"
+    if host == "careers.hireology.com" or (
+        host.endswith(".hireology.com")
+        and host not in {"api.hireology.com", "app.hireology.com"}
+    ):
+        return "hireology"
+    if host.endswith(".applicantstack.com") and path.startswith("/x/"):
+        return "applicantstack"
     if "icims.com" in host:
         return "icims"
+    if host.endswith(".clearcompany.com") and "/careers" in path:
+        return "clearcompany"
+    if host == "recruitingbypaycor.com":
+        return "paycor"
+    if host.endswith(".prismhrtalent.com"):
+        return "prismhr"
+    if host.endswith(".joveo.site"):
+        return "joveo"
+    if host in {"www.amentumcareers.com", "careers.equinix.com"}:
+        return "clinch"
+    if host == "careers.atkinsrealis.com":
+        return "atkins_jobs"
+    if host == "isgpoweredbydata.blob.core.windows.net" or (
+        host == "jobs.localjobnetwork.com" and "/apply/add/" in path
+    ):
+        return "isg_poweredby"
+    if host == "recruiting.paylocity.com" and "/recruiting/jobs" in path:
+        return "paylocity"
+    if host == "portal.dynamicsats.com" and "/joblisting/" in path:
+        return "dynamicsats"
+    if host == "bms.hanford.gov" and "/hrisjp/jobslist.aspx" in path:
+        return "hanford_bms"
+    if host.endswith("dayforcehcm.com"):
+        return "dayforce"
+    if host.endswith(".mykronos.com") and "/ta/" in path and ".careers" in path:
+        return "kronos_careers"
+    if host == "myjobs.adp.com":
+        return "adp_myjobs"
+    if host in {"workforcenow.adp.com", "workforcenow.cloud.adp.com"} and "/mdf/recruitment/recruitment.html" in path:
+        return "adp_workforce_now"
+    if host == "www2.appone.com" or (
+        host == "recruiting.myapps.paychex.com"
+        and ("appone" in path or "maininforeq.asp" in path)
+    ):
+        return "appone"
+    if host == "jobs.slalom.com":
+        return "avature"
+    if host == "jubilantcareer.jubl.com":
+        return "jubilant_careers"
     if host == "careers.bankofamerica.com":
         return "boa_careers"
     if ("oraclecloud.com" in host and ("/candidateexperience/" in path or "/cx_" in path)) or "/sites/cx_" in path:
         return "oracle_cx"
     if "jobvite.com" in host:
         return "jobvite"
+    if host == "cta.cadienttalent.com":
+        return "cadient"
+    if host.endswith(".taleo.net") and (
+        "/careersection/" in path or "/ats/careers/v2/" in path
+    ):
+        return "taleo"
+    if host == "careers.pageuppeople.com" and "/listing" in path:
+        return "pageup"
+    if host.endswith("jobappnetwork.com") or host in {
+        "databankcareers.com",
+        "www.databankcareers.com",
+    }:
+        return "talentreef"
+    if (
+        host.endswith(".peopleadmin.com")
+        or host in {"employment.plu.edu", "jobs.hr.ewu.edu"}
+    ) and "/postings" in path:
+        return "peopleadmin"
+    if "paycomonline.net" in host and "/v4/ats/" in path:
+        return "paycom"
+    if (
+        host.endswith(".ultipro.com")
+        or host.endswith(".rec.pro.ukg.net")
+    ) and "/jobboard/" in path:
+        return "ultipro"
+    if host.endswith(".zohorecruit.com") and "/jobs/" in path:
+        return "zoho_recruit"
+    if host.endswith(".breezy.hr"):
+        return "breezy"
     if "workable.com" in host:
         return "workable"
     if "bamboohr.com" in host:
@@ -667,6 +772,8 @@ def detect_platform(url: str) -> str:
         return "builtin_jobs"
     if host.startswith("jobs.") and any(domain in host for domain in ["madrona.com", "a16z.com", "lsvp.com"]):
         return "getro_jobs"
+    if host == "jobs.psl.com":
+        return "consider_jobs"
     if "news.ycombinator.com" in host or "hn.algolia.com" in host:
         return "hn_who_is_hiring"
     if path.endswith(".xml") or "/services/rss/" in path:
@@ -675,14 +782,24 @@ def detect_platform(url: str) -> str:
         return "jibe"
     if "talentbrew.com" in host or "tbcdn.talentbrew.com" in host or "jobs.walgreens.com" in host:
         return "talentbrew"
+    if host.endswith(".ttcportals.com"):
+        return "ttcportals"
+    if host.endswith(".workgr8.com"):
+        return "workgr8"
     if "careerpuck.com" in host:
         return "careerpuck"
     if "pinpointhq.com" in host:
         return "pinpoint"
     if "brassring.com" in host:
         return "brassring"
+    if host.endswith(".inforcloudsuite.com") and "/hcm/jobs/" in path:
+        return "infor_cloudsuite"
     if "careers.kula.ai" in host:
         return "kula"
+    if "applytojob.com" in host:
+        return "jazzhr"
+    if host.endswith("mckinstry.com") and "/join-us/jobs" in path:
+        return "wordpress_taleo"
     return "custom"
 
 
@@ -704,6 +821,25 @@ def fetch_url(url: str, timeout: int = 20) -> str:
         return response.read().decode(charset, errors="replace")
 
 
+def fetch_url_with_opener(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    headers: dict[str, str] | None = None,
+    timeout: int = 20,
+) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+            **(headers or {}),
+        },
+    )
+    with opener.open(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
 def fetch_json(url: str, timeout: int = 20) -> Any:
     request = urllib.request.Request(
         url,
@@ -717,7 +853,30 @@ def fetch_json(url: str, timeout: int = 20) -> Any:
         return json.loads(response.read().decode(charset, errors="replace"))
 
 
+def fetch_json_with_headers(url: str, headers: dict[str, str], timeout: int = 20) -> Any:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "application/json,*/*;q=0.8",
+            **headers,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
 def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any:
+    return fetch_json_post_with_headers(url, payload, {}, timeout=timeout)
+
+
+def fetch_json_post_with_headers(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int = 20,
+) -> Any:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -725,6 +884,7 @@ def fetch_json_post(url: str, payload: dict[str, Any], timeout: int = 20) -> Any
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json,*/*;q=0.8",
             "Content-Type": "application/json",
+            **headers,
         },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -777,6 +937,23 @@ def fetch_json_with_opener(opener: urllib.request.OpenerDirector, url: str, head
         return json.loads(response.read().decode(charset, errors="replace"))
 
 
+def fetch_json_post_with_opener(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int = 20,
+) -> Any:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+    )
+    with opener.open(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
 def html_to_text(raw: str) -> str:
     raw = re.sub(r"(?is)<script.*?</script>", " ", raw)
     raw = re.sub(r"(?is)<style.*?</style>", " ", raw)
@@ -796,23 +973,33 @@ def parse_datetime(value: Any) -> dt.datetime | None:
     raw = str(value).strip()
     if not raw:
         return None
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    raw = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", raw)
-    loose_date = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    original_raw = raw
+    iso_raw = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    iso_raw = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", iso_raw)
+    loose_date = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", iso_raw)
     if loose_date:
-        raw = f"{loose_date.group(1)}-{int(loose_date.group(2)):02d}-{int(loose_date.group(3)):02d}"
+        iso_raw = f"{loose_date.group(1)}-{int(loose_date.group(2)):02d}-{int(loose_date.group(3)):02d}"
     try:
-        parsed = dt.datetime.fromisoformat(raw)
+        parsed = dt.datetime.fromisoformat(iso_raw)
     except ValueError:
         try:
-            parsed = email.utils.parsedate_to_datetime(raw)
+            parsed = email.utils.parsedate_to_datetime(original_raw)
         except (TypeError, ValueError):
             parsed = None
     if parsed is None:
-        for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%m/%d/%Y"):
+        for fmt in (
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%d %B %Y",
+            "%d %b %Y",
+            "%d-%b-%Y",
+            "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%y %H:%M:%S",
+            "%m/%d/%Y",
+            "%m/%d/%y",
+        ):
             try:
-                parsed = dt.datetime.strptime(raw, fmt)
+                parsed = dt.datetime.strptime(original_raw, fmt)
                 break
             except ValueError:
                 parsed = None
@@ -836,10 +1023,30 @@ def relative_search_days(args: argparse.Namespace) -> float | None:
 
 def normalize_job_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url.strip())
+    host = parsed.netloc.lower()
+    if host == "governmentjobs.com" or host.endswith(".governmentjobs.com"):
+        job_match = re.search(r"/(?:careers/[^/]+/)?jobs/(?:newprint/)?(\d+)", parsed.path, flags=re.I)
+        if job_match:
+            return f"https://www.governmentjobs.com/jobs/{job_match.group(1)}"
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     query = [(key, value) for key, value in query if not key.lower().startswith("utm_")]
+    if host.endswith(".icims.com"):
+        presentation_params = {"in_iframe", "mobile", "needsredirect", "height", "width"}
+        query = [(key, value) for key, value in query if key.lower() not in presentation_params]
     fragment = ""
     if "ripplehire.com" in parsed.netloc.lower() and re.search(r"(?:detail|apply)/job/[^/?#]+", urllib.parse.unquote(parsed.fragment or "")):
+        fragment = parsed.fragment
+    if host == "pm.healthcaresource.com" and re.match(
+        r"/?job/\d+",
+        urllib.parse.unquote(parsed.fragment or ""),
+        flags=re.I,
+    ):
+        fragment = parsed.fragment
+    if host == "bb3jobboard.topechelon.com" and re.match(
+        r"/?[0-9a-f-]{36}/detail(?:$|[/?])",
+        urllib.parse.unquote(parsed.fragment or ""),
+        flags=re.I,
+    ):
         fragment = parsed.fragment
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query), fragment=fragment)).rstrip("/")
 
@@ -1008,6 +1215,8 @@ def workday_source_parts(source: dict[str, Any]) -> tuple[str, str, str] | None:
     url = source.get("url", "")
     parsed = urllib.parse.urlparse(url)
     host = str(source.get("host") or parsed.netloc).strip()
+    if "://" in host:
+        host = urllib.parse.urlparse(host).netloc
     if "myworkdayjobs.com" not in host and "myworkdaysite.com" not in host:
         return None
     tenant = str(source.get("tenant") or "").strip()
@@ -1044,6 +1253,16 @@ def parse_greenhouse_published_at(url: str) -> str:
     return ""
 
 
+def source_location_allowed(source: dict[str, Any], location: str) -> bool:
+    pattern = str(source.get("location_include_regex") or "").strip()
+    if not pattern:
+        return True
+    try:
+        return bool(re.search(pattern, location, flags=re.I))
+    except re.error:
+        return True
+
+
 def discover_greenhouse_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     board = greenhouse_board_from_source(source)
     if not board:
@@ -1066,6 +1285,8 @@ def discover_greenhouse_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             posted_at = parse_greenhouse_published_at(url)
         updated_at = normalize_datetime(job.get("updated_at"))
         location = job.get("location", {}).get("name", "") if isinstance(job.get("location"), dict) else job.get("location", "")
+        if not source_location_allowed(source, str(location or "")):
+            continue
         candidates.append(
             {
                 "company": company,
@@ -1100,13 +1321,16 @@ def discover_lever_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         url = normalize_job_url(str(job.get("hostedUrl") or job.get("applyUrl") or ""))
         if not url:
             continue
+        location = str(categories.get("location", "") or "")
+        if not source_location_allowed(source, location):
+            continue
         candidates.append(
             {
                 "company": company,
                 "role": job.get("text") or infer_role_from_url(url),
                 "url": url,
                 "platform": "lever",
-                "location": categories.get("location", "") or "",
+                "location": location,
                 "posted_at": normalize_datetime(job.get("createdAt")),
                 "updated_at": normalize_datetime(job.get("updatedAt")),
                 "source": source.get("url", ""),
@@ -1133,13 +1357,16 @@ def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         url = normalize_job_url(str(job.get("jobUrl") or ""))
         if not url:
             continue
+        location = str(job.get("location", "") or "")
+        if not source_location_allowed(source, location):
+            continue
         candidates.append(
             {
                 "company": company,
                 "role": job.get("title") or infer_role_from_url(url),
                 "url": url,
                 "platform": "ashby",
-                "location": job.get("location", "") or "",
+                "location": location,
                 "posted_at": normalize_datetime(job.get("publishedDate") or job.get("publishedAt") or job.get("createdAt")),
                 "updated_at": normalize_datetime(job.get("updatedAt")),
                 "source": source.get("url", ""),
@@ -1428,13 +1655,16 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    query_keywords = [""] if truthy_source_flag(source.get("search_all"), default=False) else [
+        str(item) for item in keywords if str(item).strip() or len(keywords) == 1
+    ]
     limit = int(source.get("page_size", 20))
     max_pages = int(source.get("max_pages", 5))
     candidates: dict[str, dict[str, Any]] = {}
     endpoint = workday_api_url(host, tenant, site, "/jobs")
     detail_cache: dict[str, dict[str, Any]] = {}
 
-    for keyword in [str(item) for item in keywords if str(item).strip() or len(keywords) == 1]:
+    for keyword in query_keywords:
         for page_index in range(max_pages):
             payload = {
                 "appliedFacets": source.get("applied_facets", {}),
@@ -1481,6 +1711,7 @@ def discover_workday_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "posted_at": posted_at,
                     "updated_at": "",
                     "source": source.get("url", ""),
+                    "source_query": keyword or "all",
                     "external_job_id": job.get("bulletFields", [""])[0] if isinstance(job.get("bulletFields"), list) else "",
                     "notes": "",
                 }
@@ -2276,6 +2507,36 @@ def discover_hirebridge_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def successfactors_detail_metadata(url: str) -> dict[str, str]:
+    try:
+        raw = fetch_url(url, timeout=15)
+    except Exception:  # noqa: BLE001
+        return {}
+    date_match = re.search(
+        r'<meta\b[^>]*itemprop=["\']datePosted["\'][^>]*content=["\']([^"\']+)["\']',
+        raw,
+        flags=re.I | re.S,
+    )
+    if not date_match:
+        date_match = re.search(
+            r'<meta\b[^>]*content=["\']([^"\']+)["\'][^>]*itemprop=["\']datePosted["\']',
+            raw,
+            flags=re.I | re.S,
+        )
+    job_number_match = re.search(
+        r'<span\b[^>]*data-careersite-propertyid=["\']customfield1["\'][^>]*>(.*?)</span>',
+        raw,
+        flags=re.I | re.S,
+    )
+    return {
+        "posted_at": normalize_datetime(
+            html.unescape(date_match.group(1)) if date_match else ""
+        ),
+        "job_number": html_to_text(job_number_match.group(1)) if job_number_match else "",
+        "_jd_text": html_to_text(raw),
+    }
+
+
 def discover_successfactors_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     base_url = str(source.get("url") or "").rstrip("/")
@@ -2283,11 +2544,14 @@ def discover_successfactors_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    query_keywords = [""] if truthy_source_flag(source.get("search_all"), default=False) else [
+        str(item) for item in keywords if str(item).strip()
+    ]
     max_pages = int(source.get("max_pages", 3))
     page_size = int(source.get("page_size", 25))
     candidates: dict[str, dict[str, Any]] = {}
 
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
+    for keyword in query_keywords:
         for page_index in range(max_pages):
             params = {
                 "q": keyword,
@@ -2345,6 +2609,102 @@ def discover_successfactors_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
                 }
             if len(rows) < page_size:
                 break
+    if truthy_source_flag(source.get("fetch_details"), default=False):
+        selected = list(candidates.values())[: max(0, int(source.get("max_detail_pages", len(candidates))))]
+        detail_workers = max(1, int(source.get("detail_workers", 8)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            future_to_candidate = {
+                executor.submit(successfactors_detail_metadata, candidate["url"]): candidate
+                for candidate in selected
+            }
+            for future in concurrent.futures.as_completed(future_to_candidate):
+                candidate = future_to_candidate[future]
+                with contextlib.suppress(Exception):
+                    detail = future.result()
+                    if detail.get("posted_at"):
+                        candidate["posted_at"] = detail["posted_at"]
+                        candidate["freshness_source"] = "successfactors_datePosted"
+                    if detail.get("job_number"):
+                        candidate["job_number"] = detail["job_number"]
+                    if detail.get("_jd_text"):
+                        candidate["_jd_text"] = detail["_jd_text"]
+    return list(candidates.values())
+
+
+def isg_poweredby_blob_id(source: dict[str, Any]) -> str:
+    configured = str(source.get("blob_id") or "").strip()
+    if configured:
+        return configured
+    raw = fetch_url(str(source.get("url") or ""))
+    for script_tag in re.findall(r"<script\b[^>]*>", raw, flags=re.I | re.S):
+        if "app-hook-v2.bundle.js" not in script_tag:
+            continue
+        key_match = re.search(r"\bkey=[\"']([^\"']+)[\"']", script_tag, flags=re.I)
+        if key_match:
+            return html.unescape(key_match.group(1)).strip()
+    return ""
+
+
+def discover_isg_poweredby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    blob_id = isg_poweredby_blob_id(source)
+    if not blob_id:
+        raise ValueError(f"Could not find ISG PoweredBy feed key for {company}")
+    feed_url = str(
+        source.get("feed_url")
+        or f"https://isgpoweredbydata.blob.core.windows.net/public-data/{urllib.parse.quote(blob_id)}.json"
+    )
+    data = fetch_json(feed_url)
+    jobs = data if isinstance(data, list) else []
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("JobId") or job.get("jobId") or "").strip()
+        title = str(job.get("Title") or job.get("title") or "").strip()
+        if not job_id or not title:
+            continue
+        locations = job.get("Locations") or job.get("locations") or []
+        location_parts: list[str] = []
+        if isinstance(locations, list):
+            for location in locations:
+                if not isinstance(location, dict):
+                    continue
+                city = str(location.get("City") or location.get("city") or "").strip()
+                state = str(location.get("StateCode") or location.get("stateCode") or "").strip()
+                value = ", ".join(item for item in [city, state] if item)
+                if value and value not in location_parts:
+                    location_parts.append(value)
+        apply_url = normalize_job_url(str(job.get("ApplyUrl") or job.get("applyUrl") or ""))
+        if not apply_url:
+            apply_url = f"https://jobs.localjobnetwork.com/apply/add/{urllib.parse.quote(job_id)}"
+        description = html_to_text(str(job.get("Description") or job.get("description") or ""))
+        details = [
+            description,
+            str(job.get("ExperienceText") or job.get("experienceText") or "").strip(),
+            str(job.get("EducationText") or job.get("educationText") or "").strip(),
+            str(job.get("SalaryRange") or job.get("salaryRange") or "").strip(),
+            str(job.get("SalaryNotes") or job.get("salaryNotes") or "").strip(),
+            str(job.get("WorkHours") or job.get("workHours") or "").strip(),
+        ]
+        candidates[apply_url] = {
+            "company": company,
+            "role": title,
+            "url": apply_url,
+            "platform": "isg_poweredby",
+            "location": " + ".join(location_parts),
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": source.get("url", feed_url),
+            "source_query": f"blob_id={blob_id}",
+            "notes": (
+                "Official ISG PoweredBy public job feed. The feed does not expose "
+                "publication timestamps, so freshness begins at first_seen."
+            ),
+            "_jd_text": "\n\n".join(item for item in details if item),
+        }
     return list(candidates.values())
 
 
@@ -2749,31 +3109,41 @@ def eightfold_candidate_from_job(source: dict[str, Any], job: dict[str, Any], ke
 
 
 def discover_eightfold_html_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
-    base_url = str(source.get("url") or source.get("base_url") or "").strip()
-    if not base_url:
-        return []
-    try:
-        raw = html.unescape(fetch_url(base_url))
-    except Exception as error:  # noqa: BLE001
-        print(f"Could not fetch Eightfold careers page for {source.get('company', 'Unknown Company')}: {error}", file=sys.stderr)
-        return []
-    match = re.search(r'"positions"\s*:\s*', raw)
-    if not match:
-        return []
-    try:
-        positions, _ = json.JSONDecoder().raw_decode(raw[match.end() :])
-    except json.JSONDecodeError:
+    configured_urls = source.get("html_urls") or [
+        source.get("url") or source.get("base_url") or ""
+    ]
+    if isinstance(configured_urls, str):
+        configured_urls = [configured_urls]
+    page_urls = [str(item).strip() for item in configured_urls if str(item).strip()]
+    if not page_urls:
         return []
     candidates: dict[str, dict[str, Any]] = {}
-    for job in positions if isinstance(positions, list) else []:
-        if not isinstance(job, dict):
+    for page_url in page_urls:
+        try:
+            raw = html.unescape(fetch_url(page_url))
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"Could not fetch Eightfold careers page for {source.get('company', 'Unknown Company')}: {error}",
+                file=sys.stderr,
+            )
             continue
-        if not eightfold_job_matches_source(source, job):
+        match = re.search(r'"positions"\s*:\s*', raw)
+        if not match:
             continue
-        candidate = eightfold_candidate_from_job(source, job)
-        if candidate:
-            candidate["notes"] = "Eightfold HTML fallback; API was unavailable or blocked."
-            candidates[candidate["url"]] = candidate
+        try:
+            positions, _ = json.JSONDecoder().raw_decode(raw[match.end() :])
+        except json.JSONDecodeError:
+            continue
+        for job in positions if isinstance(positions, list) else []:
+            if not isinstance(job, dict):
+                continue
+            if not eightfold_job_matches_source(source, job):
+                continue
+            candidate = eightfold_candidate_from_job(source, job)
+            if candidate:
+                candidate["source_query"] = page_url
+                candidate["notes"] = "Eightfold HTML fallback; API was unavailable or blocked."
+                candidates[candidate["url"]] = candidate
     return list(candidates.values())
 
 
@@ -2797,6 +3167,8 @@ def discover_eightfold_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     domain = str(source.get("domain") or urllib.parse.urlparse(base_url).netloc.replace(".eightfold.ai", ".com")).strip()
     if not base_url or not domain:
         return []
+    if truthy_source_flag(source.get("html_only"), default=False):
+        return discover_eightfold_html_jobs(source)
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
@@ -3022,6 +3394,7 @@ def jobsyn_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
     title_slug = str(job.get("title_slug") or slugify(role)).strip("/")
     city = str(job.get("city_exact") or "remote").strip()
     city_slug = slugify(city)
+    location_slug = slugify(str(job.get("location_exact") or city))
     template = str(source.get("job_url_template") or "").strip()
     if template:
         return normalize_job_url(
@@ -3031,6 +3404,7 @@ def jobsyn_job_url(source: dict[str, Any], job: dict[str, Any]) -> str:
                 role_slug=urllib.parse.quote(role_slug),
                 title_slug=urllib.parse.quote(title_slug),
                 city_slug=urllib.parse.quote(city_slug),
+                location_slug=urllib.parse.quote(location_slug),
             )
         )
     origin = str(source.get("origin") or urllib.parse.urlparse(str(source.get("url") or "")).netloc).strip()
@@ -3047,19 +3421,25 @@ def discover_jobsyn_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    queries = (
+        [""]
+        if truthy_source_flag(source.get("search_all"), default=False)
+        else [str(item) for item in keywords if str(item).strip()]
+    )
     page_size = int(source.get("page_size", 20))
     max_pages = int(source.get("max_pages", 3))
     api_base = str(source.get("api_url") or "https://prod-search-api.jobsyn.org/api/v1/google-talent/search")
     candidates: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
+    for keyword in queries:
         for page_index in range(max_pages):
             params = {
-                "q": keyword,
                 "page": str(page_index + 1),
                 "num_items": str(page_size),
                 "source": str(source.get("search_source") or "solr"),
                 "use_solr_filters": "true",
             }
+            if keyword:
+                params["q"] = keyword
             api_url = api_base + ("&" if "?" in api_base else "?") + urllib.parse.urlencode(params)
             request = urllib.request.Request(
                 api_url,
@@ -3077,6 +3457,11 @@ def discover_jobsyn_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 print(f"Could not fetch Jobsyn API for {company or origin} / {keyword}: {error}", file=sys.stderr)
                 break
             jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            featured_jobs = (
+                data.get("featured_jobs", []) if isinstance(data, dict) else []
+            )
+            if isinstance(featured_jobs, list):
+                jobs = featured_jobs + jobs
             if not jobs:
                 break
             for raw_job in jobs:
@@ -3098,7 +3483,14 @@ def discover_jobsyn_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     existing["location"] = "; ".join(merge_unique(str(existing.get("location") or "").split("; "), [location]))
                     continue
                 candidates[candidate_key] = {
-                    "company": company or str(job.get("company_exact") or origin).strip(),
+                    "company": (
+                        str(job.get("company_exact") or company or origin).strip()
+                        if truthy_source_flag(
+                            source.get("use_job_company"),
+                            default=False,
+                        )
+                        else company or str(job.get("company_exact") or origin).strip()
+                    ),
                     "role": str(job.get("title_exact") or job.get("title") or infer_role_from_url(url)).strip(),
                     "url": url,
                     "platform": "jobsyn",
@@ -3108,12 +3500,12 @@ def discover_jobsyn_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                     "posted_at": normalize_datetime(job.get("date_new") or job.get("date_added")),
                     "updated_at": normalize_datetime(job.get("date_updated")),
                     "source": source.get("url", f"https://{origin}/jobs/"),
-                    "source_query": keyword,
+                    "source_query": keyword or "all_jobs",
                     "notes": "Jobsyn direct search API adapter.",
                     "_jd_text": html_to_text(str(job.get("description") or "")),
                 }
             pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
-            if not pagination.get("has_more_pages") or len(jobs) < page_size:
+            if not pagination.get("has_more_pages"):
                 break
     return list(candidates.values())
 
@@ -3124,11 +3516,13 @@ def compact_location_text(value: Any) -> str:
     if isinstance(value, dict):
         parts = []
         address = value.get("address") if isinstance(value.get("address"), dict) else {}
-        for key in ["city", "region", "state", "stateProvince", "country", "countryName", "remote", "name", "addressLocality", "addressRegion", "addressCountry"]:
+        for key in ["city", "region", "state", "stateProvince", "country", "countryName", "name", "addressLocality", "addressRegion", "addressCountry"]:
             if value.get(key):
                 parts.append(str(value.get(key)))
             if address.get(key):
                 parts.append(str(address.get(key)))
+        if truthy_source_flag(value.get("remote"), default=False):
+            parts.append("Remote")
         return ", ".join(merge_unique(parts, []))
     if isinstance(value, list):
         return "; ".join(merge_unique([compact_location_text(item) for item in value if item], []))
@@ -3155,17 +3549,21 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    query_keywords = [""] if truthy_source_flag(source.get("search_all"), default=False) else [
+        str(item) for item in keywords if str(item).strip()
+    ]
     page_size = min(int(source.get("page_size", 50)), 100)
     max_pages = int(source.get("max_pages", 3))
     candidates: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
+    for keyword in query_keywords:
         for page_index in range(max_pages):
             params = {
-                "q": keyword,
                 "limit": str(page_size),
                 "offset": str(page_index * page_size),
                 "destination": "PUBLIC",
             }
+            if keyword:
+                params["q"] = keyword
             api_url = f"https://api.smartrecruiters.com/v1/companies/{urllib.parse.quote(identifier)}/postings?{urllib.parse.urlencode(params)}"
             try:
                 data = fetch_json(api_url)
@@ -3180,7 +3578,7 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
                     continue
                 job_id = str(job.get("id") or job.get("uuid") or "").strip()
                 role = str(job.get("name") or infer_role_from_url(job_id)).strip()
-                if not keyword_matches_title(keyword, role):
+                if keyword and not keyword_matches_title(keyword, role):
                     continue
                 url = normalize_job_url(str(job.get("ref") or job.get("postingUrl") or ""))
                 if (not url or "api.smartrecruiters.com" in urllib.parse.urlparse(url).netloc.lower()) and job_id:
@@ -3196,11 +3594,160 @@ def discover_smartrecruiters_jobs(source: dict[str, Any]) -> list[dict[str, Any]
                     "posted_at": normalize_datetime(job.get("releasedDate") or job.get("publishedDate") or job.get("createdOn")),
                     "updated_at": normalize_datetime(job.get("updatedDate") or job.get("lastUpdated")),
                     "source": source.get("url", f"https://careers.smartrecruiters.com/{identifier}"),
-                    "source_query": keyword,
+                    "source_query": keyword or "all",
                     "notes": f"SmartRecruiters direct adapter; company_identifier={identifier}",
                 }
             if len(jobs) < page_size:
                 break
+    return list(candidates.values())
+
+
+def topechelon_api_key(source: dict[str, Any]) -> str:
+    if source.get("api_key"):
+        return str(source["api_key"]).strip()
+    query = urllib.parse.parse_qs(
+        urllib.parse.urlparse(str(source.get("url") or "")).query
+    )
+    return str((query.get("board") or [""])[0]).strip()
+
+
+def topechelon_location_text(job: dict[str, Any]) -> str:
+    state = job.get("state")
+    if isinstance(state, dict):
+        state_text = str(
+            state.get("abbreviation")
+            or state.get("name")
+            or ""
+        ).strip()
+    else:
+        state_text = str(state or "").strip()
+    country = job.get("country")
+    if isinstance(country, dict):
+        country_text = str(
+            country.get("abbreviation")
+            or country.get("code")
+            or country.get("name")
+            or ""
+        ).strip()
+    else:
+        country_text = str(country or "").strip()
+    if country_text.upper() in {"US", "USA", "UNITED STATES"}:
+        country_text = ""
+    parts = [
+        str(job.get("city") or "").strip(),
+        state_text,
+        country_text,
+    ]
+    location = ", ".join(part for part in parts if part)
+    remote_option = str(job.get("remote_option") or "").strip().lower()
+    if truthy_source_flag(job.get("remote"), default=False) or remote_option in {
+        "remote",
+        "fully_remote",
+    }:
+        location = ", ".join(part for part in [location, "Remote"] if part)
+    return location
+
+
+def topechelon_job_url(api_key: str, job_id: str) -> str:
+    query = urllib.parse.urlencode({"board": api_key})
+    return normalize_job_url(
+        "https://bb3jobboard.topechelon.com/"
+        f"?{query}#/{urllib.parse.quote(job_id)}/detail"
+    )
+
+
+def discover_topechelon_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    api_key = topechelon_api_key(source)
+    if not api_key:
+        print(
+            f"Could not fetch Top Echelon jobs for {company}: missing public api_key",
+            file=sys.stderr,
+        )
+        return []
+    api_base = str(
+        source.get("api_base") or "https://bb3api.topechelon.com"
+    ).rstrip("/")
+    endpoint = f"{api_base}/job_board/job_searches/one_off_search.json"
+    max_pages = max(int(source.get("max_pages", 25)), 1)
+    timeout = int(source.get("timeout", 25))
+    candidates: dict[str, dict[str, Any]] = {}
+    for page in range(1, max_pages + 1):
+        api_url = f"{endpoint}?{urllib.parse.urlencode({'page': page})}"
+        try:
+            data = fetch_json_with_headers(
+                api_url,
+                {"Authorization": f"Apikey {api_key}"},
+                timeout=timeout,
+            )
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"Could not fetch Top Echelon jobs for {company}: {error}",
+                file=sys.stderr,
+            )
+            break
+        results = data.get("results") or [] if isinstance(data, dict) else []
+        if not isinstance(results, list) or not results:
+            break
+        for job in results:
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("id") or "").strip()
+            role = str(
+                job.get("position_title")
+                or job.get("title")
+                or f"Job {job_id}"
+            ).strip()
+            if not job_id or not role:
+                continue
+            location = topechelon_location_text(job)
+            location_pattern = str(
+                source.get("location_include_regex") or ""
+            ).strip()
+            if location_pattern and not re.search(
+                location_pattern,
+                location,
+                flags=re.I,
+            ):
+                continue
+            posted_at = normalize_datetime(
+                job.get("posted_date") or job.get("published_date")
+            )
+            url = topechelon_job_url(api_key, job_id)
+            description = html_to_text(str(job.get("description") or ""))
+            candidates[job_id] = {
+                "company": company,
+                "role": role,
+                "url": url,
+                "platform": "topechelon",
+                "location": location,
+                "job_number": str(
+                    job.get("external_id")
+                    or job.get("job_number")
+                    or ""
+                ).strip(),
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": normalize_datetime(job.get("updated_at")),
+                "source": str(source.get("url") or "").strip(),
+                "source_query": "all_open_postings",
+                "freshness_source": (
+                    "top_echelon_posted_date" if posted_at else "unknown"
+                ),
+                "notes": (
+                    "Top Echelon public job board API adapter; "
+                    "official posting date and complete description."
+                ),
+                "_jd_text": "\n\n".join(
+                    part for part in [role, location, description] if part
+                ),
+            }
+        pagination = data.get("pagination") or {}
+        total_pages = int(
+            pagination.get("total_pages") or page
+        ) if isinstance(pagination, dict) else page
+        if page >= total_pages:
+            break
     return list(candidates.values())
 
 
@@ -3373,7 +3920,181 @@ def parse_json_ld_jobs(raw: str, source_url: str, fallback_company: str = "Unkno
                     "updated_at": normalize_datetime(job.get("validThrough")),
                     "source": source_url,
                     "notes": "Parsed from JobPosting JSON-LD.",
+                    "_jd_text": html_to_text(str(job.get("description") or "")),
                 }
+    return list(candidates.values())
+
+
+def ttcportals_candidate_matches_source(
+    source: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    required_locations = source.get("required_locations") or []
+    if isinstance(required_locations, str):
+        required_locations = [required_locations]
+    required_locations = [
+        str(item).strip().lower()
+        for item in required_locations
+        if str(item).strip()
+    ]
+    if not required_locations:
+        return True
+    location = str(candidate.get("location") or "").strip().lower()
+    return any(required_location in location for required_location in required_locations)
+
+
+def discover_ttcportals_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read Cloudflare-protected TalentTech Portals listings through Playwright.
+
+    Detail pages are intentionally not fetched: those pages commonly trigger an
+    additional bot challenge. These candidates therefore use first_seen rather
+    than claiming an official posted date.
+    """
+
+    helper_path = ROOT / "scripts" / "ttcportals_collect.js"
+    timeout = max(10, int(source.get("browser_subprocess_timeout", 40)))
+    try:
+        completed = subprocess.run(
+            ["node", str(helper_path)],
+            cwd=ROOT,
+            input=json.dumps(source, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("Node.js is required for the TalentTech Portals adapter.") from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"TalentTech Portals browser helper exceeded {timeout}s.") from error
+
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "browser helper failed").strip()
+        raise RuntimeError(
+            f"TalentTech Portals browser helper failed: {message}. "
+            "Run `npm install` in job-search/ and retry."
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"TalentTech Portals browser helper returned invalid JSON: {error}") from error
+
+    company = str(source.get("company") or "Unknown Company")
+    location_fallbacks = source.get("listing_location_fallbacks") or {}
+    if not isinstance(location_fallbacks, dict):
+        location_fallbacks = {}
+    candidates: dict[str, dict[str, Any]] = {}
+    for item in payload.get("jobs", []):
+        if not isinstance(item, dict):
+            continue
+        url = normalize_job_url(str(item.get("url") or ""))
+        role = str(item.get("role") or "").strip()
+        if not url or not role:
+            continue
+        item_source_url = str(item.get("source_url") or "")
+        location = str(item.get("location") or "").strip()
+        if not location:
+            location = str(
+                location_fallbacks.get(item_source_url)
+                or location_fallbacks.get(normalize_job_url(item_source_url))
+                or source.get("default_location")
+                or ""
+            ).strip()
+        candidate = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "ttcportals",
+            "location": location,
+            "job_number": str(item.get("external_job_id") or ""),
+            "external_job_id": str(item.get("external_job_id") or ""),
+            "posted_at": "",
+            "updated_at": "",
+            "source": str(source.get("url") or item.get("source_url") or ""),
+            "source_query": item_source_url,
+            "freshness_source": "first_seen",
+            "notes": (
+                "TalentTech Portals browser listing adapter; official detail dates are "
+                "Cloudflare-protected, so freshness uses first_seen."
+                + (" Listing marked NEW by the career site." if item.get("is_new") else "")
+            ),
+            "_jd_text": "",
+        }
+        if ttcportals_candidate_matches_source(source, candidate):
+            candidates[url] = candidate
+    if completed.stderr.strip():
+        print(completed.stderr.strip(), file=sys.stderr)
+    return list(candidates.values())
+
+
+def discover_browser_static_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a configured public job list through an isolated Chrome process."""
+
+    helper_path = ROOT / "scripts" / "browser_static_collect.js"
+    timeout = max(10, int(source.get("browser_subprocess_timeout", 45)))
+    try:
+        completed = subprocess.run(
+            ["node", str(helper_path)],
+            cwd=ROOT,
+            input=json.dumps(source, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("Node.js is required for the browser_static adapter.") from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"browser_static helper exceeded {timeout}s.") from error
+
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "browser helper failed").strip()
+        raise RuntimeError(
+            f"browser_static helper failed: {message}. "
+            "Run `npm install` in job-search/ and retry."
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"browser_static helper returned invalid JSON: {error}") from error
+
+    company = str(source.get("company") or "Unknown Company")
+    candidates: dict[str, dict[str, Any]] = {}
+    for item in payload.get("jobs", []):
+        if not isinstance(item, dict):
+            continue
+        url = normalize_job_url(str(item.get("url") or ""))
+        role = str(item.get("role") or "").strip()
+        if not url or not role:
+            continue
+        posted_at = normalize_datetime(item.get("posted_at"))
+        detected_platform = detect_platform(url)
+        external_job_id = str(item.get("external_job_id") or "").strip()
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": detected_platform if detected_platform != "custom" else "browser_static",
+            "location": str(item.get("location") or source.get("default_location") or "").strip(),
+            "job_number": external_job_id,
+            "external_job_id": external_job_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": str(source.get("url") or item.get("source_url") or ""),
+            "source_query": str(source.get("source_query") or ""),
+            "freshness_source": "browser_static_posted_date" if posted_at else "first_seen",
+            "notes": (
+                "Configured browser-rendered public listing adapter. "
+                + (
+                    "The page exposed an official posted date."
+                    if posted_at
+                    else "The page did not expose a reliable posted date; freshness uses first_seen."
+                )
+            ),
+            "_jd_text": str(item.get("description") or "").strip(),
+        }
+    if completed.stderr.strip():
+        print(completed.stderr.strip(), file=sys.stderr)
     return list(candidates.values())
 
 
@@ -3464,15 +4185,21 @@ def discover_icims_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    search_params = source.get("search_params") if isinstance(source.get("search_params"), dict) else {}
+    query_keywords = [""] if truthy_source_flag(source.get("search_all"), default=False) else [
+        str(item) for item in keywords if str(item).strip()
+    ]
     max_pages = int(source.get("max_pages", 3))
     candidates: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
+    for keyword in query_keywords:
         for page_index in range(max_pages):
             params = {
+                **{str(key): str(value) for key, value in search_params.items() if str(key).strip()},
                 "ss": "1",
-                "searchKeyword": keyword,
                 "pr": str(page_index),
             }
+            if keyword:
+                params["searchKeyword"] = keyword
             search_url = f"{search_base}?{urllib.parse.urlencode(params)}"
             try:
                 raw = fetch_url(search_url)
@@ -3539,6 +4266,25 @@ def oracle_site_number(source: dict[str, Any]) -> str:
     return match.group(1) if match else "CX_1"
 
 
+def oracle_cx_job_url(source: dict[str, Any], req_id: str) -> str:
+    source_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(source_url)
+    if not parsed.scheme or not parsed.netloc or not req_id:
+        return source_url
+    base_path = re.sub(
+        r"/(?:jobs|requisitions)(?:/.*)?$",
+        "",
+        parsed.path.rstrip("/"),
+        flags=re.I,
+    )
+    detail_path = f"{base_path}/job/{urllib.parse.quote(req_id)}/"
+    return normalize_job_url(
+        urllib.parse.urlunparse(
+            parsed._replace(path=detail_path, query="", fragment="")
+        )
+    )
+
+
 def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
@@ -3588,8 +4334,7 @@ def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 title = str(job.get("Title") or job.get("ExternalTitle") or job.get("title") or infer_role_from_url(req_id)).strip()
                 detail_url = normalize_job_url(str(job.get("ExternalApplyURL") or job.get("ApplyUrl") or ""))
                 if not detail_url:
-                    base = str(source.get("url") or "").rstrip("/")
-                    detail_url = normalize_job_url(f"{base}/job/{urllib.parse.quote(req_id)}") if req_id and base else str(source.get("url") or "")
+                    detail_url = oracle_cx_job_url(source, req_id)
                 location = compact_location_text(job.get("PrimaryLocation") or job.get("Location") or job.get("locations"))
                 candidates[detail_url] = {
                     "company": company,
@@ -3608,6 +4353,1341 @@ def discover_oracle_cx_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             if len(jobs) < limit:
                 break
     return list(candidates.values())
+
+
+def discover_workgr8_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(board_url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    endpoint = str(source.get("api_url") or f"{origin}/graphql")
+    page_size = max(1, min(int(source.get("page_size", 100)), 100))
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for page_index in range(max_pages):
+        payload = {
+            "operationName": "searchJobs",
+            "variables": {
+                "query": "",
+                "first": page_size,
+                "start": page_index * page_size,
+                "filters": {
+                    "location": [],
+                    "workplaceType": [],
+                    "jobCategory": [],
+                    "positionType": [],
+                },
+            },
+            "extensions": {"trustedDocument": {"id": "search-jobs"}},
+        }
+        data = fetch_json_post(endpoint, payload)
+        results = (
+            data.get("data", {})
+            .get("searchJobs", {})
+            .get("results", {})
+            if isinstance(data, dict)
+            else {}
+        )
+        jobs = results.get("nodes", []) if isinstance(results, dict) else []
+        if not isinstance(jobs, list) or not jobs:
+            break
+        for job in jobs:
+            if not isinstance(job, dict) or str(job.get("status") or "OPEN").upper() != "OPEN":
+                continue
+            job_id = str(job.get("key") or job.get("number") or job.get("id") or "").strip()
+            title = str(job.get("title") or "").strip()
+            if not job_id or not title:
+                continue
+            structured: dict[str, Any] = {}
+            if job.get("structuredDataJSON"):
+                with contextlib.suppress(TypeError, ValueError, json.JSONDecodeError):
+                    parsed_structured = json.loads(str(job["structuredDataJSON"]))
+                    if isinstance(parsed_structured, dict):
+                        structured = parsed_structured
+            detail_url = normalize_job_url(
+                f"{origin}/jobs/{urllib.parse.quote(job_id)}/{slugify(title)}"
+            )
+            location = compact_location_text(job.get("primaryPlace"))
+            if not location:
+                location = compact_location_text(structured.get("jobLocation"))
+            posted_at = normalize_datetime(
+                job.get("postedOn") or structured.get("datePosted")
+            )
+            candidates[detail_url] = {
+                "company": company,
+                "role": title,
+                "url": detail_url,
+                "platform": "workgr8",
+                "location": location,
+                "job_number": str(job.get("number") or job_id),
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": board_url,
+                "source_query": str(
+                    (job.get("positionType") or {}).get("name")
+                    if isinstance(job.get("positionType"), dict)
+                    else ""
+                ),
+                "freshness_source": "workgr8_posted_on" if posted_at else "unknown",
+                "notes": "WorkGR8 public GraphQL job-board adapter.",
+                "_jd_text": html_to_text(
+                    str(job.get("descriptionHTML") or structured.get("description") or "")
+                ),
+            }
+        total = int(results.get("totalCount") or 0) if isinstance(results, dict) else 0
+        if len(jobs) < page_size or (total and len(candidates) >= total):
+            break
+    return list(candidates.values())
+
+
+def talentreef_client_id(source: dict[str, Any]) -> str:
+    configured = str(source.get("client_id") or "").strip()
+    if configured:
+        return configured
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return ""
+    try:
+        raw = fetch_url(source_url, timeout=20)
+    except Exception:  # noqa: BLE001
+        return ""
+    match = re.search(
+        r"(?:marketing-assets|images)\.jobappnetwork\.com/(\d+)(?:/|[\"'])",
+        raw,
+        flags=re.I,
+    )
+    return match.group(1) if match else ""
+
+
+def source_from_talentreef_page(
+    company: str,
+    url: str,
+    raw: str = "",
+) -> dict[str, Any] | None:
+    if not raw:
+        with contextlib.suppress(Exception):
+            raw = fetch_url(url, timeout=20)
+    match = re.search(
+        r"(?:marketing-assets|images)\.jobappnetwork\.com/(\d+)(?:/|[\"'])",
+        raw,
+        flags=re.I,
+    )
+    client_id = match.group(1) if match else ""
+    if not client_id:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    public_origin = (
+        f"{parsed.scheme or 'https'}://{parsed.netloc}" if parsed.netloc else url
+    )
+    return {
+        "company": company or parsed.netloc,
+        "platform": "talentreef",
+        "url": public_origin.rstrip("/") + "/",
+        "client_id": client_id,
+        "search_all": True,
+        "page_size": 100,
+        "max_pages": 3,
+    }
+
+
+def discover_talentreef_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company").strip()
+    board_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(board_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("TalentReef source requires a public careers URL")
+    client_id = talentreef_client_id(source)
+    if not client_id:
+        raise ValueError("TalentReef source requires client_id or a detectable client asset")
+
+    public_origin = f"{parsed.scheme}://{parsed.netloc}"
+    api_base = str(
+        source.get("api_base")
+        or "https://prod-kong.internal.talentreef.com/apply"
+    ).rstrip("/")
+    elastic_index = str(source.get("elastic_index") or "search-en-us").strip()
+    endpoint = f"{api_base}/proxy-es/{elastic_index}/posting/_search"
+    page_size = max(1, min(int(source.get("page_size", 100)), 100))
+    max_pages = max(1, int(source.get("max_pages", 3)))
+    state_filters = [
+        str(item).strip()
+        for item in source.get("state_filters", [])
+        if str(item).strip()
+    ]
+    filters: list[dict[str, Any]] = [
+        {"terms": {"clientId.raw": [client_id]}},
+        {"terms": {"internalOrExternal": ["externalOnly"]}},
+    ]
+    if state_filters:
+        filters.append({"terms": {"stateOrProvinceFull.raw": state_filters}})
+    headers = {
+        "Origin": public_origin,
+        "Referer": board_url,
+    }
+    fields = [
+        "positionType",
+        "category",
+        "socialRecruitingAttribute1",
+        "description",
+        "address",
+        "jobId",
+        "clientId",
+        "clientName",
+        "brandId",
+        "brand",
+        "location",
+        "internalOrExternal",
+        "url",
+        "postingUuid",
+        "createdDate",
+        "endDate",
+        "department",
+        "positionId",
+    ]
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for page_index in range(max_pages):
+        payload = {
+            "from": page_index * page_size,
+            "size": page_size,
+            "_source": fields,
+            "query": {"bool": {"filter": filters}},
+        }
+        data = fetch_json_post_with_headers(
+            endpoint,
+            payload,
+            headers,
+            timeout=int(source.get("request_timeout", 20)),
+        )
+        hits_container = data.get("hits", {}) if isinstance(data, dict) else {}
+        hits = (
+            hits_container.get("hits", [])
+            if isinstance(hits_container, dict)
+            else []
+        )
+        if not isinstance(hits, list) or not hits:
+            break
+        for hit in hits:
+            job = (
+                hit.get("_source", {})
+                if isinstance(hit, dict)
+                and isinstance(hit.get("_source"), dict)
+                else {}
+            )
+            job_id = str(job.get("jobId") or "").strip()
+            posting_uuid = str(job.get("postingUuid") or "").strip()
+            posting_key = posting_uuid or job_id
+            title = str(job.get("positionType") or "").strip()
+            if not posting_key or not title:
+                continue
+            template = str(source.get("job_url_template") or "").strip()
+            if template:
+                detail_url = normalize_job_url(
+                    template.format(
+                        client_id=urllib.parse.quote(client_id),
+                        job_id=urllib.parse.quote(job_id),
+                        posting_id=urllib.parse.quote(posting_key),
+                    )
+                )
+            else:
+                detail_url = normalize_job_url(
+                    f"{public_origin}/clients/{urllib.parse.quote(client_id)}/"
+                    f"posting/{urllib.parse.quote(posting_key)}/en"
+                )
+            address = (
+                job.get("address", {})
+                if isinstance(job.get("address"), dict)
+                else {}
+            )
+            location_parts = [
+                str(address.get("city") or "").strip(),
+                str(
+                    address.get("stateOrProvince")
+                    or address.get("stateProvince")
+                    or ""
+                ).strip(),
+            ]
+            country = str(address.get("country") or "").strip()
+            if country and country.upper() not in {"US", "USA", "UNITED STATES"}:
+                location_parts.append(country)
+            location = ", ".join(
+                item for item in merge_unique(location_parts, []) if item
+            )
+            if "remote" in title.lower():
+                location = "; ".join(
+                    item
+                    for item in merge_unique(["Remote", location], [])
+                    if item
+                )
+            posted_at = normalize_datetime(job.get("createdDate"))
+            candidates[posting_key] = {
+                "company": (
+                    str(job.get("clientName") or company).strip()
+                    if truthy_source_flag(
+                        source.get("use_job_company"),
+                        default=False,
+                    )
+                    else company
+                ),
+                "role": title,
+                "url": detail_url,
+                "platform": "talentreef",
+                "location": location,
+                "job_number": job_id,
+                "external_job_id": posting_key,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": board_url,
+                "source_query": str(job.get("category") or "all_jobs"),
+                "freshness_source": (
+                    "talentreef_created_date" if posted_at else "unknown"
+                ),
+                "notes": "TalentReef public Elasticsearch proxy adapter.",
+                "_jd_text": html_to_text(str(job.get("description") or "")),
+            }
+        total_value = (
+            hits_container.get("total", 0)
+            if isinstance(hits_container, dict)
+            else 0
+        )
+        if isinstance(total_value, dict):
+            total_value = total_value.get("value", 0)
+        total = int(total_value or 0)
+        if len(hits) < page_size or (total and len(candidates) >= total):
+            break
+    return list(candidates.values())
+
+
+def clearcompany_short_name(source: dict[str, Any]) -> str:
+    configured = str(source.get("api_short_name") or "").strip()
+    if configured:
+        return configured
+    host = urllib.parse.urlparse(str(source.get("url") or "")).netloc.lower()
+    return host.split(".", 1)[0]
+
+
+def discover_clearcompany_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    base_url = str(source.get("url") or "").rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    endpoint = str(source.get("api_url") or f"{origin}/api/v1/careers/jobs")
+    short_name = clearcompany_short_name(source)
+    data = fetch_json_with_headers(endpoint, {"API-ShortName": short_name})
+    jobs = data if isinstance(data, list) else data.get("items", []) if isinstance(data, dict) else []
+    default_location = str(source.get("default_location") or "").strip()
+    candidates = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("Id") or job.get("id") or "").strip()
+        title = str(job.get("PositionTitle") or job.get("Title") or job.get("title") or "").strip()
+        if not job_id or not title:
+            continue
+        apply_url = normalize_job_url(str(job.get("ApplyUrl") or job.get("applyUrl") or ""))
+        detail_url = normalize_job_url(f"{origin}/careers/jobs/{urllib.parse.quote(job_id)}")
+        city = str(job.get("City") or "").strip()
+        state = str(job.get("State") or "").strip()
+        location = ", ".join(item for item in [city, state] if item) or default_location
+        description = html_to_text(str(job.get("Description") or ""))
+        candidates.append(
+            {
+                "company": company,
+                "role": title,
+                "url": detail_url,
+                "apply_url": apply_url,
+                "platform": "clearcompany",
+                "location": location,
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": normalize_datetime(
+                    job.get("OpenDate")
+                    or job.get("DatePosted")
+                    or job.get("PublishedDate")
+                    or job.get("CreatedDate")
+                ),
+                "updated_at": normalize_datetime(job.get("LastModifiedDate") or job.get("UpdatedDate")),
+                "source": source.get("url", endpoint),
+                "source_query": str(job.get("DepartmentName") or job.get("OfficeName") or ""),
+                "notes": f"ClearCompany public careers API; API-ShortName={short_name}.",
+                "_jd_text": description,
+                "freshness_source": "clearcompany_open_date" if job.get("OpenDate") else "",
+            }
+        )
+    return candidates
+
+
+def parse_paylocity_page_data(raw: str) -> dict[str, Any]:
+    marker = re.search(r"window\.pageData\s*=\s*", raw)
+    if not marker:
+        return {}
+    try:
+        value, _ = json.JSONDecoder().raw_decode(raw[marker.end() :])
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def discover_paylocity_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").rstrip("/")
+    feed_url = str(source.get("feed_url") or "").strip()
+    if feed_url:
+        feed_data = fetch_json(feed_url)
+        jobs = feed_data.get("jobs", []) if isinstance(feed_data, dict) else []
+    else:
+        raw = fetch_url(board_url)
+        page_data = parse_paylocity_page_data(raw)
+        jobs = page_data.get("Jobs", []) if isinstance(page_data, dict) else []
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("JobId") or job.get("Id") or job.get("jobId") or job.get("id") or "").strip()
+        title = str(job.get("JobTitle") or job.get("Title") or job.get("title") or "").strip()
+        display_url = str(job.get("displayUrl") or job.get("DisplayUrl") or "").strip()
+        if not title or (not job_id and not display_url):
+            continue
+        detail_url = (
+            normalize_job_url(display_url)
+            if display_url
+            else normalize_job_url(
+                urllib.parse.urljoin(board_url + "/", f"/Recruiting/Jobs/Details/{urllib.parse.quote(job_id)}")
+            )
+        )
+        job_location = (
+            job.get("JobLocation")
+            if isinstance(job.get("JobLocation"), dict)
+            else job.get("jobLocation")
+            if isinstance(job.get("jobLocation"), dict)
+            else {}
+        )
+        city = str(job_location.get("City") or job_location.get("city") or "").strip()
+        state = str(job_location.get("State") or job_location.get("state") or "").strip()
+        country = str(job_location.get("Country") or job_location.get("country") or "").strip()
+        location = str(
+            job.get("LocationName")
+            or job.get("locationName")
+            or job_location.get("locationDisplayName")
+            or job_location.get("LocationDisplayName")
+            or ""
+        ).strip()
+        if not location:
+            location = ", ".join(item for item in [city, state, country] if item)
+        published_date = (
+            job.get("PublishedDate")
+            or job.get("publishedDate")
+            or job.get("datePosted")
+            or job.get("DatePosted")
+        )
+        department = (
+            job.get("HiringDepartment")
+            or job.get("hiringDepartment")
+            or job.get("Department")
+            or job.get("department")
+            or ""
+        )
+        candidates[detail_url] = {
+            "company": company,
+            "role": title,
+            "url": detail_url,
+            "platform": "paylocity",
+            "location": location,
+            "job_number": job_id or detail_url,
+            "external_job_id": job_id or detail_url,
+            "posted_at": normalize_datetime(published_date),
+            "updated_at": "",
+            "source": board_url or feed_url,
+            "source_query": str(department),
+            "notes": "Paylocity public careers feed data." if feed_url else "Paylocity public careers page data.",
+            "_jd_text": html_to_text(str(job.get("Description") or job.get("description") or "")),
+            "freshness_source": "paylocity_published_date" if published_date else "",
+        }
+
+    detail_limit = int(source.get("max_detail_pages", len(candidates)))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = list(candidates.values())[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        try:
+            detail_raw = fetch_url(candidate["url"])
+        except Exception:
+            return candidate["url"], None
+        parsed = parse_json_ld_jobs(detail_raw, candidate["url"], company)
+        if not parsed:
+            return candidate["url"], None
+        return candidate["url"], parsed[0]
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for url, detail in executor.map(enrich, selected):
+                if not detail:
+                    continue
+                candidate = candidates[url]
+                for key in ["role", "location", "posted_at", "updated_at"]:
+                    if detail.get(key):
+                        candidate[key] = detail[key]
+                if detail.get("_jd_text"):
+                    candidate["_jd_text"] = detail["_jd_text"]
+                if detail.get("posted_at"):
+                    candidate["freshness_source"] = "paylocity_json_ld_date_posted"
+                candidate["notes"] = "Paylocity listing enriched from official detail-page JSON-LD."
+    return [
+        candidate
+        for candidate in candidates.values()
+        if source_location_allowed(
+            source,
+            str(candidate.get("location") or ""),
+        )
+    ]
+
+
+def dynamicsats_form_id(source: dict[str, Any]) -> str:
+    configured = str(source.get("form_id") or "").strip()
+    if configured:
+        return configured
+    path = urllib.parse.urlparse(str(source.get("url") or "")).path
+    match = re.search(r"/JobListing/(?:Details/)?([0-9a-f-]{36})(?:/|$)", path, flags=re.I)
+    return match.group(1) if match else ""
+
+
+def fetch_dynamicsats_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    board_url = str(source.get("url") or "").strip()
+    form_id = dynamicsats_form_id(source)
+    if not board_url or not form_id:
+        return []
+    parsed = urllib.parse.urlparse(board_url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    endpoint = urllib.parse.urljoin(origin, "/JobListing/WebForm/JobListing_Read")
+    page_size = max(1, int(source.get("page_size", 100)))
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    timeout = int(source.get("timeout", 25))
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    opener.addheaders = [("User-Agent", "Mozilla/5.0 job-search-agent")]
+    with opener.open(board_url, timeout=timeout):
+        pass
+
+    jobs: list[dict[str, Any]] = []
+    for page_index in range(max_pages):
+        payload = urllib.parse.urlencode(
+            {
+                "formId": form_id,
+                "page": page_index + 1,
+                "pageSize": page_size,
+                "skip": page_index * page_size,
+                "take": page_size,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Referer": board_url,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            method="POST",
+        )
+        with opener.open(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        page_jobs = data.get("Data", []) if isinstance(data, dict) else []
+        if not isinstance(page_jobs, list) or not page_jobs:
+            break
+        jobs.extend(job for job in page_jobs if isinstance(job, dict))
+        total = int(data.get("Total") or 0) if isinstance(data, dict) else 0
+        if len(page_jobs) < page_size or (total and len(jobs) >= total):
+            break
+    return jobs
+
+
+def parse_dynamicsats_detail(raw: str) -> str:
+    match = re.search(
+        r'<div class="col-sm-12 col-md-8 col-md-pull-4">\s*(.*?)\s*</div>\s*</div>\s*</div>',
+        raw,
+        flags=re.I | re.S,
+    )
+    return html_to_text(match.group(1)) if match else ""
+
+
+def discover_dynamicsats_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in fetch_dynamicsats_jobs(source):
+        job_id = str(job.get("Id") or "").strip()
+        title = str(job.get("dcrs_jobtitle") or "").strip()
+        url = normalize_job_url(str(job.get("JobUrl") or ""))
+        if not job_id or not title or not url:
+            continue
+        candidates[url] = {
+            "company": company,
+            "role": title,
+            "url": url,
+            "platform": "dynamicsats",
+            "location": str(job.get("dcrs_location") or "").strip(),
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": board_url,
+            "source_query": str(job.get("dcrs_category") or "").strip(),
+            "notes": "DynamicsATS public listing API; no reliable posting date exposed.",
+            "_jd_text": html_to_text(str(job.get("dcrs_jobdescription") or "")),
+            "freshness_source": "first_seen",
+        }
+
+    detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = list(candidates.values())[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, str]:
+        try:
+            return candidate["url"], parse_dynamicsats_detail(fetch_url(candidate["url"]))
+        except Exception:
+            return candidate["url"], ""
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for url, description in executor.map(enrich, selected):
+                if description:
+                    candidates[url]["_jd_text"] = description
+    return list(candidates.values())
+
+
+def hanford_detail_field(raw: str, field_id: str) -> str:
+    match = re.search(
+        rf'id=["\'][^"\']*{re.escape(field_id)}["\'][^>]*>(.*?)</span>',
+        raw,
+        flags=re.I | re.S,
+    )
+    return html_to_text(match.group(1)) if match else ""
+
+
+def discover_hanford_bms_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    listing_url = str(source.get("url") or "").strip()
+    if not listing_url:
+        return []
+    raw = fetch_url(listing_url)
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", raw, flags=re.I | re.S):
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, flags=re.I | re.S)
+        if len(cells) < 8:
+            continue
+        link_match = re.search(r'href=["\']([^"\']*JobDetail\.aspx[^"\']*)["\'][^>]*>(.*?)</a>', cells[1], flags=re.I | re.S)
+        if not link_match:
+            continue
+        detail_url = normalize_job_url(
+            urllib.parse.urljoin(listing_url, html.unescape(link_match.group(1)))
+        )
+        job_number = html_to_text(cells[2])
+        posted_raw = html_to_text(cells[7])
+        candidates[detail_url] = {
+            "company": company,
+            "role": html_to_text(link_match.group(2)) or infer_role_from_url(detail_url),
+            "url": detail_url,
+            "platform": "hanford_bms",
+            "location": str(source.get("default_location") or "Richland, WA"),
+            "job_number": job_number,
+            "external_job_id": job_number,
+            "posted_at": normalize_datetime(posted_raw),
+            "updated_at": "",
+            "source": listing_url,
+            "source_query": html_to_text(cells[0]),
+            "notes": "Official Hanford contractor external jobs portal.",
+            "_jd_text": html_to_text(row),
+            "freshness_source": "hanford_posted_date" if posted_raw else "unknown",
+        }
+
+    detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = list(candidates.values())[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, str, str, str]:
+        try:
+            detail_raw = fetch_url(candidate["url"])
+        except Exception:
+            return candidate["url"], "", "", ""
+        return (
+            candidate["url"],
+            hanford_detail_field(detail_raw, "lblCityState"),
+            hanford_detail_field(detail_raw, "lblOPEN_DT"),
+            html_to_text(detail_raw),
+        )
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for url, location, posted_raw, description in executor.map(enrich, selected):
+                candidate = candidates[url]
+                if location:
+                    candidate["location"] = location
+                if posted_raw:
+                    candidate["posted_at"] = normalize_datetime(posted_raw)
+                    candidate["freshness_source"] = "hanford_posted_date"
+                if description:
+                    candidate["_jd_text"] = description
+    return list(candidates.values())
+
+
+def applicantpro_domain_id(source: dict[str, Any], board_html: str = "") -> str:
+    configured = str(source.get("domain_id") or "").strip()
+    if configured:
+        return configured
+    for pattern in (
+        r"\bdomainId\s*:\s*[\"']?(\d+)",
+        r"[\"']domain_id[\"']\s*:\s*[\"'](\d+)",
+    ):
+        match = re.search(pattern, board_html)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def discover_applicantpro_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    parsed_board = urllib.parse.urlparse(board_url)
+    origin = f"{parsed_board.scheme or 'https'}://{parsed_board.netloc}"
+    domain_id = str(source.get("domain_id") or "").strip()
+    if not domain_id:
+        domain_id = applicantpro_domain_id(source, fetch_url(board_url))
+    if not domain_id:
+        raise RuntimeError(f"ApplicantPro domain_id not found for {company}")
+
+    api_url = f"{origin}/core/jobs/{urllib.parse.quote(domain_id)}"
+    query = urllib.parse.urlencode({"getParams": "{}"})
+    data = fetch_json(f"{api_url}?{query}", timeout=int(source.get("timeout", 25)))
+    if not isinstance(data, dict) or not data.get("success"):
+        raise RuntimeError(f"ApplicantPro jobs API failed for {company}")
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("id") or "").strip()
+        title = str(job.get("title") or "").strip()
+        if not job_id or not title:
+            continue
+        detail_url = normalize_job_url(
+            str(job.get("jobUrl") or f"{origin}/jobs/{urllib.parse.quote(job_id)}")
+        )
+        city = str(job.get("city") or "").strip()
+        state = str(job.get("abbreviation") or job.get("stateName") or "").strip()
+        location = str(job.get("jobLocation") or "").strip()
+        if not location:
+            location = ", ".join(item for item in [city, state] if item)
+        department = str(
+            job.get("classification")
+            or job.get("orgTitle")
+            or job.get("parentTitle")
+            or ""
+        ).strip()
+        posted_at = normalize_datetime(job.get("startDateRef"))
+        candidates[detail_url] = {
+            "company": company,
+            "role": title,
+            "url": detail_url,
+            "platform": "applicantpro",
+            "location": location,
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": board_url,
+            "source_query": department,
+            "freshness_source": "applicantpro_start_date" if posted_at else "",
+            "notes": f"ApplicantPro public jobs API; domain_id={domain_id}.",
+            "_jd_text": "",
+        }
+
+    detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            0 if unclassified_technical_title_relevant(candidate) else 1,
+            str(candidate.get("role") or "").lower(),
+        ),
+    )[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        try:
+            detail_raw = fetch_url(candidate["url"])
+        except Exception:
+            return candidate["url"], None
+        parsed = parse_json_ld_jobs(detail_raw, candidate["url"], company)
+        return candidate["url"], parsed[0] if parsed else None
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for url, detail in executor.map(enrich, selected):
+                if not detail:
+                    continue
+                candidate = candidates[url]
+                for key in ["role", "location", "posted_at", "updated_at"]:
+                    if detail.get(key):
+                        candidate[key] = detail[key]
+                if detail.get("_jd_text"):
+                    candidate["_jd_text"] = detail["_jd_text"]
+                if detail.get("posted_at"):
+                    candidate["freshness_source"] = "applicantpro_json_ld_date_posted"
+                candidate["notes"] = (
+                    f"ApplicantPro public jobs API and detail-page JSON-LD; domain_id={domain_id}."
+                )
+    return list(candidates.values())
+
+
+def dayforce_board_parts(source: dict[str, Any]) -> tuple[str, str]:
+    client_namespace = str(source.get("client_namespace") or "").strip()
+    job_board_code = str(source.get("job_board_code") or "").strip()
+    parts = [
+        urllib.parse.unquote(part)
+        for part in urllib.parse.urlparse(str(source.get("url") or "")).path.split("/")
+        if part
+    ]
+    if not client_namespace and len(parts) >= 2 and parts[-1].lower() == "candidateportal":
+        client_namespace = parts[-2]
+    if not client_namespace and len(parts) >= 3 and parts[0].lower() == "candidateportal":
+        client_namespace = parts[-1]
+    if not client_namespace and len(parts) >= 3 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+        client_namespace = parts[1]
+        if not job_board_code:
+            job_board_code = parts[2]
+    if not job_board_code:
+        job_board_code = "CANDIDATEPORTAL"
+    return client_namespace, job_board_code
+
+
+def discover_dayforce_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    client_namespace, job_board_code = dayforce_board_parts(source)
+    if not client_namespace:
+        return []
+
+    api_origin = str(source.get("api_origin") or "https://jobs.dayforcehcm.com").rstrip("/")
+    culture_code = str(source.get("culture_code") or "en-US")
+    page_size = 25
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    timeout = int(source.get("timeout", 25))
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    common_headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "application/json,*/*;q=0.8",
+    }
+    csrf_data = fetch_json_with_opener(
+        opener,
+        f"{api_origin}/api/auth/csrf",
+        common_headers,
+        timeout=timeout,
+    )
+    csrf_token = str(csrf_data.get("csrfToken") or "") if isinstance(csrf_data, dict) else ""
+    if not csrf_token:
+        raise RuntimeError(f"Dayforce CSRF token unavailable for {company}")
+
+    search_url = f"{api_origin}/api/geo/{urllib.parse.quote(client_namespace)}/jobposting/search"
+    post_headers = {
+        **common_headers,
+        "Content-Type": "application/json",
+        "X-CSRF-TOKEN": csrf_token,
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        payload = {
+            "clientNamespace": client_namespace,
+            "jobBoardCode": job_board_code,
+            "cultureCode": culture_code,
+            "paginationStart": page_index * page_size,
+        }
+        data = fetch_json_post_with_opener(
+            opener,
+            search_url,
+            payload,
+            post_headers,
+            timeout=timeout,
+        )
+        jobs = data.get("jobPostings", []) if isinstance(data, dict) else []
+        if not isinstance(jobs, list) or not jobs:
+            break
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("jobPostingId") or "").strip()
+            title = str(job.get("jobTitle") or "").strip()
+            if not job_id or not title:
+                continue
+            locations = []
+            for posting_location in job.get("postingLocations") or []:
+                if not isinstance(posting_location, dict):
+                    continue
+                formatted = str(posting_location.get("formattedAddress") or "").strip()
+                if formatted:
+                    locations.append(formatted)
+            if truthy_source_flag(job.get("hasVirtualLocation"), default=False):
+                locations.insert(0, "Remote")
+            location = "; ".join(merge_unique([], locations))
+            detail_url = normalize_job_url(
+                f"{api_origin}/{urllib.parse.quote(culture_code)}/"
+                f"{urllib.parse.quote(client_namespace)}/{urllib.parse.quote(job_board_code)}/"
+                f"jobs/{urllib.parse.quote(job_id)}"
+            )
+            posted_at = normalize_datetime(job.get("postingStartTimestampUTC"))
+            candidates[detail_url] = {
+                "company": company,
+                "role": title,
+                "url": detail_url,
+                "platform": "dayforce",
+                "location": location,
+                "job_number": str(job.get("jobReqId") or job_id),
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": source.get("url", search_url),
+                "source_query": "",
+                "freshness_source": "dayforce_posting_start" if posted_at else "",
+                "notes": (
+                    f"Dayforce public Candidate Portal API; "
+                    f"client_namespace={client_namespace}; job_board_code={job_board_code}."
+                ),
+                "_jd_text": html_to_text(str(job.get("jobDescription") or "")),
+            }
+        max_count = int(data.get("maxCount") or 0) if isinstance(data, dict) else 0
+        if len(jobs) < page_size or (max_count and (page_index + 1) * page_size >= max_count):
+            break
+    return list(candidates.values())
+
+
+def adp_board_parts(source: dict[str, Any]) -> tuple[str, str, str]:
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    cid = str(source.get("cid") or (query.get("cid") or [""])[0]).strip()
+    career_center_id = str(
+        source.get("career_center_id")
+        or source.get("cc_id")
+        or (query.get("ccId") or query.get("ccid") or ["19000101_000001"])[0]
+    ).strip()
+    locale = str(source.get("locale") or (query.get("lang") or ["en_US"])[0]).strip()
+    return cid, career_center_id, locale
+
+
+def adp_location_text(job: dict[str, Any]) -> str:
+    locations = []
+    for location in job.get("requisitionLocations") or []:
+        if not isinstance(location, dict):
+            continue
+        name_code = location.get("nameCode") if isinstance(location.get("nameCode"), dict) else {}
+        short_name = str(name_code.get("shortName") or "").strip()
+        if short_name:
+            locations.append(short_name)
+            continue
+        address = location.get("address") if isinstance(location.get("address"), dict) else {}
+        subdivision = (
+            address.get("countrySubdivisionLevel1")
+            if isinstance(address.get("countrySubdivisionLevel1"), dict)
+            else {}
+        )
+        locations.append(
+            ", ".join(
+                item
+                for item in [
+                    str(address.get("cityName") or "").strip(),
+                    str(subdivision.get("codeValue") or "").strip(),
+                    str(address.get("postalCode") or "").strip(),
+                ]
+                if item
+            )
+        )
+    return "; ".join(merge_unique([], [item for item in locations if item]))
+
+
+def adp_source_query(job: dict[str, Any]) -> str:
+    custom_fields = job.get("customFieldGroup") if isinstance(job.get("customFieldGroup"), dict) else {}
+    values = []
+    for field in custom_fields.get("codeFields") or []:
+        if not isinstance(field, dict):
+            continue
+        name_code = field.get("nameCode") if isinstance(field.get("nameCode"), dict) else {}
+        if str(name_code.get("codeValue") or "") in {"JobClass", "HomeDepartment"}:
+            value = str(field.get("shortName") or field.get("codeValue") or "").strip()
+            if value:
+                values.append(value)
+    return " / ".join(merge_unique([], values))
+
+
+def discover_adp_workforce_now_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    cid, career_center_id, locale = adp_board_parts(source)
+    if not cid:
+        return []
+    board_origin = ""
+    if board_url:
+        parsed_board = urllib.parse.urlparse(board_url)
+        if parsed_board.scheme and parsed_board.netloc:
+            board_origin = f"{parsed_board.scheme}://{parsed_board.netloc}"
+    api_origin = str(source.get("api_origin") or board_origin or "https://workforcenow.adp.com").rstrip("/")
+    api_host = urllib.parse.urlparse(api_origin).netloc or "workforcenow.adp.com"
+    endpoint = (
+        f"{api_origin}/mascsr/default/careercenter/public/events/staffing/"
+        "v1/job-requisitions"
+    )
+    page_size = max(1, int(source.get("page_size", 20)))
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    timeout = int(source.get("timeout", 25))
+    headers = {
+        "Accept-Language": locale,
+        "locale": locale,
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/json",
+        "x-forwarded-host": api_host,
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    detail_ids: dict[str, str] = {}
+    for page_index in range(max_pages):
+        params = {
+            "cid": cid,
+            "ccId": career_center_id,
+            "lang": locale,
+            "locale": locale,
+            "$skip": str(page_index * page_size),
+            "$top": str(page_size),
+            "userQuery": "",
+        }
+        data = fetch_json_with_headers(
+            f"{endpoint}?{urllib.parse.urlencode(params)}",
+            headers,
+            timeout=timeout,
+        )
+        jobs = data.get("jobRequisitions", []) if isinstance(data, dict) else []
+        if not isinstance(jobs, list) or not jobs:
+            break
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            item_id = str(job.get("itemID") or "").strip()
+            title = str(job.get("requisitionTitle") or "").strip()
+            if not item_id or not title:
+                continue
+            parsed_board = urllib.parse.urlparse(board_url)
+            detail_params = dict(urllib.parse.parse_qsl(parsed_board.query, keep_blank_values=True))
+            detail_params.update(
+                {
+                    "cid": cid,
+                    "ccId": career_center_id,
+                    "lang": locale,
+                    "jobId": item_id,
+                }
+            )
+            detail_url = normalize_job_url(
+                urllib.parse.urlunparse(parsed_board._replace(query=urllib.parse.urlencode(detail_params)))
+            )
+            candidates[detail_url] = {
+                "company": company,
+                "role": title,
+                "url": detail_url,
+                "platform": "adp_workforce_now",
+                "location": adp_location_text(job),
+                "job_number": str(job.get("clientRequisitionID") or item_id),
+                "external_job_id": item_id,
+                "posted_at": normalize_datetime(job.get("postDate")),
+                "updated_at": "",
+                "source": board_url,
+                "source_query": adp_source_query(job),
+                "freshness_source": "adp_post_date" if job.get("postDate") else "",
+                "notes": (
+                    f"ADP Workforce Now public career center API; "
+                    f"cid={cid}; ccId={career_center_id}."
+                ),
+                "_jd_text": html_to_text(str(job.get("requisitionDescription") or "")),
+            }
+            detail_ids[detail_url] = item_id
+        total = int((data.get("meta") or {}).get("totalNumber") or 0) if isinstance(data, dict) else 0
+        if len(jobs) < page_size or (total and (page_index + 1) * page_size >= total):
+            break
+
+    detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            0 if unclassified_technical_title_relevant(candidate) else 1,
+            str(candidate.get("role") or "").lower(),
+        ),
+    )[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        item_id = detail_ids.get(candidate["url"], "")
+        params = {
+            "cid": cid,
+            "ccId": career_center_id,
+            "lang": locale,
+            "locale": locale,
+        }
+        try:
+            detail = fetch_json_with_headers(
+                f"{endpoint}/{urllib.parse.quote(item_id)}?{urllib.parse.urlencode(params)}",
+                headers,
+                timeout=timeout,
+            )
+        except Exception:
+            return candidate["url"], None
+        return candidate["url"], detail if isinstance(detail, dict) else None
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for url, detail in executor.map(enrich, selected):
+                if not detail:
+                    continue
+                candidate = candidates[url]
+                candidate["role"] = str(detail.get("requisitionTitle") or candidate["role"]).strip()
+                candidate["location"] = adp_location_text(detail) or candidate["location"]
+                candidate["posted_at"] = normalize_datetime(detail.get("postDate")) or candidate["posted_at"]
+                candidate["source_query"] = adp_source_query(detail) or candidate["source_query"]
+                candidate["_jd_text"] = html_to_text(
+                    str(detail.get("requisitionDescription") or candidate["_jd_text"])
+                )
+    return list(candidates.values())
+
+
+def adp_myjobs_domain(source: dict[str, Any]) -> str:
+    if source.get("domain"):
+        return str(source["domain"]).strip()
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parsed.netloc.lower() == "myjobs.adp.com" and parts else ""
+
+
+def discover_adp_myjobs_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    domain = adp_myjobs_domain(source)
+    if not domain:
+        return []
+    board_url = str(source.get("url") or f"https://myjobs.adp.com/{domain}").rstrip("/")
+    timeout = int(source.get("timeout", 25))
+    config_url = f"https://myjobs.adp.com/public/staffing/v1/career-site/{urllib.parse.quote(domain)}"
+    config = fetch_json(config_url, timeout=timeout)
+    if not isinstance(config, dict):
+        return []
+    token = str(config.get("myJobsToken") or "").strip()
+    if not token:
+        return []
+    properties = config.get("properties") if isinstance(config.get("properties"), dict) else {}
+    api_origin = str(source.get("api_origin") or properties.get("myadpUrl") or "https://my.adp.com").rstrip("/")
+    endpoint = (
+        f"{api_origin}/myadp_prefix/mycareer/public/staffing/v1/"
+        "job-requisitions/apply-custom-filters"
+    )
+    headers = {
+        "MyJobsToken": token,
+        "rolecode": "manager",
+        "Referer": f"https://myjobs.adp.com/{domain}/",
+    }
+    selected_fields = ",".join(
+        [
+            "reqId",
+            "jobTitle",
+            "publishedJobTitle",
+            "type",
+            "jobDescription",
+            "jobQualifications",
+            "workLocations",
+            "workLevelCode",
+            "clientRequisitionID",
+            "postingDate",
+            "requisitionLocations",
+        ]
+    )
+    page_size = max(1, int(source.get("page_size", 50)))
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    candidates: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        params = {
+            "$orderby": "postingDate desc",
+            "$select": selected_fields,
+            "$top": str(page_size),
+            "$skip": str(page_index * page_size),
+            "tz": str(source.get("timezone") or "America/Los_Angeles"),
+        }
+        data = fetch_json_with_headers(
+            f"{endpoint}?{urllib.parse.urlencode(params)}",
+            headers,
+            timeout=timeout,
+        )
+        jobs = data.get("jobRequisitions", []) if isinstance(data, dict) else []
+        if not isinstance(jobs, list) or not jobs:
+            break
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            requisition_id = str(job.get("reqId") or "").strip()
+            title = str(job.get("publishedJobTitle") or job.get("jobTitle") or "").strip()
+            if not requisition_id or not title:
+                continue
+            detail_url = normalize_job_url(
+                f"https://myjobs.adp.com/{domain}/cx/job-details?"
+                f"{urllib.parse.urlencode({'reqId': requisition_id})}"
+            )
+            description = "\n\n".join(
+                item
+                for item in [
+                    html_to_text(str(job.get("jobDescription") or "")),
+                    html_to_text(str(job.get("jobQualifications") or "")),
+                ]
+                if item
+            )
+            candidates[detail_url] = {
+                "company": company,
+                "role": title,
+                "url": detail_url,
+                "platform": "adp_myjobs",
+                "location": adp_location_text(job),
+                "job_number": str(job.get("clientRequisitionID") or requisition_id),
+                "external_job_id": requisition_id,
+                "posted_at": normalize_datetime(job.get("postingDate")),
+                "updated_at": "",
+                "source": board_url,
+                "source_query": adp_source_query(job),
+                "freshness_source": "adp_myjobs_posting_date" if job.get("postingDate") else "",
+                "notes": f"ADP MyJobs public API; career_site={domain}.",
+                "_jd_text": description,
+            }
+        total = int(data.get("count") or 0) if isinstance(data, dict) else 0
+        if len(jobs) < page_size or (total and (page_index + 1) * page_size >= total):
+            break
+    return list(candidates.values())
+
+
+def jubilant_careers_api_base(source: dict[str, Any]) -> str:
+    return str(
+        source.get("api_base")
+        or "https://jubilantcareer.jubl.com/JubilantCareersPortal/rest/Portal/"
+    ).rstrip("/") + "/"
+
+
+def jubilant_careers_posted_at(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for date_format in ("%d/%m/%y", "%d/%m/%Y"):
+        try:
+            parsed = dt.datetime.strptime(raw, date_format).replace(tzinfo=dt.timezone.utc)
+            return parsed.isoformat()
+        except ValueError:
+            continue
+    return normalize_datetime(raw)
+
+
+def discover_jubilant_careers_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Jubilant")
+    source_url = str(source.get("url") or "https://jubilantcareer.jubl.com/explorejobs").strip()
+    api_base = jubilant_careers_api_base(source)
+    timeout = int(source.get("timeout", 25))
+    data = fetch_json(f"{api_base}getAllJobs", timeout=timeout)
+    jobs = data.get("jobList", []) if isinstance(data, dict) else []
+    if not isinstance(jobs, list):
+        return []
+
+    location_keywords = source.get("location_keywords") or []
+    if isinstance(location_keywords, str):
+        location_keywords = [location_keywords]
+    location_keywords = [str(item).strip().lower() for item in location_keywords if str(item).strip()]
+    company_contains = str(source.get("company_contains") or "").strip().lower()
+    functional_areas = source.get("functional_areas") or []
+    if isinstance(functional_areas, str):
+        functional_areas = [functional_areas]
+    functional_areas = [str(item).strip().lower() for item in functional_areas if str(item).strip()]
+    title_keywords = source.get("title_keywords") or []
+    if isinstance(title_keywords, str):
+        title_keywords = [title_keywords]
+    title_keywords = [str(item).strip().lower() for item in title_keywords if str(item).strip()]
+    selected_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("jobId") or "").strip()
+        role = str(job.get("jobTitle") or "").strip()
+        location = str(job.get("locationDescription") or "").strip()
+        listed_company = str(job.get("company") or "").strip()
+        if not job_id or not role:
+            continue
+        if company_contains and company_contains not in listed_company.lower():
+            continue
+        if location_keywords and not any(keyword in location.lower() for keyword in location_keywords):
+            continue
+        functional_area = str(job.get("functionalArea") or "").strip().lower()
+        area_match = any(area in functional_area for area in functional_areas)
+        title_match = any(keyword in role.lower() for keyword in title_keywords)
+        if (functional_areas or title_keywords) and not (area_match or title_match):
+            continue
+        selected_jobs.append(job)
+
+    max_details = max(0, int(source.get("max_detail_pages", len(selected_jobs))))
+    selected_jobs = selected_jobs[:max_details]
+    detail_workers = max(1, int(source.get("detail_workers", 10)))
+
+    def load_detail(job: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        job_id = str(job.get("jobId") or "").strip()
+        try:
+            detail = fetch_json(f"{api_base}getJobDetails/{urllib.parse.quote(job_id)}", timeout=timeout)
+        except Exception:
+            return job, None
+        return job, detail if isinstance(detail, dict) else None
+
+    candidates: list[dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+        for job, detail in executor.map(load_detail, selected_jobs):
+            if not detail or (detail.get("status") and str(detail.get("status")) != "010"):
+                continue
+            job_id = str(detail.get("jobOpeningId") or job.get("jobId") or "").strip()
+            role = str(detail.get("jobtitle") or job.get("jobTitle") or "").strip()
+            location = str(
+                detail.get("locationdescr") or job.get("locationDescription") or ""
+            ).strip()
+            listed_company = str(
+                detail.get("companydescr") or job.get("company") or company
+            ).strip()
+            description = html_to_text(str(detail.get("jobdescr") or ""))
+            posted_at = jubilant_careers_posted_at(detail.get("jobpostingdate"))
+            candidates.append(
+                {
+                    "company": company,
+                    "role": role,
+                    "url": normalize_job_url(
+                        f"https://jubilantcareer.jubl.com/jobprofile/{urllib.parse.quote(job_id)}/home"
+                    ),
+                    "platform": "jubilant_careers",
+                    "location": location,
+                    "job_number": job_id,
+                    "external_job_id": job_id,
+                    "posted_at": posted_at,
+                    "updated_at": "",
+                    "source": source_url,
+                    "source_query": str(
+                        detail.get("funct") or job.get("functionalArea") or listed_company
+                    ).strip(),
+                    "freshness_source": (
+                        "jubilant_official_posting_date" if posted_at else "unknown"
+                    ),
+                    "notes": (
+                        "Jubilant public careers API; "
+                        f"listed company={listed_company or company}."
+                    ),
+                    "_jd_text": "\n\n".join(
+                        part for part in [role, location, description] if part
+                    ),
+                }
+            )
+    return candidates
 
 
 def discover_boa_careers_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3675,19 +5755,51 @@ def jobvite_company_id(source: dict[str, Any]) -> str:
     return host_parts[0] if host_parts and host_parts[0] != "jobs" else slugify(str(source.get("company") or ""))
 
 
+def jobvite_candidate_matches_source(
+    source: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    required_locations = source.get("required_locations") or []
+    if isinstance(required_locations, str):
+        required_locations = [required_locations]
+    required_locations = [
+        str(item).strip().lower()
+        for item in required_locations
+        if str(item).strip()
+    ]
+    if not required_locations:
+        return True
+    location = str(candidate.get("location") or "").strip().lower()
+    return any(required_location in location for required_location in required_locations)
+
+
 def discover_jobvite_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     base_url = str(source.get("url") or "").rstrip("/")
     if not base_url:
         account = jobvite_company_id(source)
         base_url = f"https://jobs.jobvite.com/{account}"
+    listing_url = str(source.get("listing_url") or "").strip()
     keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
     if isinstance(keywords, str):
         keywords = [keywords]
+    queries = (
+        [""]
+        if truthy_source_flag(source.get("scan_all_jobs"), default=False)
+        else [str(item) for item in keywords if str(item).strip()]
+    )
     candidates: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
-        params = {"nl": "1", "fr": "false", "q": keyword}
-        search_url = f"{base_url}/jobs?{urllib.parse.urlencode(params)}"
+    for keyword in queries:
+        params = {"nl": "1", "fr": "false"}
+        if keyword:
+            params["q"] = keyword
+        if listing_url:
+            search_url = listing_url
+            if keyword:
+                separator = "&" if "?" in search_url else "?"
+                search_url = f"{search_url}{separator}{urllib.parse.urlencode(params)}"
+        else:
+            search_url = f"{base_url}/jobs?{urllib.parse.urlencode(params)}"
         try:
             raw = fetch_url(search_url)
         except Exception as error:  # noqa: BLE001
@@ -3698,6 +5810,39 @@ def discover_jobvite_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             candidate["platform"] = "jobvite"
             candidate["source_query"] = keyword
             candidates[candidate["url"]] = candidate
+        for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", raw, flags=re.I | re.S):
+            link_match = re.search(
+                r'href=["\']([^"\']*/job/[^"\']+)["\'][^>]*>(.*?)</a>',
+                row,
+                flags=re.I | re.S,
+            )
+            if not link_match:
+                continue
+            url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(link_match.group(1))))
+            location_match = re.search(
+                r'<td\b[^>]*class=["\'][^"\']*jv-job-list-location[^"\']*["\'][^>]*>(.*?)</td>',
+                row,
+                flags=re.I | re.S,
+            )
+            candidate = candidates.setdefault(
+                url,
+                {
+                    "company": company,
+                    "role": html_to_text(link_match.group(2)) or infer_role_from_url(url),
+                    "url": url,
+                    "platform": "jobvite",
+                    "location": "",
+                    "posted_at": "",
+                    "updated_at": "",
+                    "source": source.get("url", base_url),
+                    "source_query": keyword or "all_jobs",
+                    "freshness_source": "unknown",
+                    "notes": "Jobvite official listing; detail JSON-LD can supply the official posted date.",
+                    "_jd_text": "",
+                },
+            )
+            if location_match and not candidate.get("location"):
+                candidate["location"] = html_to_text(location_match.group(1))
         for href, label in re.findall(r'href=["\']([^"\']*/job/[^"\']+)["\'][^>]*>(.*?)</a>', raw, flags=re.I | re.S):
             url = normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(href)))
             candidates.setdefault(url, {
@@ -3709,10 +5854,1613 @@ def discover_jobvite_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "posted_at": "",
                 "updated_at": "",
                 "source": source.get("url", base_url),
-                "source_query": keyword,
+                "source_query": keyword or "all_jobs",
+                "freshness_source": "unknown",
                 "notes": "Jobvite HTML adapter; posted_at may require detail page JSON-LD.",
+                "_jd_text": "",
             })
+
+    candidates = {
+        url: candidate
+        for url, candidate in candidates.items()
+        if jobvite_candidate_matches_source(source, candidate)
+    }
+    detail_limit = min(len(candidates), int(source.get("fetch_detail_limit", 20)))
+    detail_workers = max(1, int(source.get("detail_workers", 6)))
+    detail_candidates = [
+        candidate
+        for candidate in candidates.values()
+        if unclassified_technical_title_relevant(candidate)
+    ][:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            raw = fetch_url(str(candidate["url"]), timeout=int(source.get("detail_timeout", 20)))
+        except Exception:
+            return
+        details = parse_json_ld_jobs(raw, str(candidate["url"]), str(company))
+        if not details:
+            return
+        detail = details[0]
+        for key in ["role", "location", "job_number", "external_job_id", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["platform"] = "jobvite"
+        candidate["freshness_source"] = "jobvite_json_ld_date_posted" if candidate.get("posted_at") else "unknown"
+        candidate["notes"] = "Jobvite official listing enriched from detail-page JobPosting JSON-LD."
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+        list(executor.map(enrich, detail_candidates))
     return list(candidates.values())
+
+
+def appone_meta_value(raw: str, itemprop: str) -> str:
+    for tag in re.findall(r"<meta\b[^>]*>", raw, flags=re.I | re.S):
+        prop_match = re.search(
+            r'\bitemprop\s*=\s*["\']([^"\']+)["\']',
+            tag,
+            flags=re.I,
+        )
+        if not prop_match or prop_match.group(1).lower() != itemprop.lower():
+            continue
+        content_match = re.search(
+            r'\bcontent\s*=\s*["\'](.*?)["\']',
+            tag,
+            flags=re.I | re.S,
+        )
+        if content_match:
+            return html_to_text(html.unescape(content_match.group(1)))
+    return ""
+
+
+def discover_appone_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    listing_url = str(source.get("listing_url") or source_url).strip()
+    if not listing_url:
+        return []
+    raw = fetch_url(listing_url, timeout=int(source.get("timeout", 25)))
+    links: dict[str, dict[str, Any]] = {}
+    for href, label in re.findall(
+        r'href=["\']([^"\']*MainInfoReq\.asp\?[^"\']*\bR_ID=\d+[^"\']*)["\'][^>]*>(.*?)</a>',
+        raw,
+        flags=re.I | re.S,
+    ):
+        url = normalize_job_url(
+            urllib.parse.urljoin(listing_url, html.unescape(href))
+        )
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        job_id = str((query.get("R_ID") or query.get("r_id") or [""])[0]).strip()
+        label_text = html_to_text(label)
+        role = re.sub(
+            r"\s+-\s+[^-]+(?:,\s*[^-]+)?\s+-\s+Job\s*$",
+            "",
+            label_text,
+            flags=re.I,
+        ).strip()
+        links[url] = {
+            "company": company,
+            "role": role or infer_role_from_url(url),
+            "url": url,
+            "platform": "appone",
+            "location": "",
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": source_url or listing_url,
+            "source_query": "all_jobs",
+            "freshness_source": "unknown",
+            "notes": "AppOne official listing; detail page supplies official job metadata.",
+            "_jd_text": "",
+        }
+
+    max_details = max(0, int(source.get("max_detail_pages", len(links))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    selected = list(links.values())[:max_details]
+
+    def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, str]]:
+        try:
+            detail_raw = fetch_url(
+                str(candidate["url"]),
+                timeout=int(source.get("detail_timeout", 20)),
+            )
+        except Exception:
+            return str(candidate["url"]), {}
+        city = appone_meta_value(detail_raw, "addressLocality")
+        region = appone_meta_value(detail_raw, "addressRegion")
+        return str(candidate["url"]), {
+            "role": appone_meta_value(detail_raw, "title"),
+            "location": ", ".join(item for item in [city, region] if item),
+            "posted_at": normalize_datetime(
+                appone_meta_value(detail_raw, "datePosted")
+            ),
+            "_jd_text": appone_meta_value(detail_raw, "description"),
+        }
+
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=detail_workers
+        ) as executor:
+            for url, details in executor.map(enrich, selected):
+                if not details:
+                    continue
+                candidate = links[url]
+                for key in ["role", "location", "posted_at", "_jd_text"]:
+                    if details.get(key):
+                        candidate[key] = details[key]
+                candidate["freshness_source"] = (
+                    "appone_date_posted" if candidate.get("posted_at") else "unknown"
+                )
+                candidate["notes"] = (
+                    "AppOne official listing enriched from detail-page "
+                    "JobPosting microdata."
+                )
+    return list(links.values())
+
+
+def avature_list_config(raw: str) -> tuple[str, str, str, dict[str, Any]] | None:
+    portal_id_match = re.search(
+        r'<meta\s+name=["\']avature\.portal\.id["\']\s+content=["\']([^"\']+)["\']',
+        raw,
+        flags=re.I,
+    )
+    portal_path_match = re.search(
+        r'<meta\s+name=["\']avature\.portal\.urlPath["\']\s+content=["\']([^"\']+)["\']',
+        raw,
+        flags=re.I,
+    )
+    portal_lang_match = re.search(
+        r'<meta\s+name=["\']avature\.portal\.lang["\']\s+content=["\']([^"\']+)["\']',
+        raw,
+        flags=re.I,
+    )
+    if not portal_id_match:
+        return None
+    for match in re.finditer(
+        r"<list\b[^>]*\bdata-props=(?P<quote>[\"'])(?P<props>.*?)(?P=quote)",
+        raw,
+        flags=re.I | re.S,
+    ):
+        try:
+            props = json.loads(html.unescape(match.group("props")))
+        except (TypeError, ValueError):
+            continue
+        if str(props.get("listType") or "").lower() == "joblist":
+            return (
+                html.unescape(portal_id_match.group(1)).strip(),
+                html.unescape(portal_path_match.group(1)).strip()
+                if portal_path_match
+                else "",
+                html.unescape(portal_lang_match.group(1)).strip()
+                if portal_lang_match
+                else "",
+                props,
+            )
+    return None
+
+
+def avature_query_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def avature_field(record: dict[str, Any], code: str) -> str:
+    field = (record.get("fields") or {}).get(code)
+    if not isinstance(field, dict):
+        return ""
+    value = field.get("stringValue")
+    if value is None:
+        value = field.get("jsonValue")
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("value") or ""
+    if isinstance(value, list):
+        value = ", ".join(str(item) for item in value if str(item).strip())
+    return html_to_text(str(value or ""))
+
+
+def avature_longest_field(
+    record: dict[str, Any],
+    excluded_codes: set[str],
+) -> str:
+    values: list[str] = []
+    for code in (record.get("fields") or {}):
+        if code in excluded_codes:
+            continue
+        value = avature_field(record, code)
+        if len(value) >= 200:
+            values.append(value)
+    return max(values, key=len, default="")
+
+
+def discover_avature_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cookie_jar)
+    )
+    raw = fetch_url_with_opener(
+        opener,
+        source_url,
+        timeout=int(source.get("timeout", 25)),
+    )
+    config = avature_list_config(raw)
+    if not config:
+        raise ValueError(f"Could not find Avature JobList configuration at {source_url}")
+    portal_id, portal_path, portal_lang, props = config
+
+    parsed_source = urllib.parse.urlparse(source_url)
+    base_url = f"{parsed_source.scheme or 'https'}://{parsed_source.netloc}"
+    api_url = urllib.parse.urljoin(base_url, f"/{portal_id}/_portalList")
+    page_size = max(1, min(int(source.get("page_size", 50)), 50))
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    search_queries = [
+        str(item).strip()
+        for item in source.get("search_queries", [])
+        if str(item).strip()
+    ] or [""]
+    location_pattern = str(source.get("location_include_regex") or "").strip()
+    location_regex = (
+        re.compile(location_pattern, flags=re.I) if location_pattern else None
+    )
+    role_field = str(source.get("role_field") or "name")
+    posted_field = str(source.get("posted_field") or "postedDate")
+    requisition_field = str(source.get("requisition_field") or "req")
+    description_field = str(source.get("description_field") or "")
+    location_fields = [
+        str(item)
+        for item in source.get("location_fields", [])
+        if str(item).strip()
+    ]
+    department_field = str(source.get("department_field") or "")
+    candidates: dict[str, dict[str, Any]] = {}
+
+    shared_keys = [
+        "uuid",
+        "hasToIncludePaginationOptions",
+        "allowListSorting",
+        "fetchJobIdInPeopleLists",
+        "listType",
+    ]
+    structured_keys = [
+        "firstColumnLinks",
+        "additionalColumnLinks",
+        "allowFilteringFromUrlParams",
+        "layout",
+        "links",
+        "dynamicValueConfigs",
+        "shouldAddBase64FileFields",
+        "searchMode",
+        "conditionalLinkConfig",
+        "qtvc",
+    ]
+    for query in search_queries:
+        offset = 0
+        for _page_index in range(max_pages):
+            params = {
+                key: avature_query_value(props.get(key))
+                for key in shared_keys
+            }
+            params.update(
+                {
+                    "offset": str(offset),
+                    "filters": json.dumps(
+                        {"search": query},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "sort": "",
+                    "sortDirection": "DESC",
+                    "recordsPerPage": str(page_size),
+                    "token": "",
+                }
+            )
+            params.update(
+                {
+                    key: avature_query_value(props.get(key))
+                    for key in structured_keys
+                }
+            )
+            params["pageUrlParams"] = "{}"
+            params["formId"] = str(props.get("formId") or "")
+            request_url = f"{api_url}?{urllib.parse.urlencode(params)}"
+            payload = fetch_json_with_opener(
+                opener,
+                request_url,
+                {
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Accept": "application/json,*/*;q=0.8",
+                    "Referer": source_url,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=int(source.get("api_timeout", 25)),
+            )
+            records = payload.get("results") or []
+            links = payload.get("links") or []
+            for index, record in enumerate(records):
+                if not isinstance(record, dict):
+                    continue
+                external_id = str(record.get("id") or record.get("entityId") or "")
+                role = avature_field(record, role_field)
+                if not role:
+                    continue
+                location_values = [
+                    avature_field(record, field_code)
+                    for field_code in location_fields
+                ]
+                location = " | ".join(
+                    value for value in dict.fromkeys(location_values) if value
+                )
+                if location_regex and not location_regex.search(location):
+                    continue
+                detail_url = ""
+                if index < len(links) and isinstance(links[index], dict):
+                    detail_url = str(
+                        links[index].get("detailPage")
+                        or links[index].get("jobDetailUrlCode")
+                        or ""
+                    )
+                if not detail_url and external_id:
+                    detail_path = "/".join(
+                        item
+                        for item in [portal_lang, portal_path, "JobDetail"]
+                        if item
+                    )
+                    detail_url = (
+                        f"{base_url}/{detail_path}?"
+                        f"{urllib.parse.urlencode({'jobId': external_id})}"
+                    )
+                detail_url = normalize_job_url(detail_url or source_url)
+                requisition = avature_field(record, requisition_field)
+                description = (
+                    avature_field(record, description_field)
+                    if description_field
+                    else avature_longest_field(
+                        record,
+                        {
+                            role_field,
+                            posted_field,
+                            requisition_field,
+                            *location_fields,
+                        },
+                    )
+                )
+                department = (
+                    avature_field(record, department_field)
+                    if department_field
+                    else ""
+                )
+                posted_at = normalize_datetime(
+                    avature_field(record, posted_field)
+                )
+                candidates[detail_url] = {
+                    "company": company,
+                    "role": role,
+                    "url": detail_url,
+                    "platform": "avature",
+                    "location": location,
+                    "job_number": requisition or external_id,
+                    "external_job_id": external_id or requisition,
+                    "posted_at": posted_at,
+                    "updated_at": "",
+                    "source": source_url,
+                    "source_query": query or "all_jobs",
+                    "freshness_source": (
+                        "avature_posted_date" if posted_at else "unknown"
+                    ),
+                    "notes": (
+                        "Avature official public job-list API."
+                        + (f" Department: {department}." if department else "")
+                    ),
+                    "_jd_text": description,
+                }
+            total = int(payload.get("total") or 0)
+            offset += len(records)
+            if not records or len(records) < page_size or offset >= total:
+                break
+    return list(candidates.values())
+
+
+def parse_pageup_listing(
+    raw: str,
+    listing_url: str,
+    company: str,
+    source_url: str,
+) -> list[dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    for match in re.finditer(
+        r'<a\b[^>]*class=["\'][^"\']*\bjob-link\b[^"\']*["\'][^>]*'
+        r'href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        raw,
+        flags=re.I | re.S,
+    ):
+        detail_url = normalize_job_url(
+            urllib.parse.urljoin(listing_url, html.unescape(match.group(1)))
+        )
+        role = html_to_text(match.group(2))
+        if not role or not detail_url:
+            continue
+        row_start = raw.rfind("<tr", 0, match.start())
+        row_end = raw.find("</tr>", match.end())
+        row = raw[row_start : row_end + 5] if row_start >= 0 and row_end >= 0 else ""
+        location_match = re.search(
+            r'class=["\'][^"\']*\blocation\b[^"\']*["\'][^>]*>(.*?)</',
+            row,
+            flags=re.I | re.S,
+        )
+        closing_match = re.search(
+            r'class=["\'][^"\']*\bclosing-date\b[^"\']*["\'][^>]*>.*?'
+            r'<time\b[^>]*datetime=["\']([^"\']+)',
+            row,
+            flags=re.I | re.S,
+        )
+        job_id_match = re.search(r"/job/(\d+)(?:/|$)", detail_url)
+        job_id = job_id_match.group(1) if job_id_match else ""
+        candidates[detail_url] = {
+            "company": company,
+            "role": role,
+            "url": detail_url,
+            "platform": "pageup",
+            "location": html_to_text(location_match.group(1)) if location_match else "",
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": "",
+            "updated_at": normalize_datetime(
+                closing_match.group(1) if closing_match else ""
+            ),
+            "source": source_url,
+            "source_query": "all_open_postings",
+            "freshness_source": "unknown",
+            "notes": "PageUp official open-postings list; detail page supplies the advertised date.",
+            "_jd_text": "",
+        }
+    return list(candidates.values())
+
+
+def parse_pageup_detail(raw: str, url: str, company: str) -> dict[str, Any]:
+    role_match = re.search(
+        r'<div\b[^>]*id=["\']job-content["\'][^>]*>.*?<h2\b[^>]*>(.*?)</h2>',
+        raw,
+        flags=re.I | re.S,
+    )
+    location_match = re.search(
+        r'class=["\'][^"\']*\blocation\b[^"\']*["\'][^>]*>(.*?)</',
+        raw,
+        flags=re.I | re.S,
+    )
+    job_number_match = re.search(
+        r'class=["\'][^"\']*\bjob-externalJobNo\b[^"\']*["\'][^>]*>(.*?)</',
+        raw,
+        flags=re.I | re.S,
+    )
+    advertised_match = re.search(
+        r'class=["\'][^"\']*\bopen-date\b[^"\']*["\'][^>]*>.*?'
+        r'<time\b[^>]*datetime=["\']([^"\']+)',
+        raw,
+        flags=re.I | re.S,
+    )
+    close_match = re.search(
+        r'(?:Applications close|Closing date).*?<time\b[^>]*datetime=["\']([^"\']+)',
+        raw,
+        flags=re.I | re.S,
+    )
+    details_match = re.search(
+        r'<div\b[^>]*id=["\']job-details["\'][^>]*>(.*?)</div>\s*<p>',
+        raw,
+        flags=re.I | re.S,
+    )
+    job_id_match = re.search(r"/job/(\d+)(?:/|$)", url)
+    job_id = (
+        html_to_text(job_number_match.group(1))
+        if job_number_match
+        else (job_id_match.group(1) if job_id_match else "")
+    )
+    posted_at = normalize_datetime(
+        advertised_match.group(1) if advertised_match else ""
+    )
+    return {
+        "company": company,
+        "role": (
+            html_to_text(role_match.group(1))
+            if role_match
+            else infer_role_from_url(url)
+        ),
+        "url": normalize_job_url(url),
+        "platform": "pageup",
+        "location": html_to_text(location_match.group(1)) if location_match else "",
+        "job_number": job_id,
+        "external_job_id": job_id,
+        "posted_at": posted_at,
+        "updated_at": normalize_datetime(close_match.group(1) if close_match else ""),
+        "source": url,
+        "source_query": "all_open_postings",
+        "freshness_source": "pageup_advertised_date" if posted_at else "unknown",
+        "notes": "PageUp official posting detail.",
+        "_jd_text": html_to_text(details_match.group(1) if details_match else raw),
+    }
+
+
+def discover_pageup_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    listing_url = str(source.get("listing_url") or source_url).strip()
+    parsed = urllib.parse.urlparse(listing_url)
+    if "/listing" not in parsed.path.lower():
+        listing_url = urllib.parse.urljoin(listing_url.rstrip("/") + "/", "cw/en-us/listing/")
+
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    candidates: dict[str, dict[str, Any]] = {}
+    pending = [listing_url]
+    seen_pages: set[str] = set()
+    while pending and len(seen_pages) < max_pages:
+        page_url = pending.pop(0)
+        if page_url in seen_pages:
+            continue
+        seen_pages.add(page_url)
+        try:
+            raw = fetch_url(page_url, timeout=int(source.get("timeout", 30)))
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch PageUp board for {company}: {error}", file=sys.stderr)
+            break
+        for candidate in parse_pageup_listing(raw, page_url, company, source_url):
+            candidates[candidate["url"]] = candidate
+        for anchor in re.finditer(r"<a\b([^>]*)>", raw, flags=re.I | re.S):
+            attrs = anchor.group(1)
+            if not re.search(
+                r'class=["\'][^"\']*\bmore-link\b[^"\']*["\']',
+                attrs,
+                flags=re.I,
+            ):
+                continue
+            href_match = re.search(r'href=["\']([^"\']+)', attrs, flags=re.I)
+            if not href_match:
+                continue
+            next_url = normalize_job_url(
+                urllib.parse.urljoin(page_url, html.unescape(href_match.group(1)))
+            )
+            if next_url not in seen_pages and next_url not in pending:
+                pending.append(next_url)
+
+    detail_limit = min(
+        len(candidates),
+        max(0, int(source.get("max_detail_pages", len(candidates)))),
+    )
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(
+                str(candidate["url"]),
+                timeout=int(source.get("detail_timeout", 20)),
+            )
+        except Exception:
+            return
+        detail = parse_pageup_detail(detail_raw, str(candidate["url"]), company)
+        for key in [
+            "role",
+            "location",
+            "job_number",
+            "external_job_id",
+            "posted_at",
+            "updated_at",
+            "_jd_text",
+        ]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["freshness_source"] = detail["freshness_source"]
+        candidate["notes"] = detail["notes"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+        list(executor.map(enrich, list(candidates.values())[:detail_limit]))
+    location_map = source.get("location_map")
+    if isinstance(location_map, dict):
+        for candidate in candidates.values():
+            location = str(candidate.get("location") or "").strip()
+            mapped = location_map.get(location)
+            if mapped:
+                candidate["location"] = str(mapped).strip()
+    return list(candidates.values())
+
+
+def normalize_taleo_location(value: str) -> str:
+    locations: list[str] = []
+    for item in value.split(","):
+        location = item.strip()
+        match = re.fullmatch(r"USA-([A-Z]{2})-(.+)", location)
+        if match:
+            city = match.group(2).replace("-", " ").strip()
+            locations.append(f"{city}, {match.group(1)}")
+        elif location:
+            locations.append(location.replace("USA-", "").replace("-", " "))
+    return "; ".join(locations)
+
+
+def parse_taleo_recent_listing(
+    raw: str,
+    board_url: str,
+    company: str,
+) -> list[dict[str, Any]]:
+    history_match = re.search(
+        r'<input\b[^>]*\bid=["\']initialHistory["\'][^>]*'
+        r'\bvalue=["\']([^"\']*)["\']',
+        raw,
+        flags=re.I | re.S,
+    )
+    if not history_match:
+        return []
+    values = [
+        urllib.parse.unquote(item)
+        for item in html.unescape(history_match.group(1)).split("!|!")
+    ]
+    parsed_board = urllib.parse.urlparse(board_url)
+    detail_path = re.sub(
+        r"jobsearch\.ftl$",
+        "jobdetail.ftl",
+        parsed_board.path,
+        flags=re.I,
+    )
+    detail_base = urllib.parse.urlunparse(
+        parsed_board._replace(path=detail_path, query="", fragment="")
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    for index in range(max(0, len(values) - 18)):
+        internal_id = values[index].strip()
+        role = html_to_text(values[index + 1])
+        if (
+            not re.fullmatch(r"\d{5,}", internal_id)
+            or values[index + 2].strip() != internal_id
+            or html_to_text(values[index + 3]) != role
+            or any(values[index + offset].strip() != internal_id for offset in range(4, 9))
+        ):
+            continue
+        requisition = values[index + 17].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{5,}", requisition):
+            continue
+        posted_at = normalize_datetime(values[index + 15])
+        close_at = normalize_datetime(values[index + 16])
+        detail_url = normalize_job_url(
+            f"{detail_base}?{urllib.parse.urlencode({'job': requisition, 'lang': 'en'})}"
+        )
+        candidates[requisition] = {
+            "company": company,
+            "role": role,
+            "url": detail_url,
+            "platform": "taleo",
+            "location": normalize_taleo_location(values[index + 9]),
+            "job_number": requisition,
+            "external_job_id": internal_id,
+            "posted_at": posted_at,
+            "updated_at": close_at,
+            "source": board_url,
+            "source_query": "latest_open_postings",
+            "freshness_source": "taleo_posting_date" if posted_at else "unknown",
+            "notes": (
+                "Oracle Taleo official latest-results page. The board exposes only its "
+                "newest page in the initial response; daily runs provide incremental coverage."
+            ),
+            "_jd_text": "",
+        }
+    return list(candidates.values())
+
+
+def discover_taleo_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    if "/ats/careers/v2/" in urllib.parse.urlparse(board_url).path.lower():
+        return discover_taleo_v2_jobs(source)
+    try:
+        raw = fetch_url(board_url, timeout=int(source.get("timeout", 30)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Taleo board for {company}: {error}", file=sys.stderr)
+        return []
+    return parse_taleo_recent_listing(raw, board_url, company)
+
+
+def taleo_v2_search_url(source: dict[str, Any]) -> str:
+    board_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(board_url)
+    path = re.sub(
+        r"/(?:jobSearch|searchResults)$",
+        "/searchResults",
+        parsed.path,
+        flags=re.I,
+    )
+    return urllib.parse.urlunparse(
+        parsed._replace(path=path, fragment="")
+    )
+
+
+def parse_taleo_v2_results(
+    raw: str,
+    source_url: str,
+    company: str,
+) -> list[dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    pattern = (
+        r'<h4\b[^>]*class=["\'][^"\']*oracletaleocwsv2-head-title'
+        r'[^"\']*["\'][^>]*>\s*'
+        r'<a\b[^>]*href=["\']([^"\']*viewRequisition[^"\']*)'
+        r'["\'][^>]*>(.*?)</a>\s*</h4>\s*'
+        r'<div\b[^>]*>(.*?)</div>\s*'
+        r'<div\b[^>]*>(.*?)</div>'
+    )
+    for href, role_html, location_html, date_html in re.findall(
+        pattern,
+        raw,
+        flags=re.I | re.S,
+    ):
+        url = normalize_job_url(
+            urllib.parse.urljoin(
+                source_url,
+                href.replace("&amp;", "&"),
+            )
+        )
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(url).query
+        )
+        requisition_id = str(
+            (query.get("rid") or [""])[0]
+        ).strip()
+        role = html_to_text(role_html).strip()
+        if not requisition_id or not role:
+            continue
+        posted_at = normalize_datetime(html_to_text(date_html))
+        candidates[requisition_id] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "taleo",
+            "location": html_to_text(location_html).strip(),
+            "job_number": requisition_id,
+            "external_job_id": requisition_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": source_url,
+            "source_query": "all_open_postings",
+            "freshness_source": (
+                "taleo_v2_posted_date" if posted_at else "first_seen"
+            ),
+            "notes": (
+                "Oracle Taleo Business Edition v2 official careers board."
+            ),
+            "_jd_text": "",
+        }
+    return list(candidates.values())
+
+
+def discover_taleo_v2_jobs(
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    search_url = taleo_v2_search_url(source)
+    if not search_url:
+        return []
+    timeout = int(source.get("timeout", 30))
+    max_pages = min(max(int(source.get("max_pages", 25)), 1), 100)
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    visited: set[str] = set()
+    page_url = search_url
+    for _page_index in range(max_pages):
+        if page_url in visited:
+            break
+        visited.add(page_url)
+        raw = fetch_url_with_opener(
+            opener,
+            page_url,
+            timeout=timeout,
+        )
+        for candidate in parse_taleo_v2_results(
+            raw,
+            search_url,
+            company,
+        ):
+            candidates[str(candidate["external_job_id"])] = candidate
+        next_match = re.search(
+            (
+                r'<a\b[^>]*href=["\']([^"\']+)["\']'
+                r'[^>]*class=["\'][^"\']*jscroll-next'
+            ),
+            raw,
+            flags=re.I | re.S,
+        )
+        if not next_match:
+            break
+        page_url = urllib.parse.urljoin(
+            page_url,
+            next_match.group(1).replace("&amp;", "&"),
+        )
+
+    location_pattern = str(
+        source.get("location_include_regex") or ""
+    ).strip()
+    if location_pattern:
+        candidates = {
+            key: candidate
+            for key, candidate in candidates.items()
+            if re.search(
+                location_pattern,
+                str(candidate.get("location") or ""),
+                flags=re.I,
+            )
+        }
+
+    detail_limit = max(
+        0,
+        min(len(candidates), int(source.get("max_detail_pages", 40))),
+    )
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+    selected = list(candidates.values())
+    if truthy_source_flag(
+        source.get("prioritize_technical_titles"),
+        default=True,
+    ):
+        selected.sort(
+            key=lambda candidate: (
+                0 if unclassified_technical_title_relevant(candidate) else 1,
+                str(candidate.get("role") or "").casefold(),
+            )
+        )
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            raw = fetch_url(candidate["url"], timeout=timeout)
+        except Exception:  # noqa: BLE001
+            return
+        candidate["_jd_text"] = html_to_text(raw)
+
+    if detail_limit:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=detail_workers
+        ) as executor:
+            list(executor.map(enrich, selected[:detail_limit]))
+    return list(candidates.values())
+
+
+def parse_peopleadmin_detail(raw: str, url: str, company: str) -> dict[str, Any]:
+    fields: dict[str, str] = {}
+    for label, value in re.findall(
+        r"<tr\b[^>]*>\s*<th\b[^>]*>(.*?)</th>\s*<td\b[^>]*>(.*?)</td>\s*</tr>",
+        raw,
+        flags=re.I | re.S,
+    ):
+        key = re.sub(r"[^a-z0-9]+", " ", html_to_text(label).lower()).strip()
+        if key and key not in fields:
+            fields[key] = html_to_text(value)
+    heading = re.search(r"<h2\b[^>]*>(.*?)</h2>", raw, flags=re.I | re.S)
+    heading_role = html_to_text(heading.group(1)) if heading else ""
+    role = (
+        fields.get("working title")
+        or fields.get("position title")
+        or fields.get("job title")
+        or fields.get("title")
+        or heading_role
+        or infer_role_from_url(url)
+    )
+    posted_at = normalize_datetime(
+        fields.get("posting date")
+        or fields.get("open date")
+        or fields.get("date posted")
+    )
+    close_date = normalize_datetime(
+        fields.get("close date")
+        or fields.get("closing date")
+    )
+    return {
+        "company": company,
+        "role": role,
+        "url": normalize_job_url(url),
+        "platform": "peopleadmin",
+        "location": (
+            fields.get("location")
+            or fields.get("campus")
+            or fields.get("work location")
+            or ""
+        ),
+        "job_number": (
+            fields.get("posting number")
+            or fields.get("position number")
+            or urllib.parse.urlparse(url).path.rstrip("/").split("/")[-1]
+        ),
+        "external_job_id": urllib.parse.urlparse(url).path.rstrip("/").split("/")[-1],
+        "posted_at": posted_at,
+        "updated_at": close_date,
+        "source": url,
+        "source_query": "all_open_postings",
+        "freshness_source": "peopleadmin_posting_date" if posted_at else "unknown",
+        "notes": "PeopleAdmin official posting detail.",
+        "_jd_text": html_to_text(raw),
+    }
+
+
+def discover_peopleadmin_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    if "/postings/search" not in urllib.parse.urlparse(board_url).path:
+        board_url = urllib.parse.urljoin(board_url.rstrip("/") + "/", "postings/search")
+    try:
+        raw = fetch_url(board_url, timeout=int(source.get("timeout", 30)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch PeopleAdmin board for {company}: {error}", file=sys.stderr)
+        return []
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for match in re.finditer(
+        r'<a\b[^>]*href=["\']([^"\']*/postings/(\d+))["\'][^>]*>(.*?)</a>',
+        raw,
+        flags=re.I | re.S,
+    ):
+        role = html_to_text(match.group(3))
+        if not role or role.lower() in {"view details", "apply for this job"}:
+            continue
+        url = normalize_job_url(urllib.parse.urljoin(board_url, html.unescape(match.group(1))))
+        candidates.setdefault(
+            url,
+            {
+                "company": company,
+                "role": role,
+                "url": url,
+                "platform": "peopleadmin",
+                "location": "",
+                "job_number": match.group(2),
+                "external_job_id": match.group(2),
+                "posted_at": "",
+                "updated_at": "",
+                "source": source.get("url", board_url),
+                "source_query": "all_open_postings",
+                "freshness_source": "unknown",
+                "notes": "PeopleAdmin official open-postings list; detail page supplies official dates.",
+                "_jd_text": "",
+            },
+        )
+
+    detail_limit = min(len(candidates), int(source.get("max_detail_pages", 100)))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(
+                str(candidate["url"]),
+                timeout=int(source.get("detail_timeout", 20)),
+            )
+        except Exception:
+            return
+        detail = parse_peopleadmin_detail(detail_raw, str(candidate["url"]), company)
+        for key in [
+            "role",
+            "location",
+            "job_number",
+            "external_job_id",
+            "posted_at",
+            "updated_at",
+            "_jd_text",
+        ]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["freshness_source"] = detail["freshness_source"]
+        candidate["notes"] = detail["notes"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+        list(executor.map(enrich, list(candidates.values())[:detail_limit]))
+    return list(candidates.values())
+
+
+def paycom_client_key(source: dict[str, Any]) -> str:
+    configured = str(source.get("client_key") or source.get("clientkey") or "").strip()
+    if configured:
+        return configured
+    url = str(source.get("url") or "")
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("clientkey", "clientKey"):
+        values = query.get(key) or []
+        if values and str(values[0]).strip():
+            return str(values[0]).strip()
+    match = re.search(r"/portal/([A-Za-z0-9_-]+)/", parsed.path, flags=re.I)
+    return match.group(1) if match else ""
+
+
+def paycom_portal_url(source: dict[str, Any]) -> str:
+    client_key = paycom_client_key(source)
+    if not client_key:
+        return str(source.get("url") or "")
+    return f"https://www.paycomonline.net/v4/ats/web.php/portal/{urllib.parse.quote(client_key)}/career-page"
+
+
+def source_from_paycom_url(company: str, url: str) -> dict[str, Any] | None:
+    client_key = paycom_client_key({"url": url})
+    if not client_key:
+        return None
+    return {
+        "company": company,
+        "platform": "paycom",
+        "client_key": client_key,
+        "url": paycom_portal_url({"client_key": client_key}),
+    }
+
+
+def ultipro_board_url(source: dict[str, Any]) -> str:
+    raw_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(raw_url)
+    match = re.match(
+        r"(?P<path>/[^/]+/JobBoard/[0-9a-f-]+)",
+        parsed.path,
+        flags=re.I,
+    )
+    if not parsed.netloc or not match:
+        return raw_url.split("?", 1)[0].rstrip("/") + "/"
+    return urllib.parse.urlunparse(
+        (
+            parsed.scheme or "https",
+            parsed.netloc,
+            match.group("path").rstrip("/") + "/",
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def source_from_ultipro_url(company: str, url: str) -> dict[str, Any] | None:
+    board_url = ultipro_board_url({"url": url})
+    if detect_platform(board_url) != "ultipro":
+        return None
+    return {
+        "company": company,
+        "platform": "ultipro",
+        "url": board_url,
+        "page_size": 50,
+        "max_pages": 10,
+    }
+
+
+def parse_ultipro_board_config(raw: str, board_url: str) -> dict[str, str]:
+    token_match = re.search(
+        r'name=["\']__RequestVerificationToken["\'][^>]*value=["\']([^"\']+)',
+        raw,
+        flags=re.I,
+    )
+    load_match = re.search(r'\bloadUrl\s*:\s*["\']([^"\']*LoadSearchResults[^"\']*)', raw, flags=re.I)
+    detail_match = re.search(
+        r'\bopportunityLinkUrl\s*:\s*["\']([^"\']*OpportunityDetail[^"\']*)',
+        raw,
+        flags=re.I,
+    )
+    return {
+        "request_token": html.unescape(token_match.group(1)) if token_match else "",
+        "load_url": urllib.parse.urljoin(board_url, html.unescape(load_match.group(1))) if load_match else "",
+        "detail_url": urllib.parse.urljoin(board_url, html.unescape(detail_match.group(1))) if detail_match else "",
+    }
+
+
+def initialize_ultipro_session(
+    source: dict[str, Any],
+) -> tuple[urllib.request.OpenerDirector, dict[str, str]]:
+    board_url = ultipro_board_url(source)
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    request = urllib.request.Request(
+        board_url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    with opener.open(request, timeout=int(source.get("timeout", 25))) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        raw = response.read().decode(charset, errors="replace")
+    config = parse_ultipro_board_config(raw, board_url)
+    if not config["request_token"] or not config["load_url"] or not config["detail_url"]:
+        raise ValueError("UKG/UltiPro board did not expose public search configuration")
+    return opener, config
+
+
+def ultipro_search_payload(skip: int, top: int) -> dict[str, Any]:
+    return {
+        "opportunitySearch": {
+            "QueryString": "",
+            "LocationIds": [],
+            "JobCategoryIds": [],
+            "FullTime": None,
+            "OrderBy": [
+                {
+                    "Value": "postedDateDesc",
+                    "PropertyName": "PostedDate",
+                    "Ascending": False,
+                }
+            ],
+            "ProximitySearchType": 0,
+            "Top": top,
+            "Skip": skip,
+        }
+    }
+
+
+def fetch_ultipro_search_page(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    request_token: str,
+    payload: dict[str, Any],
+    *,
+    referer: str,
+    timeout: int = 25,
+) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-RequestVerificationToken": request_token,
+            "Referer": referer,
+        },
+        method="POST",
+    )
+    with opener.open(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        data = json.loads(response.read().decode(charset, errors="replace"))
+    return data if isinstance(data, dict) else {}
+
+
+def parse_ultipro_detail(raw: str) -> dict[str, Any]:
+    marker = re.search(r"\bCandidateOpportunityDetail\s*\(\s*", raw)
+    if not marker:
+        return {}
+    try:
+        detail, _ = json.JSONDecoder().raw_decode(raw[marker.end():].lstrip())
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def ultipro_location_text(locations: Any) -> str:
+    if not isinstance(locations, list):
+        return compact_location_text(locations)
+    values: list[str] = []
+    for location in locations:
+        if not isinstance(location, dict):
+            value = compact_location_text(location)
+        else:
+            address = location.get("Address") or {}
+            if not isinstance(address, dict):
+                address = {}
+            state = address.get("State") or {}
+            country = address.get("Country") or {}
+            state_code = state.get("Code") if isinstance(state, dict) else state
+            country_code = country.get("Code") if isinstance(country, dict) else country
+            address_parts = [
+                str(address.get("City") or "").strip(),
+                str(state_code or "").strip(),
+            ]
+            value = ", ".join(part for part in address_parts if part)
+            if country_code and str(country_code).upper() not in {"US", "USA", "UNITED STATES"}:
+                value = ", ".join(part for part in [value, str(country_code).strip()] if part)
+            if not value:
+                value = str(
+                    location.get("LocalizedDescription")
+                    or location.get("LocalizedName")
+                    or ""
+                ).strip()
+        if value and value not in values:
+            values.append(value)
+    return " | ".join(values)
+
+
+def discover_ultipro_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = ultipro_board_url(source)
+    try:
+        opener, config = initialize_ultipro_session(source)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not initialize UKG/UltiPro board for {company}: {error}", file=sys.stderr)
+        return []
+
+    page_size = min(max(int(source.get("page_size", 50)), 1), 50)
+    max_pages = max(int(source.get("max_pages", 10)), 1)
+    previews_by_id: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        try:
+            data = fetch_ultipro_search_page(
+                opener,
+                config["load_url"],
+                config["request_token"],
+                ultipro_search_payload(page_index * page_size, page_size),
+                referer=board_url,
+                timeout=int(source.get("timeout", 25)),
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch UKG/UltiPro jobs for {company}: {error}", file=sys.stderr)
+            break
+        opportunities = data.get("opportunities") or []
+        if not isinstance(opportunities, list) or not opportunities:
+            break
+        for opportunity in opportunities:
+            if not isinstance(opportunity, dict):
+                continue
+            opportunity_id = str(opportunity.get("Id") or "").strip()
+            location_pattern = str(
+                source.get("location_include_regex") or ""
+            ).strip()
+            preview_location = ultipro_location_text(
+                opportunity.get("Locations") or []
+            )
+            if location_pattern and not re.search(
+                location_pattern,
+                preview_location,
+                flags=re.I,
+            ):
+                continue
+            if opportunity_id:
+                previews_by_id[opportunity_id] = opportunity
+        total = int(data.get("totalCount") or len(previews_by_id))
+        if len(previews_by_id) >= total or len(opportunities) < page_size:
+            break
+
+    detail_limit = max(int(source.get("max_detail_pages", len(previews_by_id))), 0)
+    detail_ids = list(previews_by_id)[:detail_limit]
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+    zero_id = "00000000-0000-0000-0000-000000000000"
+
+    def fetch_detail(opportunity_id: str) -> tuple[str, dict[str, Any], str]:
+        detail_url = normalize_job_url(config["detail_url"].replace(zero_id, opportunity_id))
+        try:
+            raw = fetch_url(detail_url, timeout=int(source.get("detail_timeout", 25)))
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch UKG/UltiPro detail for {company} job {opportunity_id}: {error}", file=sys.stderr)
+            return opportunity_id, {}, detail_url
+        return opportunity_id, parse_ultipro_detail(raw), detail_url
+
+    details_by_id: dict[str, tuple[dict[str, Any], str]] = {}
+    if detail_ids:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for opportunity_id, detail, detail_url in executor.map(fetch_detail, detail_ids):
+                details_by_id[opportunity_id] = (detail, detail_url)
+
+    candidates: list[dict[str, Any]] = []
+    for opportunity_id, preview in previews_by_id.items():
+        detail, detail_url = details_by_id.get(
+            opportunity_id,
+            ({}, normalize_job_url(config["detail_url"].replace(zero_id, opportunity_id))),
+        )
+        role = str(detail.get("Title") or preview.get("Title") or f"Job {opportunity_id}").strip()
+        posted_at = normalize_datetime(detail.get("PostedDate") or preview.get("PostedDate"))
+        updated_at = normalize_datetime(detail.get("UpdatedDate"))
+        requisition_number = str(
+            detail.get("RequisitionNumber")
+            or preview.get("RequisitionNumber")
+            or ""
+        ).strip()
+        description = html_to_text(
+            str(
+                detail.get("Description")
+                or preview.get("BriefDescription")
+                or ""
+            )
+        )
+        locations = detail.get("Locations") or preview.get("Locations") or []
+        candidates.append(
+            {
+                "company": company,
+                "role": role,
+                "url": detail_url,
+                "platform": "ultipro",
+                "location": ultipro_location_text(locations),
+                "job_number": requisition_number,
+                "external_job_id": opportunity_id,
+                "posted_at": posted_at,
+                "updated_at": updated_at,
+                "source": board_url,
+                "source_query": str(
+                    detail.get("JobCategoryName")
+                    or preview.get("JobCategoryName")
+                    or ""
+                ).strip(),
+                "freshness_source": "ultipro_posted_date" if posted_at else "unknown",
+                "notes": "UKG/UltiPro public job board API and detail adapter.",
+                "_jd_text": "\n\n".join(
+                    part
+                    for part in [
+                        role,
+                        description,
+                        html_to_text(str(preview.get("BriefDescription") or "")),
+                    ]
+                    if part
+                ),
+            }
+        )
+    return candidates
+
+
+def zoho_recruit_jobs_from_html(raw: str) -> list[dict[str, Any]]:
+    tag_match = re.search(
+        r'<input\b(?=[^>]*\bid=["\']jobs["\'])[^>]*>',
+        raw,
+        flags=re.I | re.S,
+    )
+    if not tag_match:
+        return []
+    value_match = re.search(r'\bvalue=(["\'])(.*?)\1', tag_match.group(0), flags=re.I | re.S)
+    if not value_match:
+        return []
+    try:
+        jobs = json.loads(html.unescape(value_match.group(2)))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
+
+
+def zoho_recruit_location(job: dict[str, Any]) -> str:
+    location = ", ".join(
+        str(job.get(key) or "").strip()
+        for key in ["City", "State", "Country"]
+        if str(job.get(key) or "").strip()
+    )
+    if truthy_source_flag(job.get("Remote_Job"), default=False):
+        return f"Remote | {location}" if location else "Remote, United States"
+    return location
+
+
+def discover_zoho_recruit_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").split("?", 1)[0].rstrip("/")
+    try:
+        raw = fetch_url(board_url, timeout=int(source.get("timeout", 30)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch Zoho Recruit board for {company}: {error}", file=sys.stderr)
+        return []
+    candidates: list[dict[str, Any]] = []
+    for job in zoho_recruit_jobs_from_html(raw):
+        if job.get("Publish") is False or job.get("Is_Locked") is True:
+            continue
+        job_id = str(job.get("id") or "").strip()
+        role = str(job.get("Posting_Title") or job.get("Job_Opening_Name") or "").strip()
+        if not job_id or not role:
+            continue
+        detail_url = normalize_job_url(
+            f"{board_url}/{urllib.parse.quote(job_id)}/{urllib.parse.quote(slugify(role))}"
+        )
+        department = job.get("Department_Name") or {}
+        if isinstance(department, dict):
+            department = department.get("name") or ""
+        posted_at = normalize_datetime(job.get("Date_Opened"))
+        description = html_to_text(str(job.get("Job_Description") or ""))
+        candidates.append(
+            {
+                "company": company,
+                "role": role,
+                "url": detail_url,
+                "platform": "zoho_recruit",
+                "location": zoho_recruit_location(job),
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": board_url,
+                "source_query": str(department).strip(),
+                "freshness_source": "zoho_recruit_date_opened" if posted_at else "unknown",
+                "notes": "Zoho Recruit public career-site structured jobs adapter.",
+                "_jd_text": "\n\n".join(part for part in [role, description] if part),
+            }
+        )
+    return candidates
+
+
+def parse_paycom_portal_config(raw: str) -> dict[str, str]:
+    marker = re.search(r"\bvar\s+configsFromHost\s*=\s*", raw)
+    if not marker:
+        return {}
+    try:
+        config, _ = json.JSONDecoder().raw_decode(raw[marker.end():].lstrip())
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(config, dict):
+        return {}
+    lib_config = config.get("libConfig") or {}
+    if isinstance(lib_config, str):
+        with contextlib.suppress(json.JSONDecodeError):
+            lib_config = json.loads(lib_config)
+    if not isinstance(lib_config, dict):
+        lib_config = {}
+    return {
+        "session_jwt": str(config.get("sessionJWT") or ""),
+        "service_url": str(lib_config.get("atsPortalMantleServiceUrl") or ""),
+    }
+
+
+def fetch_paycom_json(
+    url: str,
+    session_jwt: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 20,
+) -> Any:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "application/json,*/*;q=0.8",
+            "Content-Type": "application/json",
+            "Authorization": session_jwt,
+            "Locale": "en-US",
+            "Translation-Highlights": "false",
+        },
+        method="POST" if payload is not None else "GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="replace"))
+
+
+def paycom_search_payload(skip: int, take: int) -> dict[str, Any]:
+    return {
+        "skip": skip,
+        "take": take,
+        "filtersForQuery": {
+            "distanceFrom": 0,
+            "workEnvironments": [],
+            "positionTypes": [],
+            "educationLevels": [],
+            "categories": [],
+            "travelTypes": [],
+            "shiftTypes": [],
+            "otherFilters": [],
+            "keywordSearchText": "",
+            "location": "",
+            "sortOption": "",
+        },
+    }
+
+
+def discover_paycom_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    client_key = paycom_client_key(source)
+    portal_url = paycom_portal_url(source)
+    if not client_key or not portal_url:
+        return []
+    try:
+        portal_raw = fetch_url(portal_url, timeout=int(source.get("timeout", 20)))
+        portal_config = parse_paycom_portal_config(portal_raw)
+        session_jwt = portal_config["session_jwt"]
+        service_url = portal_config["service_url"].rstrip("/") + "/"
+        if not session_jwt or not service_url.startswith("http"):
+            raise ValueError("Paycom portal did not expose a public session or API URL")
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not initialize Paycom API for {company}: {error}", file=sys.stderr)
+        return []
+
+    page_size = min(max(int(source.get("page_size", 100)), 1), 100)
+    max_pages = max(int(source.get("max_pages", 5)), 1)
+    search_url = urllib.parse.urljoin(service_url, "api/ats/job-posting-previews/search")
+    previews_by_id: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        try:
+            data = fetch_paycom_json(
+                search_url,
+                session_jwt,
+                payload=paycom_search_payload(page_index * page_size, page_size),
+                timeout=int(source.get("timeout", 20)),
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Paycom jobs for {company}: {error}", file=sys.stderr)
+            break
+        previews = data.get("jobPostingPreviews") or []
+        if not isinstance(previews, list) or not previews:
+            break
+        for preview in previews:
+            if not isinstance(preview, dict):
+                continue
+            job_id = str(preview.get("jobId") or "").strip()
+            if job_id:
+                previews_by_id[job_id] = preview
+        total = int(data.get("jobPostingPreviewsCount") or len(previews_by_id))
+        if len(previews_by_id) >= total or len(previews) < page_size:
+            break
+
+    detail_limit = max(int(source.get("max_detail_pages", len(previews_by_id))), 0)
+    detail_ids = list(previews_by_id)[:detail_limit]
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+    detail_timeout = int(source.get("detail_timeout", source.get("timeout", 20)))
+
+    def fetch_detail(job_id: str) -> tuple[str, dict[str, Any]]:
+        detail_url = urllib.parse.urljoin(
+            service_url,
+            f"api/ats/job-postings/{urllib.parse.quote(job_id)}",
+        )
+        try:
+            detail_data = fetch_paycom_json(detail_url, session_jwt, timeout=detail_timeout)
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Paycom detail for {company} job {job_id}: {error}", file=sys.stderr)
+            return job_id, {}
+        detail = detail_data.get("jobPosting") or {}
+        return job_id, detail if isinstance(detail, dict) else {}
+
+    details_by_id: dict[str, dict[str, Any]] = {}
+    if detail_ids:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            for job_id, detail in executor.map(fetch_detail, detail_ids):
+                details_by_id[job_id] = detail
+
+    candidates: list[dict[str, Any]] = []
+    for job_id, preview in previews_by_id.items():
+        detail = details_by_id.get(job_id, {})
+        google_job: dict[str, Any] = {}
+        raw_google_job = detail.get("googleJobJson")
+        if isinstance(raw_google_job, str) and raw_google_job.strip():
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed_google_job = json.loads(raw_google_job)
+                if isinstance(parsed_google_job, dict):
+                    google_job = parsed_google_job
+        role = str(detail.get("jobTitle") or preview.get("jobTitle") or f"Job {job_id}").strip()
+        location = compact_location_text(
+            preview.get("locations")
+            or detail.get("location")
+            or google_job.get("jobLocation")
+        )
+        url = normalize_job_url(
+            str(google_job.get("url") or f"{portal_url.rsplit('/career-page', 1)[0]}/jobs/{job_id}")
+        )
+        description = "\n".join(
+            part
+            for part in [
+                html_to_text(str(detail.get("description") or preview.get("description") or "")),
+                html_to_text(str(detail.get("qualifications") or "")),
+            ]
+            if part
+        )
+        candidates.append(
+            {
+                "company": company,
+                "role": role,
+                "url": url,
+                "platform": "paycom",
+                "location": location,
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": normalize_datetime(
+                    google_job.get("datePosted") or preview.get("postedOn")
+                ),
+                "updated_at": "",
+                "source": source.get("url", portal_url),
+                "source_query": "all_jobs",
+                "freshness_source": "paycom_json_ld_date_posted" if google_job.get("datePosted") else "unknown",
+                "notes": "Paycom public career portal API adapter.",
+                "_jd_text": description,
+            }
+        )
+    location_pattern = str(
+        source.get("location_include_regex") or ""
+    ).strip()
+    if location_pattern:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if re.search(
+                location_pattern,
+                str(candidate.get("location") or ""),
+                flags=re.I,
+            )
+        ]
+    return candidates
 
 
 def workable_account(source: dict[str, Any]) -> str:
@@ -3738,39 +7486,58 @@ def discover_workable_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         f"https://apply.workable.com/api/v3/accounts/{urllib.parse.quote(account)}/jobs",
         f"https://apply.workable.com/api/v1/accounts/{urllib.parse.quote(account)}/jobs",
     ]
+    max_pages = int(source.get("max_pages", 10))
     for keyword in [str(item) for item in keywords if str(item).strip()]:
         for endpoint in endpoints:
-            params = {"query": keyword}
-            try:
-                data = fetch_json(f"{endpoint}?{urllib.parse.urlencode(params)}")
-            except Exception:
-                continue
-            jobs = data.get("results") or data.get("jobs") or data.get("content") or []
-            if not isinstance(jobs, list):
-                continue
-            for job in jobs:
-                if not isinstance(job, dict):
-                    continue
-                shortcode = str(job.get("shortcode") or job.get("id") or "").strip()
-                title = str(job.get("title") or job.get("name") or infer_role_from_url(shortcode)).strip()
-                url = normalize_job_url(str(job.get("url") or job.get("application_url") or ""))
-                if not url and shortcode:
-                    url = normalize_job_url(f"https://apply.workable.com/{account}/j/{urllib.parse.quote(shortcode)}")
-                candidates[url] = {
-                    "company": company,
-                    "role": title,
-                    "url": url,
-                    "platform": "workable",
-                    "location": compact_location_text(job.get("location") or job.get("locations")),
-                    "job_number": shortcode,
-                    "external_job_id": shortcode,
-                    "posted_at": normalize_datetime(job.get("published_on") or job.get("created_at") or job.get("created")),
-                    "updated_at": normalize_datetime(job.get("updated_at")),
-                    "source": source.get("url", f"https://apply.workable.com/{account}/"),
-                    "source_query": keyword,
-                    "notes": f"Workable direct adapter; account={account}",
-                }
-            break
+            token = ""
+            endpoint_succeeded = False
+            for _page_index in range(max_pages):
+                payload = {"query": keyword}
+                if token:
+                    payload["token"] = token
+                try:
+                    data = fetch_json_post(endpoint, payload)
+                except Exception:
+                    break
+                endpoint_succeeded = True
+                jobs = data.get("results") or data.get("jobs") or data.get("content") or []
+                if not isinstance(jobs, list):
+                    break
+                for job in jobs:
+                    if not isinstance(job, dict):
+                        continue
+                    shortcode = str(job.get("shortcode") or job.get("id") or "").strip()
+                    title = str(job.get("title") or job.get("name") or infer_role_from_url(shortcode)).strip()
+                    url = normalize_job_url(str(job.get("url") or job.get("application_url") or ""))
+                    if not url and shortcode:
+                        url = normalize_job_url(
+                            f"https://apply.workable.com/{account}/j/{urllib.parse.quote(shortcode)}"
+                        )
+                    candidates[url] = {
+                        "company": company,
+                        "role": title,
+                        "url": url,
+                        "platform": "workable",
+                        "location": compact_location_text(job.get("location") or job.get("locations")),
+                        "job_number": shortcode,
+                        "external_job_id": shortcode,
+                        "posted_at": normalize_datetime(
+                            job.get("published")
+                            or job.get("published_on")
+                            or job.get("created_at")
+                            or job.get("created")
+                        ),
+                        "updated_at": normalize_datetime(job.get("updated_at")),
+                        "source": source.get("url", f"https://apply.workable.com/{account}/"),
+                        "source_query": keyword,
+                        "notes": f"Workable direct adapter; account={account}",
+                    }
+                next_token = str(data.get("nextPage") or data.get("next_page") or "").strip()
+                if not next_token or next_token == token:
+                    break
+                token = next_token
+            if endpoint_succeeded:
+                break
     return list(candidates.values())
 
 
@@ -4172,10 +7939,35 @@ def rss_block_text(block: str, tag: str) -> str:
     return html.unescape(value).strip()
 
 
-def rss_items_from_regex(raw: str) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
+def rss_block_texts(block: str, tag: str) -> list[str]:
+    pattern = rf"<{re.escape(tag)}(?:\s[^>]*)?>(.*?)</{re.escape(tag)}>"
+    values: list[str] = []
+    for raw_value in re.findall(pattern, block, flags=re.I | re.S):
+        value = html.unescape(str(raw_value)).strip()
+        cdata = re.fullmatch(r"<!\[CDATA\[(.*)\]\]>", value, flags=re.S)
+        if cdata:
+            value = cdata.group(1).strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def rss_items_from_regex(raw: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     for block in re.findall(r"<item\b[^>]*>(.*?)</item>", raw, flags=re.I | re.S):
         description = rss_block_text(block, "description") or rss_block_text(block, "content:encoded")
+        cities = merge_unique(
+            rss_block_texts(block, "tt:city"),
+            rss_block_texts(block, "job:city"),
+        )
+        states = merge_unique(
+            rss_block_texts(block, "tt:state"),
+            rss_block_texts(block, "job:state"),
+        )
+        countries = merge_unique(
+            rss_block_texts(block, "tt:country"),
+            rss_block_texts(block, "job:country"),
+        )
         items.append(
             {
                 "title": rss_block_text(block, "title"),
@@ -4183,9 +7975,56 @@ def rss_items_from_regex(raw: str) -> list[dict[str, str]]:
                 "guid": rss_block_text(block, "guid"),
                 "description": description,
                 "pubDate": rss_block_text(block, "pubDate"),
+                "cities": cities,
+                "states": states,
+                "countries": countries,
+                "department": (
+                    rss_block_text(block, "tt:department")
+                    or rss_block_text(block, "job:category")
+                ),
+                "categories": rss_block_texts(block, "category"),
+            }
+        )
+    for block in re.findall(r"<entry\b[^>]*>(.*?)</entry>", raw, flags=re.I | re.S):
+        link_match = re.search(
+            r"<link\b[^>]*\bhref=[\"']([^\"']+)[\"'][^>]*/?>",
+            block,
+            flags=re.I | re.S,
+        )
+        link = html.unescape(link_match.group(1)).strip() if link_match else rss_block_text(block, "link")
+        items.append(
+            {
+                "title": rss_block_text(block, "title"),
+                "link": link,
+                "guid": rss_block_text(block, "id") or link,
+                "description": (
+                    rss_block_text(block, "content")
+                    or rss_block_text(block, "summary")
+                ),
+                "pubDate": (
+                    rss_block_text(block, "published")
+                    or rss_block_text(block, "updated")
+                ),
+                "cities": [],
+                "states": [],
+                "countries": [],
+                "department": "",
+                "categories": rss_block_texts(block, "category"),
             }
         )
     return items
+
+
+def rss_xml_texts_by_local_name(item: Any, local_name: str) -> list[str]:
+    values: list[str] = []
+    for element in item.iter():
+        tag = str(getattr(element, "tag", ""))
+        if tag.rsplit("}", 1)[-1] != local_name:
+            continue
+        value = str(getattr(element, "text", "") or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 def sitemap_entries_from_regex(raw: str) -> list[dict[str, str]]:
@@ -4259,7 +8098,9 @@ def discover_sitemap_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             }
             for url_node in root.findall(".//{*}url")
         ]
-    except (ET.ParseError, ImportError) as error:
+    except ImportError:
+        entries = sitemap_entries_from_regex(raw)
+    except ET.ParseError as error:
         print(f"Could not parse sitemap for {company} with XML parser, using fallback: {error}", file=sys.stderr)
         entries = sitemap_entries_from_regex(raw)
     include_regex = str(source.get("include_url_regex") or "")
@@ -4275,6 +8116,7 @@ def discover_sitemap_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         if include_regex and not re.search(include_regex, url):
             continue
         role, location = sitemap_role_location_from_url(source, url)
+        location = location or str(source.get("default_location") or "").strip()
         if keyword_values and not any(keyword_matches_title(keyword, role) for keyword in keyword_values):
             continue
         lastmod = str(entry.get("lastmod") or "")
@@ -4293,6 +8135,41 @@ def discover_sitemap_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             "_jd_text": "\n\n".join(block for block in [role, location] if block),
             "notes": f"Sitemap adapter; lastmod is used as freshness proxy. sitemap={sitemap_url}",
         }
+    if truthy_source_flag(source.get("fetch_details"), default=False):
+        detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+        detail_workers = max(1, int(source.get("detail_workers", 8)))
+        selected = sorted(
+            candidates.values(),
+            key=lambda candidate: (
+                0 if unclassified_technical_title_relevant(candidate) else 1,
+                str(candidate.get("role") or "").lower(),
+            ),
+        )[:detail_limit]
+
+        def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+            try:
+                detail_raw = fetch_url(candidate["url"])
+            except Exception:
+                return candidate["url"], None
+            parsed = parse_json_ld_jobs(detail_raw, candidate["url"], str(company))
+            return candidate["url"], parsed[0] if parsed else None
+
+        if selected:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+                for url, detail in executor.map(enrich, selected):
+                    if not detail:
+                        continue
+                    candidate = candidates[url]
+                    for key in ["role", "location", "posted_at", "updated_at"]:
+                        if detail.get(key):
+                            candidate[key] = detail[key]
+                    if detail.get("_jd_text"):
+                        candidate["_jd_text"] = detail["_jd_text"]
+                    if detail.get("posted_at"):
+                        candidate["freshness_source"] = "sitemap_json_ld_date_posted"
+                    candidate["notes"] = (
+                        f"Sitemap listing enriched from official detail-page JSON-LD. sitemap={sitemap_url}"
+                    )
     return list(candidates.values())
 
 
@@ -4305,7 +8182,7 @@ def governmentjobs_agency(source: dict[str, Any]) -> str:
     return ""
 
 
-def governmentjobs_search_url(source: dict[str, Any], keyword: str, page: int) -> str:
+def governmentjobs_search_url(source: dict[str, Any], keyword: str, page: int, category: str = "") -> str:
     parsed = urllib.parse.urlparse(str(source.get("url") or "https://www.governmentjobs.com/careers"))
     scheme = parsed.scheme or "https"
     host = parsed.netloc or "www.governmentjobs.com"
@@ -4319,7 +8196,51 @@ def governmentjobs_search_url(source: dict[str, Any], keyword: str, page: int) -
     }
     if source.get("department_folder"):
         params["departmentFolder"] = str(source["department_folder"])
+    if category:
+        params["category[0]"] = category
     return f"{scheme}://{host}/careers/home/index?{urllib.parse.urlencode(params)}"
+
+
+def governmentjobs_query_plan(source: dict[str, Any]) -> list[dict[str, str]]:
+    mode = str(source.get("governmentjobs_query_mode") or "keywords").strip().lower()
+    configured_keywords = source.get("keywords")
+    if configured_keywords is None:
+        keywords = list(DEFAULT_WORKDAY_KEYWORDS)
+    elif isinstance(configured_keywords, str):
+        keywords = [configured_keywords]
+    else:
+        keywords = [str(item) for item in configured_keywords if str(item).strip()]
+    if mode == "keywords" and str(source.get("track_hint") or "") == "traditional_it_wa":
+        keywords = merge_unique(keywords, DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS)
+
+    configured_categories = source.get("categories") or []
+    if isinstance(configured_categories, str):
+        configured_categories = [configured_categories]
+    categories = [str(item).strip() for item in configured_categories if str(item).strip()]
+
+    plan: list[dict[str, str]] = []
+    if mode in {"all", "all_recent", "category_plus_keywords"}:
+        if mode in {"all", "all_recent"} or truthy_source_flag(source.get("scan_all_jobs"), default=False):
+            plan.append({"keyword": "", "category": "", "label": "all_recent_jobs", "kind": "all"})
+        for category in categories:
+            plan.append({"keyword": "", "category": category, "label": f"category:{category}", "kind": "category"})
+    if mode in {"keywords", "category_plus_keywords"}:
+        plan.extend(
+            {"keyword": keyword, "category": "", "label": keyword, "kind": "keyword"}
+            for keyword in keywords
+            if keyword.strip()
+        )
+    return plan or [{"keyword": "", "category": "", "label": "all_recent_jobs", "kind": "all"}]
+
+
+def governmentjobs_page_is_older_than(candidates: list[dict[str, Any]], recent_days: int) -> bool:
+    if recent_days <= 0 or not candidates:
+        return False
+    dates = [parse_datetime(candidate.get("posted_at")) for candidate in candidates]
+    if any(value is None for value in dates):
+        return False
+    cutoff_date = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=recent_days)
+    return all(value.date() < cutoff_date for value in dates if value is not None)
 
 
 def fetch_governmentjobs_search(url: str, source: dict[str, Any], timeout: int = 30) -> str:
@@ -4346,6 +8267,8 @@ def governmentjobs_newprint_url(job_url: str, job_id: str) -> str:
     if len(path_parts) >= 2 and path_parts[0].lower() == "careers":
         agency = path_parts[1]
     if not agency:
+        if parsed.netloc.lower().endswith("governmentjobs.com"):
+            return urllib.parse.urlunparse(parsed._replace(path=f"/jobs/newprint/{job_id}", query="", fragment=""))
         return job_url
     return urllib.parse.urlunparse(parsed._replace(path=f"/careers/{agency}/jobs/newprint/{job_id}", query="", fragment=""))
 
@@ -4433,30 +8356,47 @@ def parse_governmentjobs_listing(raw: str, source: dict[str, Any], search_url: s
 
 
 def discover_governmentjobs_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
-    keywords = source.get("keywords") or DEFAULT_WORKDAY_KEYWORDS
-    if isinstance(keywords, str):
-        keywords = [keywords]
-    if str(source.get("track_hint") or "") == "traditional_it_wa":
-        keywords = merge_unique(keywords, DEFAULT_GOVERNMENTJOBS_TRADITIONAL_IT_KEYWORDS)
     max_pages = int(source.get("max_pages", 2))
+    max_all_pages = int(source.get("max_all_pages", max_pages))
+    max_keyword_pages = int(source.get("max_keyword_pages", max_pages))
     max_detail_pages = int(source.get("max_detail_pages", 10))
+    recent_days = int(source.get("crawl_recent_days", 14))
     candidates_by_url: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
-        for page in range(1, max_pages + 1):
-            search_url = governmentjobs_search_url(source, keyword, page)
+    for query in governmentjobs_query_plan(source):
+        keyword = query["keyword"]
+        category = query["category"]
+        if query.get("kind") == "all":
+            page_limit = max_all_pages
+        elif query.get("kind") == "keyword":
+            page_limit = max_keyword_pages
+        else:
+            page_limit = max_pages
+        for page in range(1, page_limit + 1):
+            search_url = governmentjobs_search_url(source, keyword, page, category)
             try:
                 raw = fetch_governmentjobs_search(search_url, source, timeout=30)
             except Exception as error:  # noqa: BLE001
                 print(f"Could not fetch GovernmentJobs search for {source.get('company', 'GovernmentJobs')}: {error}", file=sys.stderr)
                 break
-            page_candidates = parse_governmentjobs_listing(raw, source, search_url, keyword)
+            page_candidates = parse_governmentjobs_listing(raw, source, search_url, query["label"])
             if not page_candidates:
                 break
             for candidate in page_candidates:
                 candidates_by_url[candidate["url"]] = candidate
+            if governmentjobs_page_is_older_than(page_candidates, recent_days):
+                break
             if "next-page" not in raw.lower() and f"page={page + 1}" not in raw:
                 break
-    for candidate in list(candidates_by_url.values())[:max_detail_pages]:
+    detail_candidates = list(candidates_by_url.values())
+    if str(source.get("track_hint") or "") == "traditional_it_wa":
+        profile = {"_track": {"id": "traditional_it_wa"}}
+        detail_candidates.sort(
+            key=lambda candidate: (
+                0 if maybe_backlog_title_relevant(candidate, profile) else 1,
+                str(candidate.get("role") or "").lower(),
+            )
+        )
+    for candidate in detail_candidates[:max_detail_pages]:
         job_id = str(candidate.get("external_job_id") or candidate.get("job_number") or "")
         if not job_id:
             continue
@@ -4474,6 +8414,180 @@ def discover_governmentjobs_jobs(source: dict[str, Any]) -> list[dict[str, Any]]
     return list(candidates_by_url.values())
 
 
+def governmentjobs_global_search_url(
+    source: dict[str, Any],
+    page: int,
+    keyword: str = "",
+    category: str = "",
+) -> str:
+    parsed = urllib.parse.urlparse(str(source.get("url") or "https://www.governmentjobs.com/jobs"))
+    params = {
+        "keyword": keyword,
+        "location": str(source.get("location") or "Washington"),
+        "page": str(page),
+        "sort": str(source.get("sort") or "PostingDate"),
+        "isDescendingSort": "true" if truthy_source_flag(source.get("is_descending_sort"), default=True) else "false",
+        "isPromotional": "False",
+        "isTransfer": "False",
+    }
+    if category:
+        params["category[0]"] = category
+    organizations = source.get("organizations") or source.get("organization") or []
+    if isinstance(organizations, str):
+        organizations = [organizations]
+    for index, organization in enumerate(organizations):
+        value = str(organization).strip()
+        if value:
+            params[f"organization[{index}]"] = value
+    return urllib.parse.urlunparse(
+        parsed._replace(path="/jobs", query=urllib.parse.urlencode(params), fragment="")
+    )
+
+
+def governmentjobs_global_query_plan(source: dict[str, Any]) -> list[dict[str, str]]:
+    categories = source.get("categories") or ["IT and Computers"]
+    if isinstance(categories, str):
+        categories = [categories]
+    keywords = source.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    plan = [
+        {"keyword": "", "category": str(category).strip(), "label": f"category:{str(category).strip()}", "kind": "category"}
+        for category in categories
+        if str(category).strip()
+    ]
+    plan.extend(
+        {"keyword": str(keyword).strip(), "category": "", "label": str(keyword).strip(), "kind": "keyword"}
+        for keyword in keywords
+        if str(keyword).strip()
+    )
+    return plan
+
+
+def parse_governmentjobs_global_listing(
+    raw: str,
+    source: dict[str, Any],
+    search_url: str,
+    source_query: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    block_starts = list(
+        re.finditer(
+            r'<li[^>]*class=["\'][^"\']*job-item[^"\']*["\'][^>]*data-job-id=["\']([^"\']+)["\'][^>]*>',
+            raw,
+            flags=re.I | re.S,
+        )
+    )
+    for index, block_match in enumerate(block_starts):
+        raw_job_id = html.unescape(block_match.group(1)).strip()
+        job_id_match = re.match(r"(\d+)", raw_job_id)
+        if not job_id_match:
+            continue
+        job_id = job_id_match.group(1)
+        next_start = block_starts[index + 1].start() if index + 1 < len(block_starts) else len(raw)
+        block = raw[block_match.end() : next_start]
+        link_match = re.search(
+            r'<a[^>]*class=["\'][^"\']*job-details-link[^"\']*["\'][^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            block,
+            flags=re.I | re.S,
+        )
+        if not link_match:
+            continue
+        role = html_to_text(link_match.group(2)) or infer_role_from_url(link_match.group(1))
+        organization_match = re.search(
+            r'<div[^>]*class=["\'][^"\']*job-organization[^"\']*["\'][^>]*>(.*?)</div>',
+            block,
+            flags=re.I | re.S,
+        )
+        location_match = re.search(
+            r'<span[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>',
+            block,
+            flags=re.I | re.S,
+        )
+        candidates.append(
+            {
+                "company": html_to_text(organization_match.group(1)) if organization_match else str(source.get("company") or "GovernmentJobs"),
+                "role": role,
+                "url": normalize_job_url(urllib.parse.urljoin(search_url, html.unescape(link_match.group(1)))),
+                "platform": "governmentjobs_global",
+                "location": html_to_text(location_match.group(1)) if location_match else "",
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": "",
+                "updated_at": "",
+                "source": source.get("url", search_url),
+                "source_query": source_query,
+                "freshness_source": "unknown",
+                "_jd_text": "\n\n".join(part for part in [role, html_to_text(block)] if part),
+                "notes": "GovernmentJobs statewide search listing; detail JSON-LD supplies the official posting date.",
+            }
+        )
+    return candidates
+
+
+def governmentjobs_global_detail(candidate: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
+    raw = fetch_url(str(candidate["url"]), timeout=timeout)
+    parsed_jobs = parse_json_ld_jobs(raw, str(candidate["url"]), str(candidate.get("company") or "GovernmentJobs"))
+    if not parsed_jobs:
+        return candidate
+    detail = parsed_jobs[0]
+    for key in ["company", "role", "location", "posted_at", "updated_at", "_jd_text"]:
+        if detail.get(key):
+            candidate[key] = detail[key]
+    candidate["freshness_source"] = "governmentjobs_json_ld_datePosted" if candidate.get("posted_at") else "unknown"
+    candidate["notes"] = f"{candidate.get('notes', '').rstrip()} Parsed official JobPosting JSON-LD."
+    return candidate
+
+
+def discover_governmentjobs_global_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    max_pages = int(source.get("max_pages", 10))
+    max_keyword_pages = int(source.get("max_keyword_pages", 1))
+    candidates_by_url: dict[str, dict[str, Any]] = {}
+    for query in governmentjobs_global_query_plan(source):
+        page_limit = max_keyword_pages if query["kind"] == "keyword" else max_pages
+        for page in range(1, page_limit + 1):
+            search_url = governmentjobs_global_search_url(
+                source,
+                page,
+                keyword=query["keyword"],
+                category=query["category"],
+            )
+            try:
+                raw = fetch_url(search_url, timeout=30)
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch GovernmentJobs statewide search: {error}", file=sys.stderr)
+                break
+            page_candidates = parse_governmentjobs_global_listing(raw, source, search_url, query["label"])
+            if not page_candidates:
+                break
+            for candidate in page_candidates:
+                candidates_by_url[candidate["url"]] = candidate
+            if f"page={page + 1}" not in html.unescape(raw):
+                break
+
+    candidates = list(candidates_by_url.values())
+    detail_limit = min(len(candidates), int(source.get("max_detail_pages", 120)))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+    failed_details = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+        future_to_candidate = {
+            executor.submit(governmentjobs_global_detail, candidate, detail_timeout): candidate
+            for candidate in candidates[:detail_limit]
+        }
+        for future in concurrent.futures.as_completed(future_to_candidate):
+            try:
+                future.result()
+            except Exception:  # noqa: BLE001
+                failed_details += 1
+    if failed_details:
+        print(
+            f"GovernmentJobs statewide detail fetch failed for {failed_details}/{detail_limit} candidates.",
+            file=sys.stderr,
+        )
+    return candidates
+
+
 def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     feed_url = rss_feed_url(source)
@@ -4487,30 +8601,140 @@ def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(raw)
         channel = root.find("channel")
-        items: list[Any] = channel.findall("item") if channel is not None else root.findall(".//item")
-    except (ET.ParseError, ImportError) as error:
+        if channel is not None:
+            items: list[Any] = channel.findall("item")
+        else:
+            items = [
+                element
+                for element in root.iter()
+                if str(getattr(element, "tag", "")).rsplit("}", 1)[-1] in {"item", "entry"}
+            ]
+    except ImportError:
+        items = rss_items_from_regex(raw)
+    except ET.ParseError as error:
         print(f"Could not parse RSS feed for {company} with XML parser, using fallback: {error}", file=sys.stderr)
         items = rss_items_from_regex(raw)
     candidates: dict[str, dict[str, Any]] = {}
     for item in items:
+        feed_location = ""
+        feed_department = ""
+        feed_categories: list[str] = []
         if isinstance(item, dict):
             title = str(item.get("title") or "").strip()
             link = str(item.get("link") or item.get("guid") or "").strip()
             description_raw = str(item.get("description") or "")
             pub_date = str(item.get("pubDate") or "")
             guid = str(item.get("guid") or link)
+            cities = item.get("cities") if isinstance(item.get("cities"), list) else []
+            states = item.get("states") if isinstance(item.get("states"), list) else []
+            countries = item.get("countries") if isinstance(item.get("countries"), list) else []
+            default_state = (
+                str(states[0]).strip()
+                if states
+                else str(source.get("default_state") or "").strip()
+            )
+            feed_location = "; ".join(
+                ", ".join(
+                    part
+                    for part in [str(city).strip(), default_state, str(countries[0]).strip() if countries else ""]
+                    if part
+                )
+                for city in cities
+                if str(city).strip()
+            )
+            feed_department = str(item.get("department") or "").strip()
+            feed_categories = (
+                [str(value).strip() for value in item.get("categories", []) if str(value).strip()]
+                if isinstance(item.get("categories"), list)
+                else []
+            )
         else:
-            title = str(item.findtext("title") or "").strip()
-            link = str(item.findtext("link") or item.findtext("guid") or "").strip()
-            description_raw = str(item.findtext("description") or "")
-            pub_date = str(item.findtext("pubDate") or "")
-            guid = str(item.findtext("guid") or link)
+            title_values = rss_xml_texts_by_local_name(item, "title")
+            title = title_values[0] if title_values else ""
+            link = ""
+            for element in item.iter():
+                if str(getattr(element, "tag", "")).rsplit("}", 1)[-1] != "link":
+                    continue
+                link = str(getattr(element, "attrib", {}).get("href") or getattr(element, "text", "") or "").strip()
+                if link:
+                    break
+            guid_values = merge_unique(
+                rss_xml_texts_by_local_name(item, "guid"),
+                rss_xml_texts_by_local_name(item, "id"),
+            )
+            guid = guid_values[0] if guid_values else link
+            link = link or guid
+            description_values = merge_unique(
+                merge_unique(
+                    rss_xml_texts_by_local_name(item, "description"),
+                    rss_xml_texts_by_local_name(item, "content"),
+                ),
+                rss_xml_texts_by_local_name(item, "summary"),
+            )
+            description_raw = description_values[0] if description_values else ""
+            publication_values = merge_unique(
+                merge_unique(
+                    rss_xml_texts_by_local_name(item, "pubDate"),
+                    rss_xml_texts_by_local_name(item, "published"),
+                ),
+                rss_xml_texts_by_local_name(item, "updated"),
+            )
+            pub_date = publication_values[0] if publication_values else ""
+            cities = rss_xml_texts_by_local_name(item, "city")
+            states = rss_xml_texts_by_local_name(item, "state")
+            countries = rss_xml_texts_by_local_name(item, "country")
+            default_state = (
+                states[0] if states else str(source.get("default_state") or "").strip()
+            )
+            location_parts = []
+            for city in cities:
+                location_parts.append(
+                    ", ".join(
+                        part
+                        for part in [city, default_state, countries[0] if countries else ""]
+                        if part
+                    )
+                )
+            feed_location = "; ".join(location_parts)
+            departments = rss_xml_texts_by_local_name(item, "department")
+            feed_department = departments[0] if departments else ""
+            feed_categories = rss_xml_texts_by_local_name(item, "category")
+        category_field = str(source.get("rss_category_field") or "").strip().lower()
+        if category_field == "location" and feed_categories and not feed_location:
+            feed_location = "; ".join(feed_categories)
+        elif category_field in {"department", "source_query"} and feed_categories and not feed_department:
+            feed_department = "; ".join(feed_categories)
         if not title or not link:
             continue
         role, location = parse_rss_title(title)
+        title_location_regex = str(source.get("title_location_regex") or "").strip()
+        if title_location_regex:
+            with contextlib.suppress(re.error):
+                title_location_match = re.match(
+                    title_location_regex,
+                    title,
+                    flags=re.I,
+                )
+                if title_location_match:
+                    groups = title_location_match.groupdict()
+                    role = str(groups.get("role") or role).strip()
+                    location = str(groups.get("location") or location).strip()
+        location = location or feed_location or str(source.get("default_location") or "").strip()
+        location_pattern = str(
+            source.get("location_include_regex") or ""
+        ).strip()
+        if location_pattern and not re.search(
+            location_pattern,
+            location,
+            flags=re.I,
+        ):
+            continue
         description = html_to_text(description_raw)
         url = normalize_job_url(link)
-        job_id_match = re.search(r"/(\d+)/(?:$|[?#])", link)
+        job_id_match = re.search(r"/jobs/(\d+)(?:[-/?#]|$)", link) or re.search(
+            r"/(\d+)/(?:$|[?#])",
+            link,
+        )
         candidates[url] = {
             "company": company,
             "role": role,
@@ -4520,13 +8744,48 @@ def discover_rss_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
             "posted_at": normalize_datetime(pub_date),
             "updated_at": "",
             "source": source.get("url", feed_url),
-            "source_query": source.get("category", ""),
+            "source_query": source.get("category") or feed_department,
             "freshness_source": "rss_pubDate" if pub_date else "unknown",
             "job_number": job_id_match.group(1) if job_id_match else "",
             "external_job_id": job_id_match.group(1) if job_id_match else normalize_job_url(guid),
             "_jd_text": "\n\n".join(block for block in [role, location, description] if block),
             "notes": f"RSS feed adapter; feed={feed_url}",
         }
+    if truthy_source_flag(source.get("fetch_details"), default=False):
+        detail_limit = max(0, int(source.get("max_detail_pages", len(candidates))))
+        detail_workers = max(1, int(source.get("detail_workers", 8)))
+        selected = sorted(
+            candidates.values(),
+            key=lambda candidate: (
+                0 if unclassified_technical_title_relevant(candidate) else 1,
+                str(candidate.get("role") or "").lower(),
+            ),
+        )[:detail_limit]
+
+        def enrich(candidate: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+            try:
+                detail_raw = fetch_url(candidate["url"])
+            except Exception:
+                return candidate["url"], None
+            parsed = parse_json_ld_jobs(detail_raw, candidate["url"], str(company))
+            return candidate["url"], parsed[0] if parsed else None
+
+        if selected:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+                for url, detail in executor.map(enrich, selected):
+                    if not detail:
+                        continue
+                    candidate = candidates[url]
+                    for key in ["role", "location", "posted_at", "updated_at"]:
+                        if detail.get(key):
+                            candidate[key] = detail[key]
+                    if detail.get("_jd_text"):
+                        candidate["_jd_text"] = detail["_jd_text"]
+                    if detail.get("posted_at"):
+                        candidate["freshness_source"] = "rss_json_ld_date_posted"
+                    candidate["notes"] = (
+                        f"RSS listing enriched from official detail-page JSON-LD; feed={feed_url}"
+                    )
     return list(candidates.values())
 
 
@@ -4551,59 +8810,891 @@ def discover_jibe_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     categories = source.get("categories") or []
     if isinstance(categories, str):
         categories = [categories]
+    search_params = source.get("search_params") if isinstance(source.get("search_params"), dict) else {}
+    query_keywords = [""] if truthy_source_flag(source.get("search_all"), default=False) else [
+        str(item) for item in keywords if str(item).strip()
+    ]
+    page_size = max(1, int(source.get("page_size", 100)))
+    max_pages = max(1, int(source.get("max_pages", 3)))
     candidates: dict[str, dict[str, Any]] = {}
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
-        params = {
-            "keywords": keyword,
-            "sortBy": "posted_date",
-            "numRows": int(source.get("page_size", 100)),
-        }
-        if categories:
-            params["categories"] = "|".join(str(item) for item in categories if str(item).strip())
-        try:
-            data = fetch_json(f"{api_url}?{urllib.parse.urlencode(params)}")
-        except Exception as error:  # noqa: BLE001
-            print(f"Could not fetch Jibe API for {company}: {error}", file=sys.stderr)
-            continue
-        jobs = data.get("jobs") if isinstance(data, dict) else []
-        if not isinstance(jobs, list):
-            continue
-        for wrapper in jobs:
-            job = wrapper.get("data") if isinstance(wrapper, dict) else wrapper
-            if not isinstance(job, dict):
-                continue
-            title = str(job.get("title") or infer_role_from_url(str(job.get("slug") or ""))).strip()
-            job_url = str(job.get("meta_data", {}).get("canonical_url") if isinstance(job.get("meta_data"), dict) else "")
-            if not job_url:
-                source_url = str(source.get("url") or api_url)
-                job_url = urllib.parse.urljoin(source_url, f"/jobs/{urllib.parse.quote(str(job.get('slug') or job.get('req_id') or ''))}")
-            job_url = normalize_job_url(job_url)
-            location = compact_location_text(
-                {
-                    "city": job.get("city"),
-                    "state": job.get("state"),
-                    "country": job.get("country"),
-                    "name": job.get("location_name"),
+    for keyword in query_keywords:
+        for page in range(1, max_pages + 1):
+            params = {
+                **{str(key): str(value) for key, value in search_params.items() if str(key).strip()},
+                "sortBy": "posted_date",
+                "limit": page_size,
+                "numRows": page_size,
+                "page": page,
+            }
+            if keyword:
+                params["keywords"] = keyword
+            if categories:
+                params["categories"] = "|".join(str(item) for item in categories if str(item).strip())
+            try:
+                data = fetch_json(f"{api_url}?{urllib.parse.urlencode(params)}")
+            except Exception as error:  # noqa: BLE001
+                print(f"Could not fetch Jibe API for {company}: {error}", file=sys.stderr)
+                break
+            jobs = data.get("jobs") if isinstance(data, dict) else []
+            if not isinstance(jobs, list):
+                break
+            for wrapper in jobs:
+                job = wrapper.get("data") if isinstance(wrapper, dict) else wrapper
+                if not isinstance(job, dict):
+                    continue
+                title = str(job.get("title") or infer_role_from_url(str(job.get("slug") or ""))).strip()
+                job_url = str(job.get("meta_data", {}).get("canonical_url") if isinstance(job.get("meta_data"), dict) else "")
+                if not job_url:
+                    source_url = str(source.get("url") or api_url)
+                    job_url = urllib.parse.urljoin(source_url, f"/jobs/{urllib.parse.quote(str(job.get('slug') or job.get('req_id') or ''))}")
+                job_url = normalize_job_url(job_url)
+                location = compact_location_text(
+                    {
+                        "city": job.get("city"),
+                        "state": job.get("state"),
+                        "country": job.get("country"),
+                        "name": job.get("location_name"),
+                    }
+                )
+                job_id = str(job.get("req_id") or job.get("slug") or "").strip()
+                meta_data = job.get("meta_data", {}) if isinstance(job.get("meta_data"), dict) else {}
+                icims_meta = meta_data.get("icims", {}) if isinstance(meta_data.get("icims"), dict) else {}
+                candidates[job_url] = {
+                    "company": company,
+                    "role": title,
+                    "url": job_url,
+                    "platform": "jibe",
+                    "location": location or compact_location_text(job.get("locations")),
+                    "job_number": job_id,
+                    "external_job_id": str(icims_meta.get("uuid") or job_id),
+                    "posted_at": normalize_datetime(job.get("posted_date") or job.get("create_date")),
+                    "updated_at": normalize_datetime(job.get("update_date") or meta_data.get("last_mod")),
+                    "source": source.get("url", api_url),
+                    "source_query": keyword or "all",
+                    "notes": "Jibe/iCIMS hosted careers API adapter.",
+                    "_jd_text": html_to_text(str(job.get("description") or "")),
                 }
+            total_count = int(data.get("totalCount") or data.get("count") or 0) if isinstance(data, dict) else 0
+            if not jobs or len(jobs) < page_size or (total_count and page * page_size >= total_count):
+                break
+    return list(candidates.values())
+
+
+def discover_jazzhr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    if not board_url.rstrip("/").endswith("/apply/jobs"):
+        parsed = urllib.parse.urlparse(board_url)
+        board_url = urllib.parse.urlunparse(parsed._replace(path="/apply/jobs", params="", query="", fragment=""))
+    try:
+        raw = fetch_url(board_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch JazzHR board for {company}: {error}", file=sys.stderr)
+        return []
+
+    candidates: dict[str, dict[str, Any]] = {}
+    link_pattern = re.compile(
+        r'<a[^>]+class=["\'][^"\']*job_title_link[^"\']*["\'][^>]+href=["\']([^"\']*/apply/jobs/details/([^?"\']+)[^"\']*)["\'][^>]*>(.*?)</a>',
+        flags=re.I | re.S,
+    )
+    for match in link_pattern.finditer(raw):
+        detail_url = normalize_job_url(urllib.parse.urljoin(board_url, html.unescape(match.group(1))))
+        job_id = match.group(2).strip()
+        row_end = raw.find("</tr>", match.end())
+        row = raw[match.start() : row_end + 5] if row_end >= 0 else raw[max(0, match.start() - 400) : match.end() + 800]
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, flags=re.I | re.S)
+        location = html_to_text(cells[-1]) if cells else ""
+        candidates[detail_url] = {
+            "company": company,
+            "role": html_to_text(match.group(3)) or infer_role_from_url(detail_url),
+            "url": detail_url,
+            "platform": "jazzhr",
+            "location": location,
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": source.get("url", board_url),
+            "source_query": "all_jobs",
+            "freshness_source": "unknown",
+            "notes": "JazzHR public board; detail JSON-LD may add the official posted date.",
+        }
+
+    detail_limit = int(source.get("max_detail_pages", len(candidates)))
+    for candidate in list(candidates.values())[:detail_limit]:
+        try:
+            detail_raw = fetch_url(candidate["url"])
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch JazzHR detail for {company} job {candidate['external_job_id']}: {error}", file=sys.stderr)
+            continue
+        details = parse_json_ld_jobs(detail_raw, candidate["url"], str(company))
+        if not details:
+            continue
+        detail = details[0]
+        for key in ["role", "location", "job_number", "external_job_id", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        if detail.get("url"):
+            candidate["url"] = detail["url"]
+        candidate["platform"] = "jazzhr"
+        candidate["freshness_source"] = "jazzhr_json_ld_date_posted" if candidate.get("posted_at") else "unknown"
+        candidate["notes"] = "JazzHR public board enriched from detail-page JobPosting JSON-LD."
+    return list(candidates.values())
+
+
+def discover_hiringthing_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    try:
+        raw = fetch_url(board_url, timeout=int(source.get("board_timeout", 25)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch HiringThing board for {company}: {error}", file=sys.stderr)
+        return []
+
+    block_starts = list(
+        re.finditer(
+            r'<div[^>]*class=["\'][^"\']*\bjob-container\b[^"\']*["\'][^>]*data-job-id=["\']([^"\']+)["\'][^>]*>',
+            raw,
+            flags=re.I | re.S,
+        )
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    for index, block_match in enumerate(block_starts):
+        external_id = html.unescape(block_match.group(1)).strip()
+        next_start = block_starts[index + 1].start() if index + 1 < len(block_starts) else len(raw)
+        block = raw[block_match.start() : next_start]
+        link_match = re.search(
+            rf'<a[^>]+href=["\']([^"\']*/job/{re.escape(external_id)}/[^"\']*)["\']',
+            block,
+            flags=re.I | re.S,
+        )
+        title_match = re.search(r"<h2\b[^>]*>(.*?)</h2>", block, flags=re.I | re.S)
+        if not link_match or not title_match:
+            continue
+        detail_url = normalize_job_url(
+            urllib.parse.urljoin(board_url, html.unescape(link_match.group(1)))
+        )
+        location_match = re.search(
+            r'<div[^>]*class=["\'][^"\']*\bjob-location\b[^"\']*["\'][^>]*>(.*?)</div>',
+            block,
+            flags=re.I | re.S,
+        )
+        category_match = re.search(
+            r'<div[^>]*class=["\'][^"\']*\bjob-category\b[^"\']*["\'][^>]*>.*?<span[^>]*>(.*?)</span>',
+            block,
+            flags=re.I | re.S,
+        )
+        summary_match = re.search(
+            r'<div[^>]*class=["\'][^"\']*\bjob-description\b[^"\']*["\'][^>]*>(.*?)</div>',
+            block,
+            flags=re.I | re.S,
+        )
+        category = html_to_text(category_match.group(1)) if category_match else ""
+        candidates[detail_url] = {
+            "company": company,
+            "role": html_to_text(title_match.group(1)) or infer_role_from_url(detail_url),
+            "url": detail_url,
+            "platform": "hiringthing",
+            "location": html_to_text(location_match.group(1)) if location_match else "",
+            "job_number": external_id,
+            "external_job_id": external_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": board_url,
+            "source_query": category or "all_jobs",
+            "freshness_source": "unknown",
+            "notes": "HiringThing public board; detail JSON-LD supplies the official posted date.",
+            "_jd_text": html_to_text(summary_match.group(1)) if summary_match else "",
+        }
+
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 100))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(str(candidate["url"]), timeout=detail_timeout)
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"Could not fetch HiringThing detail for {company} job "
+                f"{candidate['external_job_id']}: {error}",
+                file=sys.stderr,
             )
-            job_id = str(job.get("req_id") or job.get("slug") or "").strip()
-            meta_data = job.get("meta_data", {}) if isinstance(job.get("meta_data"), dict) else {}
-            icims_meta = meta_data.get("icims", {}) if isinstance(meta_data.get("icims"), dict) else {}
-            candidates[job_url] = {
+            return
+        details = parse_json_ld_jobs(detail_raw, str(candidate["url"]), company)
+        if not details:
+            return
+        detail = details[0]
+        for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["platform"] = "hiringthing"
+        candidate["freshness_source"] = (
+            "hiringthing_json_ld_date_posted" if candidate.get("posted_at") else "unknown"
+        )
+        candidate["notes"] = (
+            "HiringThing public board enriched from detail-page JobPosting JSON-LD."
+        )
+
+    detail_candidates = list(candidates.values())[:detail_limit]
+    if detail_candidates:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, detail_candidates))
+    return list(candidates.values())
+
+
+def discover_paycor_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    raw = fetch_url(board_url, timeout=int(source.get("timeout", 25)))
+    row_pattern = re.compile(
+        r'<div[^>]*class=["\'][^"\']*\bgnewtonCareerGroupRowClass\b[^"\']*["\'][^>]*>'
+        r'.*?<a[^>]+href=["\'](?P<url>[^"\']*JobIntroduction\.action[^"\']*)["\'][^>]*>'
+        r'(?P<title>.*?)</a>'
+        r'.*?<div[^>]*class=["\'][^"\']*\bgnewtonCareerGroupJobDescriptionClass\b'
+        r'[^"\']*["\'][^>]*>(?P<location>.*?)</div>',
+        flags=re.I | re.S,
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    for match in row_pattern.finditer(raw):
+        detail_url = normalize_job_url(
+            urllib.parse.urljoin(board_url, html.unescape(match.group("url")))
+        )
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(detail_url).query)
+        external_id = str((query.get("id") or [detail_url])[0]).strip()
+        candidates[detail_url] = {
+            "company": company,
+            "role": html_to_text(match.group("title")) or infer_role_from_url(detail_url),
+            "url": detail_url,
+            "platform": "paycor",
+            "location": html_to_text(match.group("location")),
+            "job_number": external_id,
+            "external_job_id": external_id,
+            "posted_at": "",
+            "updated_at": "",
+            "source": board_url,
+            "source_query": "all_jobs",
+            "freshness_source": "unknown",
+            "notes": "Paycor/Newton public careers board; freshness uses first_seen.",
+        }
+
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 40))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(str(candidate["url"]), timeout=detail_timeout)
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"Could not fetch Paycor detail for {company} job "
+                f"{candidate['external_job_id']}: {error}",
+                file=sys.stderr,
+            )
+            return
+        description_match = re.search(
+            r'<td[^>]*id=["\']gnewtonJobDescriptionText["\'][^>]*>(.*?)</td>',
+            detail_raw,
+            flags=re.I | re.S,
+        )
+        if description_match:
+            candidate["_jd_text"] = html_to_text(description_match.group(1))
+        location_match = re.search(
+            r"<b>\s*Location:\s*</b>\s*(.*?)(?:</div>|<br\s*/?>)",
+            detail_raw,
+            flags=re.I | re.S,
+        )
+        if location_match:
+            candidate["location"] = html_to_text(location_match.group(1))
+
+    selected = list(candidates.values())[:detail_limit]
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, selected))
+    return list(candidates.values())
+
+
+def prismhr_client_ids(source: dict[str, Any]) -> list[str]:
+    configured = source.get("client_ids")
+    if isinstance(configured, list):
+        client_ids = [
+            str(item).strip()
+            for item in configured
+            if str(item).strip()
+        ]
+    else:
+        client_id = str(
+            source.get("client_id") or source.get("clientId") or ""
+        ).strip()
+        client_ids = [client_id] if client_id else []
+    if client_ids:
+        return list(dict.fromkeys(client_ids))
+
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    raw = fetch_url(source_url, timeout=int(source.get("timeout", 25)))
+    matches = re.findall(
+        r'id=["\']agileHrJobList["\'][^>]*data-id=["\']([^"\']+)',
+        raw,
+        flags=re.I,
+    )
+    discovered = [
+        item.strip()
+        for match in matches
+        for item in match.split("|")
+        if item.strip()
+    ]
+    return list(dict.fromkeys(discovered))
+
+
+def discover_prismhr_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    client_ids = prismhr_client_ids(source)
+    if not client_ids:
+        return []
+    endpoint = str(
+        source.get("api_url")
+        or "https://setup.prismhrtalent.com/public/api/JobPosting/RequisitionsByClient"
+    ).strip()
+    timeout = int(source.get("timeout", 25))
+    candidates: dict[str, dict[str, Any]] = {}
+    for client_id in client_ids:
+        data = fetch_json_form_post(
+            endpoint,
+            {"clientIds[]": client_id},
+            timeout=timeout,
+        )
+        if not isinstance(data, dict) or not data.get("Success"):
+            continue
+        records = data.get("ResultList")
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            external_id = str(record.get("Id") or "").strip()
+            title = html_to_text(str(record.get("Title") or ""))
+            apply_url = normalize_job_url(str(record.get("ApplyUrl") or ""))
+            if not external_id or not title or not apply_url:
+                continue
+            location = html_to_text(
+                str(record.get("Location") or record.get("City") or "")
+            )
+            state = str(record.get("State") or "").strip()
+            if not location and state:
+                location = state
+            location_filter = str(
+                source.get("location_include_regex") or ""
+            ).strip()
+            location_haystack = " | ".join(
+                str(record.get(key) or "")
+                for key in ["Location", "City", "State", "LongDescriptionFlat"]
+            )
+            if location_filter and not re.search(
+                location_filter,
+                location_haystack,
+                flags=re.I,
+            ):
+                continue
+            description = "\n".join(
+                html_to_text(str(record.get(key) or ""))
+                for key in [
+                    "Description",
+                    "AdditionalInformation",
+                    "Disclaimer",
+                ]
+                if record.get(key)
+            )
+            candidates[external_id] = {
                 "company": company,
                 "role": title,
-                "url": job_url,
-                "platform": "jibe",
-                "location": location or compact_location_text(job.get("locations")),
-                "job_number": job_id,
-                "external_job_id": str(icims_meta.get("uuid") or job_id),
-                "posted_at": normalize_datetime(job.get("posted_date") or job.get("create_date")),
-                "updated_at": normalize_datetime(job.get("update_date") or meta_data.get("last_mod")),
-                "source": source.get("url", api_url),
-                "source_query": keyword,
-                "notes": "Jibe/iCIMS hosted careers API adapter.",
-                "_jd_text": html_to_text(str(job.get("description") or "")),
+                "url": apply_url,
+                "platform": "prismhr",
+                "location": location,
+                "job_number": external_id,
+                "external_job_id": external_id,
+                "posted_at": normalize_datetime(record.get("OpenDate")),
+                "updated_at": "",
+                "source": source_url or endpoint,
+                "source_query": html_to_text(
+                    str(record.get("Department") or record.get("Division") or "all_jobs")
+                ),
+                "freshness_source": "prismhr_open_date",
+                "notes": "PrismHR Talent public JobPosting API adapter.",
+                "_jd_text": description,
             }
+    return list(candidates.values())
+
+
+def discover_wp_search_index_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    api_url = str(source.get("api_url") or source_url).strip()
+    if not api_url:
+        return []
+    records = fetch_json(api_url)
+    if not isinstance(records, list):
+        return []
+    required_terms = [
+        str(item).strip().casefold()
+        for item in source.get("required_terms", [])
+        if str(item).strip()
+    ]
+    base_url = str(source.get("base_url") or source_url or api_url)
+    location_taxonomies = [
+        str(item).strip()
+        for item in source.get("location_taxonomies", [])
+        if str(item).strip()
+    ]
+    candidates: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        terms = record.get("terms") if isinstance(record.get("terms"), dict) else {}
+        term_names = [
+            html_to_text(str(term.get("name") or ""))
+            for values in terms.values()
+            if isinstance(values, list)
+            for term in values
+            if isinstance(term, dict) and term.get("name")
+        ]
+        searchable = " ".join(
+            [
+                json.dumps(record.get("title") or "", ensure_ascii=False),
+                json.dumps(record.get("excerpt") or "", ensure_ascii=False),
+                *term_names,
+            ]
+        ).casefold()
+        if required_terms and not all(term in searchable for term in required_terms):
+            continue
+        title_value = record.get("title")
+        if isinstance(title_value, dict):
+            title_value = title_value.get("rendered")
+        role = html_to_text(str(title_value or ""))
+        link = normalize_job_url(
+            urllib.parse.urljoin(base_url, html.unescape(str(record.get("link") or "")))
+        )
+        if not role or not link:
+            continue
+        location_names: list[str] = []
+        for taxonomy, values in terms.items():
+            if location_taxonomies:
+                is_location = taxonomy in location_taxonomies
+            else:
+                lowered = taxonomy.casefold()
+                is_location = any(token in lowered for token in ("location", "site", "geographical"))
+            if not is_location or not isinstance(values, list):
+                continue
+            location_names.extend(
+                html_to_text(str(term.get("name") or ""))
+                for term in values
+                if isinstance(term, dict) and term.get("name")
+            )
+        excerpt = record.get("excerpt")
+        if isinstance(excerpt, dict):
+            excerpt = excerpt.get("rendered")
+        content = record.get("content")
+        if isinstance(content, dict):
+            content = content.get("rendered")
+        external_id = str(record.get("reference") or record.get("id") or link)
+        candidates[link] = {
+            "company": company,
+            "role": role,
+            "url": link,
+            "platform": "wp_search_index",
+            "location": ", ".join(merge_unique(location_names, [])),
+            "job_number": external_id,
+            "external_job_id": external_id,
+            "posted_at": normalize_datetime(
+                record.get("date_formatted")
+                or record.get("date")
+                or record.get("published_at")
+            ),
+            "updated_at": normalize_datetime(record.get("modified") or record.get("updated_at")),
+            "source": source_url or api_url,
+            "source_query": ", ".join(required_terms) or "all_jobs",
+            "freshness_source": "wp_search_index_official_date",
+            "notes": "Official WordPress job search index.",
+            "_jd_text": "\n\n".join(
+                item for item in [html_to_text(str(excerpt or "")), html_to_text(str(content or ""))] if item
+            ),
+        }
+    return list(candidates.values())
+
+
+def discover_joveo_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    api_url = str(source.get("api_url") or "").strip()
+    if not api_url:
+        return []
+    search_terms = source.get("search_terms", [""])
+    if isinstance(search_terms, str):
+        search_terms = [search_terms]
+    page_size = max(1, min(int(source.get("page_size", 100)), 100))
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    timeout = int(source.get("timeout", 30))
+    public_base_url = str(source.get("public_base_url") or source.get("url") or "").rstrip("/")
+    filters = source.get("filters") if isinstance(source.get("filters"), list) else []
+    if not filters and source.get("latitude") is not None and source.get("longitude") is not None:
+        filters = [
+            {
+                "field": "point",
+                "type": "GEO_LOCATION",
+                "entity": "job",
+                "operator": "GEO_LOCATION_WITHIN",
+                "combination": "OR",
+                "filterValue": {
+                    "latitude": float(source["latitude"]),
+                    "longitude": float(source["longitude"]),
+                    "distance": float(source.get("distance", 50)),
+                    "distanceUnit": str(source.get("distance_unit") or "Miles"),
+                },
+            }
+        ]
+    candidates: dict[str, dict[str, Any]] = {}
+    for raw_term in search_terms:
+        search_term = str(raw_term).strip()
+        for page_number in range(max_pages):
+            payload = {
+                "searchTerm": search_term,
+                "orderBy": [
+                    {
+                        "key": "startDate",
+                        "entity": "job",
+                        "order": "DESC",
+                        "type": "DATE",
+                    }
+                ],
+                "searchFields": source.get(
+                    "search_fields",
+                    {"title": 10, "country": 9, "category": 8},
+                ),
+                "filters": filters,
+                "facetFields": source.get(
+                    "facet_fields",
+                    ["category", "normalisedFields.city", "normalisedFields.state"],
+                ),
+                "pageSize": page_size,
+                "pageNumber": page_number,
+                "filterIds": source.get("filter_ids", []),
+            }
+            data = fetch_json_post(api_url, payload, timeout=timeout)
+            records = data.get("records", []) if isinstance(data, dict) else []
+            if not isinstance(records, list) or not records:
+                break
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                normalized = (
+                    record.get("normalisedFields")
+                    if isinstance(record.get("normalisedFields"), dict)
+                    else {}
+                )
+                external_id = str(
+                    record.get("externalId")
+                    or record.get("referenceNumber")
+                    or record.get("id")
+                    or ""
+                ).strip()
+                slug = str(record.get("urlSlug") or "").strip()
+                public_url = (
+                    normalize_job_url(f"{public_base_url}/job/{urllib.parse.quote(slug)}")
+                    if public_base_url and slug
+                    else normalize_job_url(str(record.get("url") or ""))
+                )
+                if not public_url:
+                    public_url = normalize_job_url(
+                        str(record.get("externalUrl") or record.get("careerSiteApplyUrl") or "")
+                    )
+                if not public_url or not external_id:
+                    continue
+                city = str(normalized.get("city") or record.get("city") or "").strip()
+                state = str(
+                    normalized.get("stateCode")
+                    or normalized.get("state")
+                    or record.get("state")
+                    or ""
+                ).strip()
+                country = str(
+                    normalized.get("countryCode")
+                    or normalized.get("country")
+                    or record.get("country")
+                    or ""
+                ).strip()
+                apply_url = normalize_job_url(
+                    str(
+                        record.get("careerSiteApplyUrl")
+                        or record.get("externalApplyUrl")
+                        or record.get("externalUrl")
+                        or record.get("applyUrl")
+                        or ""
+                    )
+                )
+                candidates[external_id] = {
+                    "company": company,
+                    "role": str(normalized.get("title") or record.get("title") or "").strip(),
+                    "url": public_url,
+                    "apply_url": apply_url,
+                    "platform": "joveo",
+                    "location": ", ".join(part for part in [city, state, country] if part),
+                    "job_number": str(record.get("referenceNumber") or external_id),
+                    "external_job_id": external_id,
+                    "posted_at": normalize_datetime(
+                        record.get("startDate")
+                        or record.get("createdAt")
+                    ),
+                    "updated_at": normalize_datetime(record.get("updatedAt")),
+                    "source": source.get("url", api_url),
+                    "source_query": search_term or "all_jobs",
+                    "freshness_source": "joveo_start_date",
+                    "notes": "Joveo public careers search API.",
+                    "_jd_text": "\n\n".join(
+                        text
+                        for text in [
+                            html_to_text(str(record.get("description") or "")),
+                            html_to_text(str(record.get("responsibilities") or "")),
+                            html_to_text(str(record.get("qualifications") or "")),
+                        ]
+                        if text
+                    ),
+                }
+            total_pages = int(data.get("totalPages") or 0) if isinstance(data, dict) else 0
+            if page_number + 1 >= total_pages or len(records) < page_size:
+                break
+    return list(candidates.values())
+
+
+def regex_group_text(match: re.Match[str] | None) -> str:
+    if match is None:
+        return ""
+    groups = match.groupdict()
+    value = groups.get("title") or (match.group(1) if match.lastindex else match.group(0))
+    return html_to_text(html.unescape(value))
+
+
+def discover_embedded_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    title_regex = str(source.get("title_regex") or "").strip()
+    url_regex = str(source.get("job_url_regex") or "").strip()
+    job_url_template = str(source.get("job_url_template") or "").strip()
+    if not source_url or not title_regex or (not url_regex and not job_url_template):
+        return []
+    try:
+        raw = fetch_url(source_url, timeout=int(source.get("timeout", 25)))
+        title_pattern = re.compile(title_regex, flags=re.I | re.S)
+        url_pattern = re.compile(url_regex, flags=re.I | re.S) if url_regex else None
+        date_pattern = (
+            re.compile(str(source["date_regex"]), flags=re.I | re.S)
+            if source.get("date_regex")
+            else None
+        )
+        location_pattern = (
+            re.compile(str(source["location_regex"]), flags=re.I | re.S)
+            if source.get("location_regex")
+            else None
+        )
+        description_pattern = (
+            re.compile(str(source["description_regex"]), flags=re.I | re.S)
+            if source.get("description_regex")
+            else None
+        )
+        id_pattern = (
+            re.compile(str(source["job_id_regex"]), flags=re.I | re.S)
+            if source.get("job_id_regex")
+            else None
+        )
+    except (re.error, urllib.error.URLError, TimeoutError) as error:
+        print(f"Could not parse embedded jobs for {company}: {error}", file=sys.stderr)
+        return []
+
+    title_matches = list(title_pattern.finditer(raw))
+    default_location = str(source.get("default_location") or "").strip()
+    candidates: dict[str, dict[str, Any]] = {}
+    for index, title_match in enumerate(title_matches):
+        block_start = (
+            title_matches[index - 1].end()
+            if index
+            else max(0, title_match.start() - int(source.get("first_block_lookbehind", 1500)))
+        )
+        block_end = (
+            title_matches[index + 1].start()
+            if index + 1 < len(title_matches)
+            else min(len(raw), title_match.end() + int(source.get("last_block_lookahead", 6000)))
+        )
+        block = raw[block_start:block_end]
+        title_offset = title_match.start() - block_start
+        after_title = block[title_offset:]
+        title_groups = title_match.groupdict()
+        external_id = html.unescape(str(title_groups.get("job_id") or "")).strip()
+        if job_url_template and external_id:
+            raw_detail_url = job_url_template.format(
+                job_id=urllib.parse.quote(external_id),
+                job_id_raw=external_id,
+            )
+        else:
+            url_match = url_pattern.search(after_title) if url_pattern else None
+            if not url_match:
+                continue
+            raw_detail_url = html.unescape(url_match.group(1))
+        role = regex_group_text(title_match)
+        detail_url = normalize_job_url(
+            urllib.parse.urljoin(source_url, raw_detail_url)
+        )
+        if not role or not detail_url:
+            continue
+
+        posted_at = normalize_datetime(
+            html.unescape(
+                str(title_groups.get("posted_at") or title_groups.get("date") or "")
+            ).strip()
+        )
+        if date_pattern and not posted_at:
+            date_matches = list(date_pattern.finditer(block[:title_offset]))
+            if date_matches:
+                posted_at = normalize_datetime(regex_group_text(date_matches[-1]))
+        location = html_to_text(str(title_groups.get("location") or "")).strip()
+        location = location or default_location
+        if location_pattern and not location:
+            location_match = location_pattern.search(after_title)
+            if location_match:
+                location = regex_group_text(location_match)
+        description = html_to_text(str(title_groups.get("description") or "")).strip()
+        if description_pattern and not description:
+            description_match = description_pattern.search(after_title)
+            if description_match:
+                description = regex_group_text(description_match)
+        if not external_id and id_pattern:
+            id_match = id_pattern.search(detail_url)
+            if id_match:
+                external_id = html.unescape(id_match.group(1) if id_match.lastindex else id_match.group(0))
+        candidates[detail_url] = {
+            "company": company,
+            "role": role,
+            "url": detail_url,
+            "platform": "embedded_jobs",
+            "location": location,
+            "job_number": external_id,
+            "external_job_id": external_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": source_url,
+            "source_query": str(source.get("source_query") or "company_careers"),
+            "freshness_source": "company_careers_posted_date" if posted_at else "unknown",
+            "notes": "Structured job card parsed from the official company careers page.",
+            "_jd_text": description,
+        }
+
+    if not truthy_source_flag(source.get("fetch_details"), default=False):
+        return list(candidates.values())
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 40))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(str(candidate["url"]), timeout=detail_timeout)
+        except Exception:
+            return
+        details = parse_json_ld_jobs(detail_raw, str(candidate["url"]), company)
+        if not details:
+            return
+        detail = details[0]
+        for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["platform"] = "embedded_jobs"
+        if candidate.get("posted_at"):
+            candidate["freshness_source"] = "company_detail_json_ld_date_posted"
+        candidate["notes"] = (
+            "Structured company careers card enriched from detail-page JobPosting JSON-LD."
+        )
+
+    detail_candidates = list(candidates.values())[:detail_limit]
+    if detail_candidates:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, detail_candidates))
+    return list(candidates.values())
+
+
+def discover_wordpress_taleo_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = source.get("company", "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    if not board_url:
+        return []
+    try:
+        raw = fetch_url(board_url)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch WordPress Taleo board for {company}: {error}", file=sys.stderr)
+        return []
+
+    nonce_id = str(source.get("nonce_input_id") or "nonce4")
+    nonce_match = re.search(
+        rf'<input[^>]+id=["\']{re.escape(nonce_id)}["\'][^>]+value=["\']([^"\']+)["\']',
+        raw,
+        flags=re.I,
+    )
+    if not nonce_match:
+        print(f"WordPress Taleo board for {company} did not expose nonce input {nonce_id}", file=sys.stderr)
+        return []
+    parsed = urllib.parse.urlparse(board_url)
+    ajax_url = str(source.get("api_url") or urllib.parse.urljoin(f"{parsed.scheme}://{parsed.netloc}", "/wp-admin/admin-ajax.php"))
+    action = str(source.get("ajax_action") or "get_jobs_data")
+    try:
+        data = fetch_json_form_post(ajax_url, {"action": action, "nonce": nonce_match.group(1)}, timeout=30)
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch WordPress Taleo jobs for {company}: {error}", file=sys.stderr)
+        return []
+
+    raw_locations = data.get("jobLocations", []) if isinstance(data, dict) else []
+    locations = {
+        str(item.get("id")): compact_location_text(
+            {
+                "name": item.get("locationName"),
+                "city": item.get("city"),
+                "state": item.get("state"),
+                "country": item.get("countryCode"),
+            }
+        )
+        for item in raw_locations
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    for job in data.get("jobs", []) if isinstance(data, dict) else []:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("id") or "").strip()
+        url = normalize_job_url(str(job.get("link") or ""))
+        if not url and job_id:
+            url = normalize_job_url(urllib.parse.urljoin(board_url.rstrip("/") + "/", job_id))
+        if not url:
+            continue
+        location = locations.get(str(job.get("location")), compact_location_text(job.get("location")))
+        families = job.get("jobFamily") if isinstance(job.get("jobFamily"), list) else []
+        candidates[url] = {
+            "company": company,
+            "role": str(job.get("title") or infer_role_from_url(url)).strip(),
+            "url": url,
+            "platform": "wordpress_taleo",
+            "location": location,
+            "job_number": job_id,
+            "external_job_id": job_id,
+            "posted_at": normalize_datetime(job.get("posted_at") or job.get("postedDate")),
+            "updated_at": normalize_datetime(job.get("updated_at") or job.get("updatedDate")),
+            "source": source.get("url", board_url),
+            "source_query": "; ".join(str(item) for item in families if item),
+            "freshness_source": "wordpress_taleo_date" if job.get("posted_at") or job.get("postedDate") else "unknown",
+            "notes": "Public WordPress wrapper around a Taleo job feed.",
+            "_jd_text": html_to_text(str(job.get("description") or "")),
+        }
     return list(candidates.values())
 
 
@@ -4635,6 +9726,104 @@ def talentbrew_detail_from_url(url: str, fallback: dict[str, Any]) -> dict[str, 
     }
 
 
+def parse_talentbrew_result_items(
+    result_html: str,
+    base_url: str,
+    company: str,
+    source_url: str,
+    source_query: str,
+) -> dict[str, dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    item_matches = list(
+        re.finditer(
+            r'<li\b[^>]*class=["\'][^"\']*branded-list__list-item[^"\']*["\'][^>]*>(.*?)</li>',
+            result_html,
+            flags=re.I | re.S,
+        )
+    )
+    if not item_matches:
+        item_matches = list(re.finditer(r"<li\b[^>]*>(.*?)</li>", result_html, flags=re.I | re.S))
+    for item_match in item_matches:
+        item = item_match.group(1)
+        link_match = re.search(
+            r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*data-job-id=["\']([^"\']+)["\']',
+            item,
+            flags=re.I | re.S,
+        )
+        if not link_match:
+            continue
+        url = normalize_job_url(urllib.parse.urljoin(base_url, html.unescape(link_match.group(1))))
+        role_match = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", item, flags=re.I | re.S)
+        role = html_to_text(role_match.group(1)) if role_match else infer_role_from_url(url)
+        location_match = re.search(
+            r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>',
+            item,
+            flags=re.I | re.S,
+        )
+        if not location_match:
+            location_match = re.search(
+                r'<div\b[^>]*class=["\'][^"\']*job-result[^"\']*["\'][^>]*>'
+                r'.*?</h[23]>\s*<p\b[^>]*>(.*?)</p>',
+                item,
+                flags=re.I | re.S,
+            )
+        list_posted_at_match = re.search(
+            r'<span\b[^>]*class=["\'][^"\']*job-date-posted[^"\']*["\'][^>]*>(.*?)</span>',
+            item,
+            flags=re.I | re.S,
+        )
+        list_posted_at = (
+            normalize_datetime(html_to_text(list_posted_at_match.group(1)))
+            if list_posted_at_match
+            else ""
+        )
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "talentbrew",
+            "location": html_to_text(location_match.group(1)) if location_match else "",
+            "job_number": str(link_match.group(2)),
+            "external_job_id": str(link_match.group(2)),
+            "posted_at": list_posted_at,
+            "updated_at": "",
+            "source": source_url,
+            "source_query": source_query,
+            "freshness_source": "talentbrew_result_date" if list_posted_at else "unknown",
+            "notes": "TalentBrew search adapter; detail pages can supply JobPosting JSON-LD.",
+            "_jd_text": "",
+        }
+    return candidates
+
+
+def talentbrew_candidate_matches_source(
+    source: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    required_locations = source.get("required_locations") or []
+    if isinstance(required_locations, str):
+        required_locations = [required_locations]
+    required_locations = [
+        str(item).strip().lower()
+        for item in required_locations
+        if str(item).strip()
+    ]
+    if not required_locations:
+        return True
+    location = str(candidate.get("location") or "").strip().lower()
+    return any(required_location in location for required_location in required_locations)
+
+
+def talentbrew_browse_page_url(source: dict[str, Any], page: int) -> str:
+    template = str(source.get("browse_url_template") or "").strip()
+    if template:
+        return template.format(page=page)
+    source_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(source_url)
+    path = re.sub(r"/\d+/?$", f"/{page}", parsed.path.rstrip("/"))
+    return urllib.parse.urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
 def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Unknown Company")
     results_url = talentbrew_results_url(source)
@@ -4648,87 +9837,104 @@ def discover_talentbrew_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     max_pages = int(source.get("max_pages", 3))
     candidates: dict[str, dict[str, Any]] = {}
 
-    for keyword in [str(item) for item in keywords if str(item).strip()]:
-        total_pages = max_pages
+    if truthy_source_flag(source.get("browse_pages"), default=False):
         for page_index in range(1, max_pages + 1):
-            params = {
-                "ActiveFacetID": "0",
-                "CurrentPage": str(page_index),
-                "RecordsPerPage": str(page_size),
-                "Distance": str(source.get("distance", 50)),
-                "RadiusUnitType": "0",
-                "Keywords": keyword,
-                "Location": str(source.get("location", "")),
-                "Latitude": "",
-                "Longitude": "",
-                "ShowRadius": "False",
-                "CustomFacetName": "",
-                "FacetTerm": "",
-                "FacetType": "0",
-                "SearchResultsModuleName": "Search Results",
-                "SortCriteria": str(source.get("sort_criteria", 1)),
-                "SortDirection": str(source.get("sort_direction", 0)),
-                "SearchType": "1",
-            }
-            if organization_ids:
-                params["OrganizationIds"] = organization_ids
+            page_url = talentbrew_browse_page_url(source, page_index)
             try:
-                data = fetch_json(f"{results_url}?{urllib.parse.urlencode(params)}")
+                result_html = fetch_url(page_url, timeout=int(source.get("timeout", 30)))
             except Exception as error:  # noqa: BLE001
-                print(f"Could not fetch TalentBrew API for {company}: {error}", file=sys.stderr)
+                print(f"Could not fetch TalentBrew browse page for {company}: {error}", file=sys.stderr)
                 break
-            result_html = str(data.get("results") or "") if isinstance(data, dict) else ""
-            if not result_html:
+            raw_page_candidates = parse_talentbrew_result_items(
+                result_html,
+                page_url,
+                str(company),
+                str(source.get("url") or page_url),
+                str(source.get("browse_query") or "regional_listing"),
+            )
+            page_candidates = {
+                url: candidate
+                for url, candidate in raw_page_candidates.items()
+                if talentbrew_candidate_matches_source(source, candidate)
+            }
+            if not raw_page_candidates:
                 break
-            pages_match = re.search(r'data-total-pages=["\'](\d+)["\']', result_html, flags=re.I)
-            if pages_match:
-                total_pages = min(max_pages, int(pages_match.group(1)))
-            found_this_page = 0
-            item_matches = list(re.finditer(r'<li\b[^>]*class=["\'][^"\']*branded-list__list-item[^"\']*["\'][^>]*>(.*?)</li>', result_html, flags=re.I | re.S))
-            if not item_matches:
-                item_matches = list(re.finditer(r"<li\b[^>]*>(.*?)</li>", result_html, flags=re.I | re.S))
-            for item_match in item_matches:
-                item = item_match.group(1)
-                link_match = re.search(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*data-job-id=["\']([^"\']+)["\']', item, flags=re.I | re.S)
-                if not link_match:
-                    continue
-                url = normalize_job_url(urllib.parse.urljoin(results_url, html.unescape(link_match.group(1))))
-                if url in candidates:
-                    continue
-                role_match = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", item, flags=re.I | re.S)
-                role = html_to_text(role_match.group(1)) if role_match else infer_role_from_url(url)
-                location = html_to_text(re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S).group(1)) if re.search(r'<span\b[^>]*class=["\'][^"\']*job-location[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S) else ""
-                list_posted_at_match = re.search(r'<span\b[^>]*class=["\'][^"\']*job-date-posted[^"\']*["\'][^>]*>(.*?)</span>', item, flags=re.I | re.S)
-                list_posted_at = normalize_datetime(html_to_text(list_posted_at_match.group(1))) if list_posted_at_match else ""
-                fallback = {
-                    "company": company,
-                    "job_number": str(link_match.group(2)),
-                    "external_job_id": str(link_match.group(2)),
+            before = len(candidates)
+            candidates.update(page_candidates)
+            if len(candidates) == before and not source.get("required_locations"):
+                break
+    else:
+        for keyword in [str(item) for item in keywords if str(item).strip()]:
+            total_pages = max_pages
+            for page_index in range(1, max_pages + 1):
+                params = {
+                    "ActiveFacetID": "0",
+                    "CurrentPage": str(page_index),
+                    "RecordsPerPage": str(page_size),
+                    "Distance": str(source.get("distance", 50)),
+                    "RadiusUnitType": "0",
+                    "Keywords": keyword,
+                    "Location": str(source.get("location", "")),
+                    "Latitude": "",
+                    "Longitude": "",
+                    "ShowRadius": "False",
+                    "CustomFacetName": "",
+                    "FacetTerm": "",
+                    "FacetType": "0",
+                    "SearchResultsModuleName": "Search Results",
+                    "SortCriteria": str(source.get("sort_criteria", 1)),
+                    "SortDirection": str(source.get("sort_direction", 0)),
+                    "SearchType": "1",
                 }
-                detail = (
-                    talentbrew_detail_from_url(url, fallback)
-                    if truthy_source_flag(source.get("fetch_details"), default=True)
-                    else {}
+                if organization_ids:
+                    params["OrganizationIds"] = organization_ids
+                try:
+                    data = fetch_json(f"{results_url}?{urllib.parse.urlencode(params)}")
+                except Exception as error:  # noqa: BLE001
+                    print(f"Could not fetch TalentBrew API for {company}: {error}", file=sys.stderr)
+                    break
+                result_html = str(data.get("results") or "") if isinstance(data, dict) else ""
+                if not result_html:
+                    break
+                pages_match = re.search(r'data-total-pages=["\'](\d+)["\']', result_html, flags=re.I)
+                if pages_match:
+                    total_pages = min(max_pages, int(pages_match.group(1)))
+                raw_page_candidates = parse_talentbrew_result_items(
+                    result_html,
+                    results_url,
+                    str(company),
+                    str(source.get("url") or results_url),
+                    keyword,
                 )
-                candidates[url] = {
-                    "company": company,
-                    "role": role,
-                    "url": url,
-                    "platform": "talentbrew",
-                    "location": location,
-                    "job_number": detail.get("job_number") or fallback["job_number"],
-                    "external_job_id": detail.get("external_job_id") or fallback["external_job_id"],
-                    "posted_at": detail.get("posted_at", "") or list_posted_at,
-                    "updated_at": detail.get("updated_at", ""),
-                    "source": source.get("url", results_url),
-                    "source_query": keyword,
-                    "freshness_source": "json_ld_datePosted" if detail.get("posted_at") else ("talentbrew_result_date" if list_posted_at else "unknown"),
-                    "notes": "TalentBrew search adapter; detail pages parsed for JobPosting JSON-LD.",
-                    "_jd_text": detail.get("_jd_text", ""),
+                page_candidates = {
+                    url: candidate
+                    for url, candidate in raw_page_candidates.items()
+                    if talentbrew_candidate_matches_source(source, candidate)
                 }
-                found_this_page += 1
-            if found_this_page == 0 or page_index >= total_pages:
-                break
+                for url, candidate in page_candidates.items():
+                    if url in candidates:
+                        continue
+                    fallback = {
+                        "company": company,
+                        "job_number": candidate["job_number"],
+                        "external_job_id": candidate["external_job_id"],
+                    }
+                    detail = (
+                        talentbrew_detail_from_url(url, fallback)
+                        if truthy_source_flag(source.get("fetch_details"), default=True)
+                        else {}
+                    )
+                    if detail:
+                        candidate["job_number"] = detail.get("job_number") or candidate["job_number"]
+                        candidate["external_job_id"] = detail.get("external_job_id") or candidate["external_job_id"]
+                        candidate["posted_at"] = detail.get("posted_at", "") or candidate["posted_at"]
+                        candidate["updated_at"] = detail.get("updated_at", "")
+                        candidate["_jd_text"] = detail.get("_jd_text", "")
+                        if detail.get("posted_at"):
+                            candidate["freshness_source"] = "json_ld_datePosted"
+                    candidates[url] = candidate
+                if not raw_page_candidates or page_index >= total_pages:
+                    break
     detail_limit = int(source.get("fetch_detail_limit", 0) or 0)
     if not truthy_source_flag(source.get("fetch_details"), default=True) and detail_limit > 0:
         relevant = [candidate for candidate in candidates.values() if unclassified_technical_title_relevant(candidate)]
@@ -4980,6 +10186,1541 @@ def discover_kula_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return list(candidates.values())
 
 
+def discover_cadient_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    raw = fetch_url(source_url, timeout=int(source.get("timeout", 30)))
+    cards = re.findall(
+        r'(?is)<li\b[^>]*class="[^"]*\bborder\b[^"]*\bborder-solid\b[^"]*">.*?</li>',
+        raw,
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        role_match = re.search(r"(?is)<h3\b[^>]*>(.*?)</h3>", card)
+        link_match = re.search(
+            r'(?is)href="([^"]*cta\.cadienttalent\.com[^"]*(?:SEQ|seq)=jobDetails[^"]*)"',
+            card,
+        )
+        if not role_match or not link_match:
+            continue
+        role = html_to_text(role_match.group(1))
+        url = normalize_job_url(html.unescape(link_match.group(1)))
+        if not role or not url:
+            continue
+        paragraphs = re.findall(r'(?is)<p\b[^>]*class="[^"]*\bmicro\b[^"]*"[^>]*>(.*?)</p>', card)
+        details = re.findall(r"(?is)<dd\b[^>]*>(.*?)</dd>", card)
+        category = html_to_text(paragraphs[0]) if paragraphs else ""
+        location = html_to_text(details[0]) if details else ""
+        location = re.sub(r"\s*,\s*", ", ", location)
+        date_posted = html_to_text(details[1]) if len(details) > 1 else ""
+        posted_at = normalize_datetime(date_posted)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        posting_id = str((query.get("POSTING_ID") or query.get("posting_id") or [""])[0])
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "cadient",
+            "location": location,
+            "job_number": posting_id,
+            "external_job_id": posting_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": source_url,
+            "source_query": category,
+            "freshness_source": "cadient_listing_date_posted" if posted_at else "unknown",
+            "notes": "Official employer careers page backed by Cadient Talent.",
+            "_jd_text": "\n\n".join(
+                part
+                for part in [
+                    role,
+                    f"Category: {category}" if category else "",
+                    f"Location: {location}" if location else "",
+                    f"Date Posted: {date_posted}" if date_posted else "",
+                ]
+                if part
+            ),
+        }
+    return list(candidates.values())
+
+
+def discover_breezy_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    feed_url = str(source.get("feed_url") or f"{source_url.rstrip('/')}/json")
+    data = fetch_json(feed_url, timeout=int(source.get("timeout", 30)))
+    rows = data if isinstance(data, list) else []
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("name") or "").strip()
+        url = normalize_job_url(str(row.get("url") or "").strip())
+        if not role or not url:
+            continue
+        locations = row.get("locations") if isinstance(row.get("locations"), list) else []
+        location_names = [
+            str(location.get("name") or "").strip()
+            for location in locations
+            if isinstance(location, dict) and str(location.get("name") or "").strip()
+        ]
+        primary_location = row.get("location") if isinstance(row.get("location"), dict) else {}
+        location = "; ".join(dict.fromkeys(location_names))
+        if not location:
+            location = str(primary_location.get("name") or "").strip()
+        if bool(primary_location.get("is_remote")) and "remote" not in location.lower():
+            location = "; ".join(part for part in [location, "Remote"] if part)
+        department = row.get("department")
+        if isinstance(department, dict):
+            department = department.get("name")
+        department = str(department or "").strip()
+        employment_type = row.get("type")
+        if isinstance(employment_type, dict):
+            employment_type = employment_type.get("name")
+        employment_type = str(employment_type or "").strip()
+        salary = str(row.get("salary") or "").strip()
+        posted_at = normalize_datetime(row.get("published_date"))
+        external_id = str(row.get("id") or "").strip()
+        candidates[url] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "breezy",
+            "location": location,
+            "job_number": external_id,
+            "external_job_id": external_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": source_url,
+            "source_query": department,
+            "freshness_source": "breezy_published_date" if posted_at else "unknown",
+            "notes": "Official Breezy public jobs feed.",
+            "_jd_text": "\n\n".join(
+                part
+                for part in [
+                    role,
+                    f"Department: {department}" if department else "",
+                    f"Location: {location}" if location else "",
+                    f"Employment Type: {employment_type}" if employment_type else "",
+                    f"Salary: {salary}" if salary else "",
+                ]
+                if part
+            ),
+        }
+    return list(candidates.values())
+
+
+def discover_clinch_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    search_url = str(source.get("url") or "").strip()
+    if not search_url:
+        return []
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    timeout = int(source.get("timeout", 30))
+    base_params = source.get("search_params")
+    if not isinstance(base_params, dict):
+        base_params = {}
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for page in range(1, max_pages + 1):
+        parsed_search_url = urllib.parse.urlparse(search_url)
+        params: list[tuple[str, str]] = urllib.parse.parse_qsl(
+            parsed_search_url.query,
+            keep_blank_values=True,
+        )
+        params = [(key, value) for key, value in params if key != "page"]
+        for key, value in base_params.items():
+            values = value if isinstance(value, list) else [value]
+            params.extend((str(key), str(item)) for item in values if str(item).strip())
+        params.append(("page", str(page)))
+        page_url = urllib.parse.urlunparse(
+            parsed_search_url._replace(
+                query=urllib.parse.urlencode(params, doseq=True)
+            )
+        )
+        try:
+            raw = fetch_url(page_url, timeout=timeout)
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Clinch board for {company}: {error}", file=sys.stderr)
+            break
+
+        rows = list(
+            re.finditer(
+                r'<tr\b[^>]*data-job-url=["\'](?P<url>[^"\']+)["\'][^>]*>(?P<body>.*?)</tr>',
+                raw,
+                flags=re.I | re.S,
+            )
+        )
+        if not rows:
+            break
+        for row in rows:
+            body = row.group("body")
+            detail_url = normalize_job_url(
+                urllib.parse.urljoin(search_url, html.unescape(row.group("url")))
+            )
+            title_match = re.search(
+                r'<td\b[^>]*class=["\'][^"\']*\bjob-search-results-title\b[^"\']*["\'][^>]*>'
+                r'.*?<a\b[^>]*>(.*?)</a>',
+                body,
+                flags=re.I | re.S,
+            )
+            requisition_match = re.search(
+                r'aria-label=["\']Requisition Identifier:\s*([^"\']+)["\']',
+                body,
+                flags=re.I,
+            )
+            locations = [
+                html_to_text(value)
+                for value in re.findall(
+                    r'aria-label=["\']Location:\s*([^"\']+)["\']',
+                    body,
+                    flags=re.I,
+                )
+                if html_to_text(value)
+            ]
+            external_id = (
+                html_to_text(requisition_match.group(1))
+                if requisition_match
+                else detail_url
+            )
+            candidates[detail_url] = {
+                "company": company,
+                "role": (
+                    html_to_text(title_match.group(1))
+                    if title_match
+                    else infer_role_from_url(detail_url)
+                ),
+                "url": detail_url,
+                "platform": "clinch",
+                "location": "; ".join(merge_unique(locations, [])),
+                "job_number": external_id,
+                "external_job_id": external_id,
+                "posted_at": "",
+                "updated_at": "",
+                "source": search_url,
+                "source_query": urllib.parse.urlencode(params, doseq=True),
+                "freshness_source": "unknown",
+                "notes": "ClinchTalent public board; detail JSON-LD supplies the official posted date.",
+            }
+        if not re.search(r'<a\b[^>]*\brel=["\']next["\']', raw, flags=re.I):
+            break
+
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 100))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(str(candidate["url"]), timeout=detail_timeout)
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"Could not fetch Clinch detail for {company} job "
+                f"{candidate['external_job_id']}: {error}",
+                file=sys.stderr,
+            )
+            return
+        details = parse_json_ld_jobs(detail_raw, str(candidate["url"]), company)
+        if not details:
+            return
+        detail = details[0]
+        for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["platform"] = "clinch"
+        candidate["freshness_source"] = (
+            "clinch_json_ld_date_posted" if candidate.get("posted_at") else "unknown"
+        )
+        candidate["notes"] = (
+            "ClinchTalent public board enriched from detail-page JobPosting JSON-LD."
+        )
+
+    selected = list(candidates.values())[:detail_limit]
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, selected))
+    return list(candidates.values())
+
+
+def discover_atkins_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "AtkinsRéalis")
+    api_base = str(
+        source.get("api_base") or "https://atkinsats-prod-api.connectid.cloud"
+    ).rstrip("/")
+    timeout = int(source.get("timeout", 30))
+    page_size = max(1, min(int(source.get("page_size", 50)), 50))
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    country = str(source.get("country") or "United States of America")
+    required_location_terms = [
+        str(item).strip().casefold()
+        for item in source.get("required_location_terms", ["Washington"])
+        if str(item).strip()
+    ]
+    required_location_patterns = [
+        str(item).strip()
+        for item in source.get("required_location_patterns", [])
+        if str(item).strip()
+    ]
+    try:
+        token_data = fetch_json(f"{api_base}/api/jobs/token", timeout=timeout)
+        token = str(token_data.get("token") or "").strip()
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not fetch AtkinsRéalis jobs token: {error}", file=sys.stderr)
+        return []
+    if not token:
+        return []
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for page in range(1, max_pages + 1):
+        payload = {
+            "limit": page_size,
+            "page": page,
+            "language": str(source.get("language") or "en"),
+            "country": country,
+        }
+        try:
+            data = fetch_json_post_with_headers(
+                f"{api_base}/api/jobs/jobs",
+                payload,
+                {"Authorization": f"Bearer {token}"},
+                timeout=timeout,
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch AtkinsRéalis jobs page {page}: {error}", file=sys.stderr)
+            break
+        records = data.get("jobs", []) if isinstance(data, dict) else []
+        if not isinstance(records, list) or not records:
+            break
+        for job in records:
+            if not isinstance(job, dict):
+                continue
+            locations = job.get("location_mappings")
+            if not isinstance(locations, list):
+                locations = []
+            locations = [str(item).strip() for item in locations if str(item).strip()]
+            location_text = "; ".join(locations)
+            location_folded = location_text.casefold()
+            if required_location_patterns and not any(
+                re.search(pattern, location_text, flags=re.I)
+                for pattern in required_location_patterns
+            ):
+                continue
+            if not required_location_patterns and required_location_terms and not any(
+                term in location_folded for term in required_location_terms
+            ):
+                continue
+            requisition_id = str(job.get("job_requisition_id") or job.get("id") or "").strip()
+            role = str(job.get("job_posting_title") or "").strip()
+            if not requisition_id or not role:
+                continue
+            career_base = str(
+                source.get("public_base_url") or source.get("url") or "https://careers.atkinsrealis.com"
+            ).rstrip("/")
+            if career_base.endswith("/search-results"):
+                career_base = career_base.rsplit("/", 1)[0]
+            detail_url = normalize_job_url(
+                f"{career_base}/jobs/{slugify(role)}-{slugify(requisition_id)}"
+            )
+            candidates[detail_url] = {
+                "company": company,
+                "role": role,
+                "url": detail_url,
+                "apply_url": normalize_job_url(str(job.get("external_posting_url") or "")),
+                "platform": "atkins_jobs",
+                "location": location_text,
+                "job_number": requisition_id,
+                "external_job_id": requisition_id,
+                "posted_at": normalize_datetime(
+                    job.get("start_date") or job.get("created_at")
+                ),
+                "updated_at": normalize_datetime(
+                    job.get("last_functionally_updated") or job.get("updated_at")
+                ),
+                "source": source.get("url", career_base),
+                "source_query": f"country={country}",
+                "freshness_source": "atkins_official_start_date",
+                "notes": "AtkinsRéalis official careers API with a public short-lived access token.",
+                "_jd_text": "\n\n".join(
+                    item
+                    for item in [
+                        html_to_text(str(job.get("job_overview") or "")),
+                        html_to_text(str(job.get("job_description") or "")),
+                        html_to_text(str(job.get("job_responsibilities") or "")),
+                        html_to_text(str(job.get("person_requirements") or "")),
+                        html_to_text(str(job.get("additional_information") or "")),
+                    ]
+                    if item
+                ),
+            }
+        meta = data.get("meta", {}) if isinstance(data, dict) else {}
+        total_pages = int(meta.get("totalPages") or 0) if isinstance(meta, dict) else 0
+        if len(records) < page_size or (total_pages and page >= total_pages):
+            break
+    return list(candidates.values())
+
+
+def kronos_careers_company_code(source: dict[str, Any]) -> str:
+    if source.get("company_code"):
+        return str(source["company_code"]).strip()
+    path = urllib.parse.urlparse(str(source.get("url") or "")).path
+    match = re.search(r"/ta/([^/.]+)\.careers", path, flags=re.I)
+    return match.group(1) if match else ""
+
+
+def discover_kronos_careers_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    board_url = str(source.get("url") or "").strip()
+    company_code = kronos_careers_company_code(source)
+    if not board_url or not company_code:
+        return []
+    parsed = urllib.parse.urlparse(board_url)
+    base_url = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "application/json,*/*;q=0.8",
+        "Referer": board_url,
+    }
+    try:
+        fetch_url_with_opener(opener, board_url, timeout=int(source.get("timeout", 25)))
+    except Exception as error:  # noqa: BLE001
+        print(f"Could not initialize Kronos careers session for {company}: {error}", file=sys.stderr)
+        return []
+
+    encoded_company = urllib.parse.quote(f"|{company_code}", safe="")
+    page_size = min(max(1, int(source.get("page_size", 100))), 100)
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    candidates: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        params = {
+            "offset": str(page_index * page_size),
+            "size": str(page_size),
+            "sort": str(source.get("sort") or "desc"),
+            "lang": str(source.get("lang") or "en-US"),
+        }
+        api_url = (
+            f"{base_url}/ta/rest/ui/recruitment/companies/{encoded_company}/job-requisitions?"
+            f"{urllib.parse.urlencode(params)}"
+        )
+        try:
+            data = fetch_json_with_opener(opener, api_url, headers, timeout=int(source.get("timeout", 25)))
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Kronos careers jobs for {company}: {error}", file=sys.stderr)
+            break
+        jobs = data.get("job_requisitions", []) if isinstance(data, dict) else []
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("id") or "").strip()
+            role = str(job.get("job_title") or "").strip()
+            if not job_id or not role:
+                continue
+            location = compact_location_text(job.get("location"))
+            public_url = normalize_job_url(
+                f"{board_url.split('?', 1)[0]}?ShowJob={urllib.parse.quote(job_id)}"
+            )
+            candidates[public_url] = {
+                "company": company,
+                "role": role,
+                "url": public_url,
+                "platform": "kronos_careers",
+                "location": location,
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": "",
+                "updated_at": "",
+                "source": board_url,
+                "source_query": "all_jobs",
+                "freshness_source": "first_seen",
+                "notes": "Kronos/UKG Ready public careers API; publication date is not exposed.",
+                "_jd_text": html_to_text(str(job.get("job_description") or "")),
+            }
+        paging = data.get("_paging", {}) if isinstance(data, dict) else {}
+        total = int(paging.get("total") or 0) if isinstance(paging, dict) else 0
+        if len(jobs) < page_size or (total and (page_index + 1) * page_size >= total):
+            break
+
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 40))))
+    detail_workers = max(1, int(source.get("detail_workers", 6)))
+    detail_candidates = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            0 if unclassified_technical_title_relevant(candidate) else 1,
+            str(candidate.get("role") or "").lower(),
+        ),
+    )[:detail_limit]
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        job_id = str(candidate.get("external_job_id") or "")
+        detail_url = (
+            f"{base_url}/ta/rest/ui/recruitment/companies/{encoded_company}/"
+            f"job-requisitions/{urllib.parse.quote(job_id)}?"
+            f"{urllib.parse.urlencode({'showMap': '1', 'lang': str(source.get('lang') or 'en-US')})}"
+        )
+        try:
+            detail = fetch_json_with_opener(opener, detail_url, headers, timeout=int(source.get("detail_timeout", 20)))
+        except Exception:
+            return
+        if not isinstance(detail, dict):
+            return
+        candidate["role"] = str(detail.get("job_title") or candidate["role"]).strip()
+        candidate["location"] = compact_location_text(detail.get("location")) or candidate["location"]
+        candidate["_jd_text"] = "\n\n".join(
+            text
+            for text in [
+                html_to_text(str(detail.get("job_description") or "")),
+                html_to_text(str(detail.get("job_requirement") or "")),
+                html_to_text(str(detail.get("job_preview") or "")),
+            ]
+            if text
+        )
+
+    if detail_candidates:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, detail_candidates))
+    return list(candidates.values())
+
+
+def healthcaresource_site_id(source: dict[str, Any]) -> str:
+    configured = str(source.get("site_id") or "").strip()
+    if configured:
+        return configured
+    path = urllib.parse.urlparse(str(source.get("url") or "")).path
+    match = re.search(r"/CS/([^/?#]+)", path, flags=re.I)
+    return urllib.parse.unquote(match.group(1)).strip() if match else ""
+
+
+def discover_healthcaresource_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    site_id = healthcaresource_site_id(source)
+    if not source_url or not site_id:
+        return []
+    parsed = urllib.parse.urlparse(source_url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    careers_url = f"{origin}/CS/{urllib.parse.quote(site_id)}/"
+    endpoint_base = (
+        f"{origin}/JobseekerSearchAPI/{urllib.parse.quote(site_id)}/api/Search"
+    )
+    page_size = min(max(1, int(source.get("page_size", 100))), 500)
+    max_pages = max(1, int(source.get("max_pages", 5)))
+    candidates: dict[str, dict[str, Any]] = {}
+    for page_index in range(max_pages):
+        offset = page_index * page_size
+        endpoint = f"{endpoint_base}?{urllib.parse.urlencode({'size': page_size})}"
+        payload = {
+            "query": {"bool": {"must": {"match_all": {}}}},
+            "from": offset,
+            "size": page_size,
+        }
+        try:
+            data = fetch_json_post_with_headers(
+                endpoint,
+                payload,
+                {"Referer": careers_url},
+                timeout=int(source.get("timeout", 25)),
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch HealthcareSource jobs for {company}: {error}", file=sys.stderr)
+            break
+        hits_block = data.get("hits", {}) if isinstance(data, dict) else {}
+        hits = hits_block.get("hits", []) if isinstance(hits_block, dict) else []
+        if not isinstance(hits, list) or not hits:
+            break
+        for hit in hits:
+            record = hit.get("_source", {}) if isinstance(hit, dict) else {}
+            if not isinstance(record, dict):
+                continue
+            user_area = record.get("userArea", {})
+            if not isinstance(user_area, dict):
+                user_area = {}
+            if user_area.get("active") is False or user_area.get("isHiddenOnCareerSite") is True:
+                continue
+            role = str(record.get("title") or record.get("name") or "").strip()
+            job_id = str(
+                user_area.get("jobPostingID")
+                or record.get("documentId")
+                or (hit.get("_id") if isinstance(hit, dict) else "")
+                or ""
+            ).strip()
+            if not role or not job_id:
+                continue
+            address = record.get("jobLocation", {})
+            address = address.get("address", {}) if isinstance(address, dict) else {}
+            if not isinstance(address, dict):
+                address = {}
+            location = str(address.get("addressLocalityRegion") or "").strip()
+            if not location:
+                location = ", ".join(
+                    part
+                    for part in [
+                        str(address.get("addressLocality") or "").strip(),
+                        str(address.get("addressRegion") or "").strip(),
+                    ]
+                    if part
+                )
+            public_url = normalize_job_url(
+                f"{careers_url}#/job/{urllib.parse.quote(job_id)}"
+            )
+            posted_at = normalize_datetime(record.get("datePosted"))
+            updated_at = normalize_datetime(
+                user_area.get("jobPostingModifiedDate")
+                or record.get("lastIndexedDate")
+            )
+            department = str(
+                user_area.get("bELevel3")
+                or record.get("occupationalCategory")
+                or ""
+            ).strip()
+            description = html_to_text(
+                str(user_area.get("jobSummary") or record.get("description") or "")
+            )
+            candidates[public_url] = {
+                "company": company,
+                "role": role,
+                "url": public_url,
+                "platform": "healthcaresource",
+                "location": location,
+                "job_number": str(user_area.get("requisitionNumber") or job_id),
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": updated_at,
+                "source": source_url,
+                "source_query": department,
+                "freshness_source": (
+                    "healthcaresource_date_posted" if posted_at else "first_seen"
+                ),
+                "notes": "HealthcareSource public Jobseeker Search API.",
+                "_jd_text": description,
+            }
+        total_value = hits_block.get("total", 0) if isinstance(hits_block, dict) else 0
+        if isinstance(total_value, dict):
+            total = int(total_value.get("value") or 0)
+        else:
+            total = int(total_value or 0)
+        if len(hits) < page_size or (total and offset + len(hits) >= total):
+            break
+    return list(candidates.values())
+
+
+def parse_paradox_preload_state(raw: str) -> dict[str, Any]:
+    marker = re.search(r"window\.__PRELOAD_STATE__\s*=\s*", raw)
+    if not marker:
+        return {}
+    try:
+        value, _ = json.JSONDecoder().raw_decode(raw[marker.end() :])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def discover_paradox_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip().rstrip("/")
+    if not source_url:
+        return []
+    max_pages = max(1, int(source.get("max_pages", 20)))
+    candidates: dict[str, dict[str, Any]] = {}
+    total_jobs = 0
+
+    for page in range(1, max_pages + 1):
+        page_url = source_url if page == 1 else f"{source_url}/page/{page}"
+        try:
+            raw = fetch_url(page_url, timeout=int(source.get("timeout", 25)))
+        except Exception as error:  # noqa: BLE001
+            print(f"Could not fetch Paradox jobs for {company}: {error}", file=sys.stderr)
+            break
+        state = parse_paradox_preload_state(raw)
+        search = state.get("jobSearch") if isinstance(state.get("jobSearch"), dict) else {}
+        jobs = search.get("jobs") if isinstance(search.get("jobs"), list) else []
+        if not jobs:
+            break
+        total_jobs = int(search.get("totalJob") or total_jobs or 0)
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            external_id = str(
+                job.get("reference") or job.get("uniqueID") or job.get("sourceID") or ""
+            ).strip()
+            original_url = str(job.get("originalURL") or "").strip()
+            detail_url = normalize_job_url(urllib.parse.urljoin(f"{source_url}/", original_url))
+            role = html_to_text(str(job.get("title") or "")).strip()
+            if not role or not detail_url:
+                continue
+            locations = job.get("locations") if isinstance(job.get("locations"), list) else []
+            location = ""
+            if locations and isinstance(locations[0], dict):
+                first_location = locations[0]
+                location = str(
+                    first_location.get("locationParsedText")
+                    or first_location.get("locationText")
+                    or first_location.get("cityStateAbbr")
+                    or first_location.get("cityState")
+                    or ""
+                ).strip()
+            if not location and job.get("isRemote"):
+                location = "Remote"
+            location = location or str(source.get("default_location") or "").strip()
+            candidates[external_id or detail_url] = {
+                "company": company,
+                "role": role,
+                "url": detail_url,
+                "platform": "paradox",
+                "location": location,
+                "job_number": external_id,
+                "external_job_id": external_id,
+                "posted_at": "",
+                "updated_at": "",
+                "source": source_url,
+                "source_query": str(source.get("source_query") or "company_careers"),
+                "freshness_source": "first_seen",
+                "notes": "Paradox career-site preload data.",
+                "_jd_text": "",
+            }
+        if total_jobs and len(candidates) >= total_jobs:
+            break
+
+    if not truthy_source_flag(source.get("fetch_details"), default=True):
+        return list(candidates.values())
+    detail_limit = max(0, min(len(candidates), int(source.get("max_detail_pages", 100))))
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    detail_timeout = int(source.get("detail_timeout", 20))
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(str(candidate["url"]), timeout=detail_timeout)
+        except Exception:
+            return
+        details = parse_json_ld_jobs(detail_raw, str(candidate["url"]), company)
+        if not details:
+            return
+        detail = details[0]
+        for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+            if detail.get(key):
+                candidate[key] = detail[key]
+        candidate["platform"] = "paradox"
+        if candidate.get("posted_at"):
+            candidate["freshness_source"] = "paradox_json_ld_date_posted"
+        candidate["notes"] = "Paradox preload listing enriched from detail-page JobPosting JSON-LD."
+
+    detail_candidates = list(candidates.values())[:detail_limit]
+    if detail_candidates:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=detail_workers) as executor:
+            list(executor.map(enrich, detail_candidates))
+    return list(candidates.values())
+
+
+def infor_cloudsuite_parts(source: dict[str, Any]) -> tuple[str, str, str, str]:
+    source_url = str(source.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(source_url)
+    path_match = re.search(r"(?i)(.*?/hcm/jobs)(?:/|$)", parsed.path)
+    app_path = path_match.group(1) if path_match else "/hcm/Jobs"
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    board = str(source.get("job_board") or query.get("csk.JobBoard") or "EXTERNAL").strip()
+    organization = str(
+        source.get("hr_organization")
+        or query.get("csk.HROrganization")
+        or "1"
+    ).strip()
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    return origin, app_path, board, organization
+
+
+def infor_cloudsuite_field(record: dict[str, Any], field_name: str) -> Any:
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    field = fields.get(field_name)
+    return field.get("value") if isinstance(field, dict) else ""
+
+
+def infor_cloudsuite_date(value: Any) -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"\d{8}", raw):
+        raw = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    return normalize_datetime(raw)
+
+
+def infor_cloudsuite_location(value: Any) -> str:
+    raw = str(value or "").strip()
+    parts = [part.strip() for part in raw.split(":") if part.strip()]
+    if len(parts) >= 3 and parts[0].upper() == "US":
+        return ", ".join([":".join(parts[2:]), parts[1]])
+    return raw
+
+
+def infor_cloudsuite_job_url(source: dict[str, Any], job_id: str) -> str:
+    origin, app_path, board, organization = infor_cloudsuite_parts(source)
+    resource = urllib.parse.quote(
+        f"JobPosting[JobPostingSet](1,{job_id},1).JobPostingDisplayNav",
+        safe=".",
+    )
+    query = urllib.parse.urlencode(
+        {
+            "csk.HROrganization": organization,
+            "csk.JobBoard": board,
+        }
+    )
+    return normalize_job_url(
+        f"{origin}{app_path}/navigation/{resource}?{query}"
+    )
+
+
+def infor_cloudsuite_request_json(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    referer: str,
+    timeout: int,
+) -> Any:
+    raw = fetch_url_with_opener(
+        opener,
+        url,
+        headers={
+            "Accept": "application/json,*/*;q=0.8",
+            "Referer": referer,
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        timeout=timeout,
+    )
+    return json.loads(raw)
+
+
+def discover_infor_cloudsuite_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    origin, app_path, board, organization = infor_cloudsuite_parts(source)
+    timeout = max(5, int(source.get("timeout", 25)))
+    page_size = max(1, min(int(source.get("page_size", 100)), 100))
+    max_pages = max(1, int(source.get("max_pages", 10)))
+    common_query = {
+        "csk.JobBoard": board,
+        "csk.HROrganization": organization,
+    }
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cookie_jar)
+    )
+    fetch_url_with_opener(opener, source_url, timeout=timeout)
+
+    list_endpoint = (
+        f"{origin}{app_path}/list/JobPosting.SearchForJobsResults"
+    )
+    params: dict[str, Any] = {
+        "pageop": "load",
+        "pagesize": page_size,
+        "pagepanel": "JobsHomePage.Jobs.NewJobsForAnonymous",
+        **common_query,
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    for _page_index in range(max_pages):
+        data = infor_cloudsuite_request_json(
+            opener,
+            f"{list_endpoint}?{urllib.parse.urlencode(params)}",
+            source_url,
+            timeout,
+        )
+        data_view = data.get("dataViewSet") if isinstance(data, dict) else {}
+        records = data_view.get("data") if isinstance(data_view, dict) else []
+        if not isinstance(records, list) or not records:
+            break
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            job_id = str(
+                infor_cloudsuite_field(record, "JobId")
+                or infor_cloudsuite_field(record, "JobRequisition")
+                or ""
+            ).strip()
+            title = str(
+                infor_cloudsuite_field(record, "Description")
+                or infor_cloudsuite_field(
+                    record,
+                    "_op_Description_spc_translation_cp_",
+                )
+                or ""
+            ).strip()
+            if not job_id or not title:
+                continue
+            url = infor_cloudsuite_job_url(source, job_id)
+            posted_raw = infor_cloudsuite_field(record, "PostingDateRange")
+            category = str(
+                infor_cloudsuite_field(record, "CategoryDescriptionForSort")
+                or infor_cloudsuite_field(
+                    record,
+                    "_op_Category_prd_Description_spc_translation_cp_",
+                )
+                or ""
+            ).strip()
+            work_type = str(
+                infor_cloudsuite_field(record, "WorkType") or ""
+            ).strip()
+            candidates[url] = {
+                "company": company,
+                "role": title,
+                "url": url,
+                "platform": "infor_cloudsuite",
+                "location": infor_cloudsuite_location(
+                    infor_cloudsuite_field(
+                        record,
+                        "LocationOfJobDescriptionForSort",
+                    )
+                    or infor_cloudsuite_field(record, "LocationOfJob")
+                ),
+                "job_number": job_id,
+                "external_job_id": job_id,
+                "posted_at": infor_cloudsuite_date(posted_raw),
+                "updated_at": "",
+                "source": source_url,
+                "source_query": " / ".join(
+                    item for item in [category, work_type] if item
+                ),
+                "freshness_source": (
+                    "infor_cloudsuite_posting_date" if posted_raw else ""
+                ),
+                "notes": "Infor CloudSuite public candidate experience API.",
+                "_jd_text": "",
+            }
+
+        paging = (
+            data_view.get("pagingInfo")
+            if isinstance(data_view, dict)
+            and isinstance(data_view.get("pagingInfo"), dict)
+            else {}
+        )
+        if not truthy_source_flag(paging.get("hasNext"), default=False):
+            break
+        params = {
+            "pagepanel": "JobsHomePage.Jobs.NewJobsForAnonymous",
+            "sortOrderName": paging.get("sortOrderName", ""),
+            "previousDisabled": str(
+                bool(paging.get("previousDisabled"))
+            ).lower(),
+            "fk": paging.get("fk", ""),
+            "pageop": "next",
+            "pagesize": page_size,
+            "hasPrevious": str(bool(paging.get("hasPrevious"))).lower(),
+            "hasNext": str(bool(paging.get("hasNext"))).lower(),
+            "isAscending": str(bool(paging.get("isAscending"))).lower(),
+            "lk": paging.get("lk", ""),
+            **common_query,
+        }
+
+    detail_limit = max(0, int(source.get("max_detail_pages", 20)))
+    selected = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            0 if unclassified_technical_title_relevant(candidate) else 1,
+            str(candidate.get("role") or "").lower(),
+        ),
+    )[:detail_limit]
+    for candidate in selected:
+        job_id = str(candidate.get("external_job_id") or "").strip()
+        resource = urllib.parse.quote(
+            f"JobPosting[JobPostingSet](1,{job_id},1)",
+            safe="",
+        )
+        navigation = urllib.parse.quote(
+            f"JobPosting[JobPostingSet](1,{job_id},1).JobPostingDisplayNav",
+            safe=".",
+        )
+        detail_params = {
+            "pageop": "load",
+            "pagesize": 1,
+            "navigation": urllib.parse.unquote(navigation),
+            "fromlist": "JobPosting.SearchForJobsResults",
+            **common_query,
+        }
+        detail_url = (
+            f"{origin}{app_path}/form/{resource}.JobPostingDisplay?"
+            f"{urllib.parse.urlencode(detail_params)}"
+        )
+        try:
+            detail = infor_cloudsuite_request_json(
+                opener,
+                detail_url,
+                source_url,
+                timeout,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(detail, dict):
+            continue
+        description = infor_cloudsuite_field(
+            detail,
+            "_op_PositionDescription_spc_translation_cp_",
+        )
+        if description:
+            candidate["_jd_text"] = html_to_text(str(description))
+        detail_title = infor_cloudsuite_field(
+            detail,
+            "_op_Description_spc_translation_cp_",
+        )
+        if detail_title:
+            candidate["role"] = str(detail_title).strip()
+        detail_posted = infor_cloudsuite_field(detail, "PostingDateRange")
+        if detail_posted:
+            candidate["posted_at"] = infor_cloudsuite_date(detail_posted)
+            candidate["freshness_source"] = "infor_cloudsuite_posting_date"
+    return list(candidates.values())
+
+
+def viewpoint_for_cloud_origin(source: dict[str, Any]) -> str:
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    host = parsed.netloc.lower()
+    if not host.endswith(".viewpointforcloud.com"):
+        return ""
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+
+def viewpoint_for_cloud_date(value: Any) -> str:
+    match = re.search(r"/Date\((\d+)", str(value or ""))
+    if not match:
+        return normalize_datetime(value)
+    timestamp = int(match.group(1)) / 1000
+    return (
+        dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+    )
+
+
+def discover_viewpoint_for_cloud_jobs(
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    origin = viewpoint_for_cloud_origin(source)
+    if not origin:
+        return []
+    timeout = int(source.get("timeout", 20))
+    search_url = (
+        f"{origin}/Careers/GetJobReqSearchExternal?"
+        "searchString=&cityString=&templateIDString=&companyString=&categoryIDString="
+    )
+    data = fetch_json(search_url, timeout=timeout)
+    if not isinstance(data, list):
+        raise ValueError(
+            f"Viewpoint for Cloud returned an unexpected jobs payload for {company}"
+        )
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        req_id = str(item.get("ReqID") or "").strip()
+        role = html_to_text(str(item.get("PositionTitle") or "")).strip()
+        if not req_id or not role:
+            continue
+        url = normalize_job_url(
+            f"{origin}/careers/jobdetails/{urllib.parse.quote(req_id)}?openModal=N"
+        )
+        location = ", ".join(
+            str(value).strip()
+            for value in [item.get("City"), item.get("State")]
+            if str(value or "").strip()
+        )
+        posted_at = viewpoint_for_cloud_date(
+            item.get("DatePosted") or item.get("DatePostedDisplayValue")
+        )
+        candidates[req_id] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "viewpoint_for_cloud",
+            "location": location,
+            "job_number": str(item.get("ReqNum") or ""),
+            "external_job_id": req_id,
+            "posted_at": posted_at,
+            "updated_at": "",
+            "source": source.get("url", search_url),
+            "source_query": "all_open_postings",
+            "freshness_source": (
+                "viewpoint_for_cloud_date_posted" if posted_at else "first_seen"
+            ),
+            "notes": (
+                "Viewpoint for Cloud official public job search API; "
+                "detail endpoint supplies the complete posting."
+            ),
+            "_jd_text": "",
+        }
+
+    location_filter = str(
+        source.get("location_include_regex") or ""
+    ).strip()
+    if location_filter:
+        candidates = {
+            req_id: candidate
+            for req_id, candidate in candidates.items()
+            if re.search(
+                location_filter,
+                " | ".join(
+                    [
+                        str(candidate.get("role") or ""),
+                        str(candidate.get("location") or ""),
+                    ]
+                ),
+                flags=re.I,
+            )
+        }
+
+    detail_limit = max(
+        0,
+        min(len(candidates), int(source.get("max_detail_pages", len(candidates)))),
+    )
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        req_id = str(candidate["external_job_id"])
+        detail_url = (
+            f"{origin}/Careers/GetReqDetails?"
+            f"{urllib.parse.urlencode({'reqID': req_id, 'reqApplyToken': ''})}"
+        )
+        try:
+            detail = fetch_json(detail_url, timeout=timeout)
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(detail, dict):
+            return
+        role = html_to_text(str(detail.get("PositionTitle") or "")).strip()
+        if role:
+            candidate["role"] = role
+        location = ", ".join(
+            str(value).strip()
+            for value in [detail.get("City"), detail.get("State")]
+            if str(value or "").strip()
+        )
+        if location:
+            candidate["location"] = location
+        posted_at = viewpoint_for_cloud_date(detail.get("DatePosted"))
+        if posted_at:
+            candidate["posted_at"] = posted_at
+            candidate["freshness_source"] = "viewpoint_for_cloud_date_posted"
+        description = "\n\n".join(
+            part
+            for part in [
+                html_to_text(str(detail.get("PositionDesc") or "")),
+                html_to_text(str(detail.get("PositionRequirements") or "")),
+                html_to_text(str(detail.get("PositionInstructions") or "")),
+                html_to_text(str(detail.get("PositionNotes") or "")),
+            ]
+            if part
+        )
+        if description:
+            candidate["_jd_text"] = description
+
+    selected = list(candidates.values())[:detail_limit]
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=detail_workers
+        ) as executor:
+            list(executor.map(enrich, selected))
+    return list(candidates.values())
+
+
+def hireology_careers_path(source: dict[str, Any]) -> str:
+    configured = str(source.get("careers_path") or "").strip().strip("/")
+    if configured:
+        return configured
+    parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host == "careers.hireology.com":
+        return parsed.path.strip("/").split("/", 1)[0]
+    if host.endswith(".hireology.com"):
+        subdomain = host[: -len(".hireology.com")]
+        if subdomain not in {"api", "app", "careers", "www"}:
+            return subdomain
+    return ""
+
+
+def hireology_widget_url(source: dict[str, Any]) -> str:
+    careers_path = hireology_careers_path(source)
+    if not careers_path:
+        return ""
+    return (
+        "https://careers.hireology.com/"
+        f"{urllib.parse.quote(careers_path)}/widget"
+    )
+
+
+def hireology_location(job: dict[str, Any]) -> str:
+    locations: list[str] = []
+    for item in job.get("locations") or []:
+        if not isinstance(item, dict):
+            continue
+        city = str(item.get("city") or "").strip()
+        state = str(item.get("state") or "").strip()
+        if city and state and not re.search(
+            rf"\b{re.escape(state)}\b",
+            city,
+            flags=re.I,
+        ):
+            value = f"{city}, {state}"
+        else:
+            value = city or state
+        if value and value not in locations:
+            locations.append(value)
+    if bool(job.get("remote")):
+        locations.insert(0, "Remote")
+    return "; ".join(dict.fromkeys(locations))
+
+
+def discover_hireology_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    widget_url = hireology_widget_url(source)
+    if not widget_url:
+        return []
+    timeout = int(source.get("timeout", 20))
+    raw = fetch_url(widget_url, timeout=timeout)
+    match = re.search(
+        r"\bvar\s+startingData\s*=\s*(\{.*?\});\s*</script>",
+        raw,
+        flags=re.I | re.S,
+    )
+    if not match:
+        raise ValueError(
+            f"Hireology startingData was not found for {company}"
+        )
+    starting_data = json.loads(match.group(1))
+    api_url = str(starting_data.get("apiUrl") or "").rstrip("/")
+    token = str(starting_data.get("apiToken") or "")
+    careers_path = str(
+        starting_data.get("careersPath")
+        or hireology_careers_path(source)
+    ).strip("/")
+    if not api_url or not token or not careers_path:
+        raise ValueError(
+            f"Hireology bootstrap data was incomplete for {company}"
+        )
+
+    page_size = min(max(int(source.get("page_size", 500)), 1), 500)
+    max_pages = min(max(int(source.get("max_pages", 10)), 1), 50)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Referer": widget_url,
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    for page in range(1, max_pages + 1):
+        query = urllib.parse.urlencode(
+            {"page": page, "page_size": page_size}
+        )
+        endpoint = (
+            f"{api_url}/public/careers/"
+            f"{urllib.parse.quote(careers_path)}?{query}"
+        )
+        payload = fetch_json_with_headers(
+            endpoint,
+            headers,
+            timeout=timeout,
+        )
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("data"),
+            list,
+        ):
+            raise ValueError(
+                f"Hireology returned an unexpected jobs payload for {company}"
+            )
+        rows = payload["data"]
+        for job in rows:
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("id") or "").strip()
+            role = html_to_text(str(job.get("name") or "")).strip()
+            if not job_id or not role:
+                continue
+            url = normalize_job_url(
+                str(job.get("career_site_url") or "")
+                or (
+                    "https://careers.hireology.com/"
+                    f"{urllib.parse.quote(careers_path)}/"
+                    f"{urllib.parse.quote(job_id)}/description"
+                )
+            )
+            posted_at = normalize_datetime(job.get("created_at"))
+            candidates[job_id] = {
+                "company": company,
+                "role": role,
+                "url": url,
+                "platform": "hireology",
+                "location": hireology_location(job),
+                "external_job_id": job_id,
+                "posted_at": posted_at,
+                "updated_at": normalize_datetime(job.get("updated_at")),
+                "source": source.get("url", widget_url),
+                "source_query": "all_open_postings",
+                "freshness_source": (
+                    "hireology_created_at" if posted_at else "first_seen"
+                ),
+                "notes": (
+                    "Hireology official public careers API; the listing "
+                    "payload includes the complete job description."
+                ),
+                "_jd_text": html_to_text(
+                    str(job.get("job_description") or "")
+                ),
+            }
+        total = int(payload.get("count") or len(candidates))
+        if not rows or page * page_size >= total:
+            break
+    return list(candidates.values())
+
+
+def discover_applicantstack_jobs(
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    timeout = int(source.get("timeout", 20))
+    raw = fetch_url(source_url, timeout=timeout)
+    candidates: dict[str, dict[str, Any]] = {}
+    for href, job_token, label in re.findall(
+        (
+            r'href=["\']([^"\']*/x/detail/'
+            r'([^"\'/?#]+)[^"\']*)["\'][^>]*>(.*?)</a>'
+        ),
+        raw,
+        flags=re.I | re.S,
+    ):
+        url = normalize_job_url(
+            urllib.parse.urljoin(source_url, html.unescape(href))
+        )
+        role = html_to_text(label).strip() or infer_role_from_url(url)
+        candidates[job_token] = {
+            "company": company,
+            "role": role,
+            "url": url,
+            "platform": "applicantstack",
+            "location": str(source.get("default_location") or ""),
+            "external_job_id": job_token,
+            "posted_at": "",
+            "updated_at": "",
+            "source": source_url,
+            "source_query": "all_open_postings",
+            "freshness_source": "first_seen",
+            "notes": (
+                "ApplicantStack official server-rendered job board; "
+                "detail pages supply JobPosting JSON-LD."
+            ),
+            "_jd_text": "",
+        }
+
+    detail_limit = max(
+        0,
+        min(len(candidates), int(source.get("max_detail_pages", 100))),
+    )
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            detail_raw = fetch_url(candidate["url"], timeout=timeout)
+        except Exception:  # noqa: BLE001
+            return
+        parsed = parse_json_ld_jobs(
+            detail_raw,
+            candidate["url"],
+            fallback_company=company,
+        )
+        if parsed:
+            detail = parsed[0]
+            candidate["role"] = str(
+                detail.get("role") or candidate["role"]
+            ).strip()
+            candidate["location"] = str(
+                source.get("location_override")
+                or detail.get("location")
+                or candidate["location"]
+            ).strip()
+            candidate["external_job_id"] = str(
+                detail.get("external_job_id")
+                or candidate["external_job_id"]
+            ).strip()
+            candidate["job_number"] = str(
+                detail.get("job_number") or ""
+            ).strip()
+            candidate["posted_at"] = str(
+                detail.get("posted_at") or ""
+            ).strip()
+            candidate["_jd_text"] = str(
+                detail.get("_jd_text") or ""
+            ).strip()
+        else:
+            title = extract_html_title(
+                detail_raw,
+                company,
+                candidate["url"],
+            )
+            if title:
+                candidate["role"] = title
+            candidate["location"] = str(
+                source.get("location_override")
+                or extract_location(detail_raw)
+                or candidate["location"]
+            ).strip()
+            candidate["_jd_text"] = html_to_text(detail_raw)
+        if candidate.get("posted_at"):
+            candidate["freshness_source"] = (
+                "applicantstack_json_ld_date_posted"
+            )
+
+    selected = list(candidates.values())[:detail_limit]
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=detail_workers
+        ) as executor:
+            list(executor.map(enrich, selected))
+    return list(candidates.values())
+
+
+def discover_cyber_recruiter_jobs(
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    company = str(source.get("company") or "Unknown Company")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    timeout = int(source.get("timeout", 20))
+    max_list_pages = max(1, int(source.get("max_list_pages", 50)))
+    queue = [source_url]
+    visited: set[str] = set()
+    candidates: dict[str, dict[str, Any]] = {}
+
+    while queue and len(visited) < max_list_pages:
+        page_url = queue.pop(0)
+        if page_url in visited:
+            continue
+        visited.add(page_url)
+        raw = fetch_url(page_url, timeout=timeout)
+
+        for href in re.findall(
+            r'href=["\']([^"\']*type=DRAWSINGLEGROUPLIST2?[^"\']*)["\']',
+            raw,
+            flags=re.I,
+        ):
+            next_url = normalize_job_url(
+                urllib.parse.urljoin(
+                    page_url,
+                    html.unescape(href).replace("&amp;", "&"),
+                )
+            )
+            if (
+                next_url
+                and urllib.parse.urlparse(next_url).netloc
+                == urllib.parse.urlparse(source_url).netloc
+                and next_url not in visited
+                and next_url not in queue
+            ):
+                queue.append(next_url)
+
+        for row_match in re.finditer(
+            r"<tr\b[^>]*>(.*?)</tr>",
+            raw,
+            flags=re.I | re.S,
+        ):
+            row = row_match.group(1)
+            job_match = re.search(
+                (
+                    r'<a\b[^>]*href=["\']([^"\']*'
+                    r'type=JOBDESCR[^"\']*)["\'][^>]*>(.*?)</a>'
+                ),
+                row,
+                flags=re.I | re.S,
+            )
+            if not job_match:
+                continue
+            url = normalize_job_url(
+                urllib.parse.urljoin(
+                    page_url,
+                    html.unescape(job_match.group(1)).replace("&amp;", "&"),
+                )
+            )
+            if not url:
+                continue
+            role = html_to_text(job_match.group(2)).strip()
+            cells = re.findall(
+                r"<td\b[^>]*>(.*?)</td>",
+                row,
+                flags=re.I | re.S,
+            )
+            location = html_to_text(cells[-1]).strip() if cells else ""
+            if not source_location_allowed(source, location):
+                continue
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(url).query
+            )
+            job_id = str((query.get("req") or [""])[0]).strip()
+            key = job_id or url
+            candidates[key] = {
+                "company": company,
+                "role": role or infer_role_from_url(url),
+                "url": url,
+                "platform": "cyber_recruiter",
+                "location": location,
+                "external_job_id": job_id,
+                "job_number": job_id,
+                "posted_at": "",
+                "updated_at": "",
+                "source": source_url,
+                "source_query": "all_open_postings",
+                "freshness_source": "first_seen",
+                "notes": (
+                    "Cyber Recruiter official server-rendered job board; "
+                    "the site does not expose an authoritative posting date."
+                ),
+                "_jd_text": "",
+            }
+
+    detail_limit = max(
+        0,
+        min(len(candidates), int(source.get("max_detail_pages", 100))),
+    )
+    detail_workers = min(max(int(source.get("detail_workers", 8)), 1), 16)
+
+    def enrich(candidate: dict[str, Any]) -> None:
+        try:
+            raw = fetch_url(candidate["url"], timeout=timeout)
+        except Exception:  # noqa: BLE001
+            return
+        title_match = re.search(
+            (
+                r'<td\b[^>]*class=["\'][^"\']*HeaderStyle[^"\']*["\']'
+                r'[^>]*>(.*?)(?:<br\b[^>]*>|</td>)'
+            ),
+            raw,
+            flags=re.I | re.S,
+        )
+        if title_match:
+            candidate["role"] = (
+                html_to_text(title_match.group(1)).strip()
+                or candidate["role"]
+            )
+        location_match = re.search(
+            (
+                r'<td\b[^>]*class=["\'][^"\']*CaptionStyle[^"\']*["\']'
+                r'[^>]*>\s*Location:\s*</td>\s*'
+                r'<td\b[^>]*>(.*?)</td>'
+            ),
+            raw,
+            flags=re.I | re.S,
+        )
+        if location_match:
+            candidate["location"] = (
+                html_to_text(location_match.group(1)).strip()
+                or candidate["location"]
+            )
+        candidate["_jd_text"] = html_to_text(raw)
+
+    selected = list(candidates.values())[:detail_limit]
+    if selected:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=detail_workers
+        ) as executor:
+            list(executor.map(enrich, selected))
+    return list(candidates.values())
+
+
 def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     platform = source_platform(source)
     if platform == "greenhouse":
@@ -5016,6 +11757,8 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_hirebridge_jobs(source)
     if platform == "successfactors":
         return discover_successfactors_jobs(source)
+    if platform == "isg_poweredby":
+        return discover_isg_poweredby_jobs(source)
     if platform == "microsoft_jobs":
         return discover_microsoft_jobs(source)
     if platform == "amazon_jobs":
@@ -5036,14 +11779,74 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_salesforce_jobs(source)
     if platform == "smartrecruiters":
         return discover_smartrecruiters_jobs(source)
+    if platform == "topechelon":
+        return discover_topechelon_jobs(source)
     if platform == "icims":
         return discover_icims_jobs(source)
     if platform == "oracle_cx":
         return discover_oracle_cx_jobs(source)
+    if platform == "workgr8":
+        return discover_workgr8_jobs(source)
+    if platform == "talentreef":
+        return discover_talentreef_jobs(source)
+    if platform == "clearcompany":
+        return discover_clearcompany_jobs(source)
+    if platform == "paylocity":
+        return discover_paylocity_jobs(source)
+    if platform == "dynamicsats":
+        return discover_dynamicsats_jobs(source)
+    if platform == "hanford_bms":
+        return discover_hanford_bms_jobs(source)
+    if platform == "applicantpro":
+        return discover_applicantpro_jobs(source)
+    if platform == "dayforce":
+        return discover_dayforce_jobs(source)
+    if platform == "kronos_careers":
+        return discover_kronos_careers_jobs(source)
+    if platform == "healthcaresource":
+        return discover_healthcaresource_jobs(source)
+    if platform == "paradox":
+        return discover_paradox_jobs(source)
+    if platform == "infor_cloudsuite":
+        return discover_infor_cloudsuite_jobs(source)
+    if platform == "viewpoint_for_cloud":
+        return discover_viewpoint_for_cloud_jobs(source)
+    if platform == "hireology":
+        return discover_hireology_jobs(source)
+    if platform == "applicantstack":
+        return discover_applicantstack_jobs(source)
+    if platform == "cyber_recruiter":
+        return discover_cyber_recruiter_jobs(source)
+    if platform == "adp_myjobs":
+        return discover_adp_myjobs_jobs(source)
+    if platform == "adp_workforce_now":
+        return discover_adp_workforce_now_jobs(source)
+    if platform == "appone":
+        return discover_appone_jobs(source)
+    if platform == "avature":
+        return discover_avature_jobs(source)
+    if platform == "jubilant_careers":
+        return discover_jubilant_careers_jobs(source)
     if platform == "boa_careers":
         return discover_boa_careers_jobs(source)
     if platform == "jobvite":
         return discover_jobvite_jobs(source)
+    if platform == "cadient":
+        return discover_cadient_jobs(source)
+    if platform == "breezy":
+        return discover_breezy_jobs(source)
+    if platform == "taleo":
+        return discover_taleo_jobs(source)
+    if platform == "pageup":
+        return discover_pageup_jobs(source)
+    if platform == "peopleadmin":
+        return discover_peopleadmin_jobs(source)
+    if platform == "paycom":
+        return discover_paycom_jobs(source)
+    if platform == "ultipro":
+        return discover_ultipro_jobs(source)
+    if platform == "zoho_recruit":
+        return discover_zoho_recruit_jobs(source)
     if platform == "workable":
         return discover_workable_jobs(source)
     if platform == "bamboohr":
@@ -5066,12 +11869,18 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_sitemap_jobs(source)
     if platform == "governmentjobs":
         return discover_governmentjobs_jobs(source)
+    if platform == "governmentjobs_global":
+        return discover_governmentjobs_global_jobs(source)
     if platform == "rss":
         return discover_rss_jobs(source)
     if platform == "jibe":
         return discover_jibe_jobs(source)
     if platform == "talentbrew":
         return discover_talentbrew_jobs(source)
+    if platform == "ttcportals":
+        return discover_ttcportals_jobs(source)
+    if platform == "browser_static":
+        return discover_browser_static_jobs(source)
     if platform == "careerpuck":
         return discover_careerpuck_jobs(source)
     if platform == "pinpoint":
@@ -5080,6 +11889,32 @@ def discover_source_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         return discover_brassring_jobs(source)
     if platform == "kula":
         return discover_kula_jobs(source)
+    if platform == "jazzhr":
+        return discover_jazzhr_jobs(source)
+    if platform == "hiringthing":
+        return discover_hiringthing_jobs(source)
+    if platform == "paycor":
+        return discover_paycor_jobs(source)
+    if platform == "prismhr":
+        return discover_prismhr_jobs(source)
+    if platform == "wp_search_index":
+        return discover_wp_search_index_jobs(source)
+    if platform == "joveo":
+        return discover_joveo_jobs(source)
+    if platform == "clinch":
+        return discover_clinch_jobs(source)
+    if platform == "atkins_jobs":
+        return discover_atkins_jobs(source)
+    if platform == "embedded_jobs":
+        return discover_embedded_jobs(source)
+    if platform == "wordpress_taleo":
+        return discover_wordpress_taleo_jobs(source)
+    if platform == "static_html":
+        return discover_static_job_board_jobs(
+            source,
+            "static_html",
+            "Official server-rendered job board adapter.",
+        )
     return find_links_for_source(source)
 
 
@@ -5307,6 +12142,8 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\b(?:qa|quality assurance) analyst\b",
         r"\b(?:technology|it|ai transformation|ai operations|ai enablement) coordinator\b",
         r"\b(?:implementation|integration|integrations|technical support|customer support) specialist\b",
+        r"\bit (?:application development|business analysis|customer support|data management|network and "
+        r"telecommunications|project management|security|system administration)(?:\s*[-–]\s*(?:entry|journey|expert))?\b",
         r"\bforms? (?:and|&) records? analyst\b",
     ),
     "data_center_infra": (
@@ -6753,9 +13590,25 @@ def fetch_ripplehire_job_text(url: str) -> str | None:
     return ripplehire_job_text(job or {}) if job else None
 
 
+def fetch_jubilant_careers_job_text(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc.lower() != "jubilantcareer.jubl.com":
+        return None
+    match = re.search(r"/jobprofile/([^/?#]+)", parsed.path, flags=re.I)
+    if not match:
+        return None
+    detail = fetch_json(
+        "https://jubilantcareer.jubl.com/JubilantCareersPortal/rest/Portal/"
+        f"getJobDetails/{urllib.parse.quote(match.group(1))}"
+    )
+    if not isinstance(detail, dict):
+        return None
+    return html_to_text(str(detail.get("jobdescr") or "")) or None
+
+
 def fetch_direct_platform_job_text(url: str) -> str | None:
     platform = detect_platform(url)
-    if platform not in {"smartrecruiters", "icims", "oracle_cx", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe", "talentbrew", "careerpuck", "pinpoint", "brassring"}:
+    if platform not in {"smartrecruiters", "icims", "oracle_cx", "clearcompany", "paycor", "paylocity", "jobvite", "workable", "bamboohr", "yc_jobs", "yc_job_board", "jibe", "talentbrew", "careerpuck", "pinpoint", "brassring"}:
         return None
     return html_to_text(fetch_url(url))
 
@@ -6782,15 +13635,25 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
         raw = fetch_url(base_url)
     except (urllib.error.URLError, TimeoutError) as error:
         print(f"Could not fetch {company} source {base_url}: {error}", file=sys.stderr)
+        if truthy_source_flag(
+            source.get("fail_on_fetch_error"),
+            default=False,
+        ):
+            raise RuntimeError(
+                f"Could not fetch {company} source {base_url}: {error}"
+            ) from error
         return []
 
     links: list[dict[str, str]] = []
+    custom_job_link_regex = str(source.get("job_link_regex") or "").strip()
     if platform == "greenhouse":
         pattern = r'href=["\']([^"\']*(?:boards\.greenhouse\.io|/jobs/)[^"\']+)["\'][^>]*>(.*?)</a>'
     elif platform == "lever":
         pattern = r'href=["\']([^"\']*(?:jobs\.lever\.co|/[^"\']+/[^"\']+)[^"\']*)["\'][^>]*>(.*?)</a>'
     elif platform == "ashby":
         pattern = r'href=["\']([^"\']*(?:jobs\.ashbyhq\.com|/[^"\']+/[^"\']+)[^"\']*)["\'][^>]*>(.*?)</a>'
+    elif platform == "custom" and custom_job_link_regex:
+        pattern = r'href=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
     else:
         pattern = r'href=["\']([^"\']*(?:job|position|opening|requisition|posting)[^"\']*)["\'][^>]*>(.*?)</a>'
 
@@ -6810,7 +13673,8 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
             ):
                 continue
             detail_hint = re.search(
-                r"(?:/job/|/jobs/|/position/|/positions/|/opening/|/openings/|requisition|posting)",
+                custom_job_link_regex
+                or r"(?:/job/|/jobs/|/position/|/positions/|/opening/|/openings/|requisition|posting)",
                 parsed_link.path,
                 flags=re.I,
             )
@@ -6822,8 +13686,35 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
             if not detail_hint and not external_board:
                 continue
         text = html_to_text(label)
-        role = text if 4 <= len(text) <= 120 else infer_role_from_url(url)
-        if not role or role.lower() in {"apply", "learn more", "view job", "view details", "applicant portal"}:
+        configured_link_role_pattern = str(
+            source.get("link_role_regex") or ""
+        ).strip()
+        configured_link_role_match = (
+            re.search(
+                configured_link_role_pattern,
+                label,
+                flags=re.I | re.S,
+            )
+            if configured_link_role_pattern
+            else None
+        )
+        configured_link_role = (
+            html_to_text(configured_link_role_match.group(1))
+            if configured_link_role_match
+            else ""
+        )
+        role = (
+            configured_link_role
+            or (text if 4 <= len(text) <= 120 else infer_role_from_url(url))
+        )
+        if not role or role.lower() in {
+            "apply",
+            "learn more",
+            "read more",
+            "view job",
+            "view details",
+            "applicant portal",
+        }:
             role = infer_role_from_url(url)
         links.append(
             {
@@ -6839,7 +13730,7 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
     for link in links:
         existing = unique.get(link["url"])
-        generic_roles = {"apply", "learn more", "view job", "view details", "applicant portal"}
+        generic_roles = {"apply", "learn more", "read more", "view job", "view details", "applicant portal"}
         existing_role = str((existing or {}).get("role") or "").strip().lower()
         new_role = str(link.get("role") or "").strip().lower()
         if existing and existing_role not in generic_roles and new_role in generic_roles:
@@ -6849,6 +13740,14 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
         ):
             continue
         unique[link["url"]] = link
+    if (
+        platform == "custom"
+        and truthy_source_flag(source.get("empty_is_failure"), default=False)
+        and not unique
+    ):
+        raise RuntimeError(
+            f"No configured job links were found for {company} at {base_url}."
+        )
     if platform != "custom" or source.get("parse_job_details", True) is False:
         return list(unique.values())
 
@@ -6869,17 +13768,32 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
         except Exception:  # noqa: BLE001
             enriched.append(link)
             continue
-        posted_at = extract_first_datetime(
-            detail_raw,
-            [
+        posted_patterns = [
                 r'"datePosted"\s*:\s*"([^"]+)"',
                 r'"datePublished"\s*:\s*"([^"]+)"',
                 r'"postedDate"\s*:\s*"([^"]+)"',
                 r'"published_at"\s*:\s*"([^"]+)"',
                 r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
                 r'<meta[^>]+name=["\']date["\'][^>]+content=["\']([^"\']+)["\']',
-            ],
-        )
+                r'Date\s*Posted\s*</[^>]+>\s*<[^>]+>\s*([^<]+)',
+        ]
+        configured_posted_pattern = str(
+            source.get("posted_at_regex") or ""
+        ).strip()
+        if configured_posted_pattern:
+            posted_patterns.insert(0, configured_posted_pattern)
+        posted_at = extract_first_datetime(detail_raw, posted_patterns)
+        posted_text_pattern = str(
+            source.get("posted_at_text_regex") or ""
+        ).strip()
+        if not posted_at and posted_text_pattern:
+            posted_match = re.search(
+                posted_text_pattern,
+                html_to_text(detail_raw),
+                flags=re.I,
+            )
+            if posted_match:
+                posted_at = normalize_datetime(posted_match.group(1))
         updated_at = extract_first_datetime(
             detail_raw,
             [
@@ -6889,16 +13803,46 @@ def find_links_for_source(source: dict[str, Any]) -> list[dict[str, Any]]:
             ],
         )
         title = extract_html_title(detail_raw, company, link["url"])
+        configured_role_pattern = str(
+            source.get("detail_role_regex") or ""
+        ).strip()
+        if configured_role_pattern:
+            configured_role_match = re.search(
+                configured_role_pattern,
+                detail_raw,
+                flags=re.I | re.S,
+            )
+            if configured_role_match:
+                title = html_to_text(configured_role_match.group(1))
+        if truthy_source_flag(source.get("preserve_link_title"), default=False):
+            title = ""
+        visible_location_match = re.search(
+            r'<(?:th|dt)[^>]*>\s*Location\s*</(?:th|dt)>\s*<[^>]+>\s*(.*?)</(?:td|dd|span|div)>',
+            detail_raw,
+            flags=re.I | re.S,
+        )
+        visible_location = html_to_text(visible_location_match.group(1)) if visible_location_match else ""
+        location_override = str(source.get("location_override") or "").strip()
         link.update(
             {
                 "role": title or link.get("role", ""),
-                "location": extract_location(detail_raw) or link.get("location", ""),
+                "location": (
+                    location_override
+                    or visible_location
+                    or extract_location(detail_raw)
+                    or link.get("location", "")
+                ),
                 "posted_at": posted_at,
                 "updated_at": updated_at,
                 "source": source.get("url", ""),
                 "freshness_source": "official_posted_at" if posted_at else "unknown",
             }
         )
+        if truthy_source_flag(
+            source.get("include_detail_text"),
+            default=False,
+        ):
+            link["_jd_text"] = html_to_text(detail_raw)
         enriched.append(link)
     enriched_urls = {str(link.get("url") or "") for link in enriched}
     return enriched + [link for link in all_links if str(link.get("url") or "") not in enriched_urls]
@@ -6926,13 +13870,39 @@ def discover_static_job_board_jobs(source: dict[str, Any], platform: str, note: 
 
     link_source = dict(source)
     link_source["platform"] = "custom"
-    link_source.setdefault("parse_job_details", True)
+    link_source.setdefault(
+        "parse_job_details",
+        not truthy_source_flag(
+            source.get("prefer_structured_listing"),
+            default=False,
+        ),
+    )
     for candidate in find_links_for_source(link_source):
         detected = detect_platform(candidate.get("url", ""))
         candidate["platform"] = detected if detected != "custom" else platform
         candidate["source"] = source_url
         candidate["source_query"] = str(source.get("source_query") or source.get("role") or "")
         candidate["notes"] = "; ".join(item for item in [candidate.get("notes", ""), note] if item)
+        existing = candidates.get(candidate["url"])
+        if existing:
+            for key in [
+                "location",
+                "posted_at",
+                "updated_at",
+                "job_number",
+                "external_job_id",
+                "_jd_text",
+            ]:
+                if not existing.get(key) and candidate.get(key):
+                    existing[key] = candidate[key]
+            existing["notes"] = "; ".join(
+                dict.fromkeys(
+                    item
+                    for item in [existing.get("notes", ""), candidate.get("notes", "")]
+                    if item
+                )
+            )
+            continue
         candidates[candidate["url"]] = candidate
     return list(candidates.values())
 
@@ -6946,11 +13916,458 @@ def discover_builtin_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def discover_getro_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
-    return discover_static_job_board_jobs(source, "getro_jobs", "Portfolio job board adapter for Getro-style pages.")
+    company = str(source.get("company") or "Portfolio Jobs")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    raw = fetch_url(source_url, timeout=int(source.get("timeout", 25)))
+
+    collection_id = str(source.get("collection_id") or "").strip()
+    if not collection_id:
+        next_data_match = re.search(
+            r'<script\b[^>]*\bid=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+            raw,
+            flags=re.I | re.S,
+        )
+        if next_data_match:
+            try:
+                next_data = json.loads(html.unescape(next_data_match.group(1)))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                next_data = {}
+            collection_id = str(
+                (
+                    next_data.get("props", {})
+                    .get("pageProps", {})
+                    .get("network", {})
+                    .get("id", "")
+                )
+            ).strip()
+
+    api_candidates: dict[str, dict[str, Any]] = {}
+    if collection_id:
+        page_size = 20
+        max_pages = max(1, int(source.get("max_pages", 100)))
+        api_workers = max(1, int(source.get("api_workers", 10)))
+        api_url = (
+            f"https://api.getro.com/api/v2/collections/"
+            f"{urllib.parse.quote(collection_id)}/search/jobs"
+        )
+        parsed_source_url = urllib.parse.urlparse(source_url)
+        source_origin = urllib.parse.urlunparse(
+            (
+                parsed_source_url.scheme or "https",
+                parsed_source_url.netloc,
+                "",
+                "",
+                "",
+                "",
+            )
+        )
+
+        def fetch_page(page_index: int) -> tuple[int, dict[str, Any]]:
+            data = fetch_json_post_with_headers(
+                api_url,
+                {
+                    "hitsPerPage": page_size,
+                    "page": page_index,
+                    "filters": {"page": page_index},
+                    "query": "",
+                },
+                {
+                    "Accept": "application/json",
+                    "Origin": source_origin,
+                    "Referer": source_url,
+                },
+                timeout=int(source.get("api_timeout", 20)),
+            )
+            return page_index, data if isinstance(data, dict) else {}
+
+        try:
+            _, first_page = fetch_page(0)
+        except Exception:
+            first_page = {}
+        first_results = first_page.get("results", {}) if isinstance(first_page, dict) else {}
+        first_jobs = first_results.get("jobs", []) if isinstance(first_results, dict) else []
+        total = int(first_results.get("count") or len(first_jobs)) if isinstance(first_results, dict) else 0
+        page_count = min(max_pages, max(1, math.ceil(total / page_size))) if total else 1
+        pages: dict[int, dict[str, Any]] = {0: first_page} if first_page else {}
+        if page_count > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=api_workers) as executor:
+                future_pages = {
+                    executor.submit(fetch_page, page_index): page_index
+                    for page_index in range(1, page_count)
+                }
+                for future in concurrent.futures.as_completed(future_pages):
+                    try:
+                        page_index, page_data = future.result()
+                    except Exception:
+                        continue
+                    pages[page_index] = page_data
+
+        source_query = str(source.get("source_query") or source.get("role") or "")
+        for page_index in sorted(pages):
+            results = pages[page_index].get("results", {})
+            jobs = results.get("jobs", []) if isinstance(results, dict) else []
+            for job in jobs if isinstance(jobs, list) else []:
+                if not isinstance(job, dict):
+                    continue
+                organization = job.get("organization") or {}
+                if not isinstance(organization, dict):
+                    organization = {}
+                role = str(job.get("title") or "").strip()
+                url = normalize_job_url(str(job.get("url") or "").strip())
+                if not role or not url:
+                    continue
+                locations = job.get("locations") or job.get("searchable_locations") or []
+                if isinstance(locations, str):
+                    locations = [locations]
+                location = "; ".join(
+                    merge_unique([], [str(item).strip() for item in locations if str(item).strip()])
+                )
+                company_slug = str(organization.get("slug") or "").strip()
+                job_slug = str(job.get("slug") or "").strip()
+                getro_detail_url = ""
+                if company_slug and job_slug:
+                    getro_detail_url = normalize_job_url(
+                        urllib.parse.urljoin(
+                            source_url,
+                            f"/companies/{urllib.parse.quote(company_slug)}/jobs/"
+                            f"{urllib.parse.quote(job_slug)}",
+                        )
+                    )
+                posted_at = normalize_datetime(job.get("created_at"))
+                detected_platform = detect_platform(url)
+                api_candidates[url] = {
+                    "company": str(organization.get("name") or company).strip(),
+                    "role": role,
+                    "url": url,
+                    "platform": detected_platform if detected_platform != "custom" else "getro_jobs",
+                    "location": location,
+                    "posted_at": posted_at,
+                    "updated_at": "",
+                    "source": source_url,
+                    "source_query": source_query,
+                    "freshness_source": "getro_created_at" if posted_at else "unknown",
+                    "external_job_id": str(job.get("id") or ""),
+                    "notes": (
+                        f"Getro public portfolio API; collection_id={collection_id}; "
+                        f"source={job.get('source') or 'unknown'}."
+                    ),
+                    "_jd_text": "",
+                    "_getro_detail_url": getro_detail_url,
+                }
+
+        location_pattern = str(source.get("location_include_regex") or "").strip()
+        if location_pattern:
+            try:
+                api_candidates = {
+                    url: candidate
+                    for url, candidate in api_candidates.items()
+                    if re.search(location_pattern, str(candidate.get("location") or ""), flags=re.I)
+                }
+            except re.error:
+                pass
+
+        max_details = max(
+            0,
+            min(len(api_candidates), int(source.get("max_detail_pages", 100))),
+        )
+        detail_workers = max(1, int(source.get("detail_workers", 8)))
+        detail_candidates = sorted(
+            (
+                candidate
+                for candidate in api_candidates.values()
+                if candidate.get("_getro_detail_url")
+                and unclassified_technical_title_relevant(candidate)
+            ),
+            key=lambda candidate: parse_datetime(candidate.get("posted_at"))
+            or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+            reverse=True,
+        )[:max_details]
+
+        def enrich_api_candidate(candidate: dict[str, Any]) -> None:
+            try:
+                detail_raw = fetch_url(
+                    str(candidate["_getro_detail_url"]),
+                    timeout=int(source.get("detail_timeout", 20)),
+                )
+            except Exception:
+                return
+            parsed = parse_json_ld_jobs(
+                detail_raw,
+                str(candidate["_getro_detail_url"]),
+                str(candidate.get("company") or company),
+            )
+            if not parsed:
+                return
+            detail = parsed[0]
+            for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+                if detail.get(key):
+                    candidate[key] = detail[key]
+            if detail.get("posted_at"):
+                candidate["freshness_source"] = "official_posted_at"
+            candidate["notes"] = "; ".join(
+                item
+                for item in [
+                    candidate.get("notes", ""),
+                    "Enriched from Getro detail-page JobPosting JSON-LD.",
+                ]
+                if item
+            )
+
+        if detail_candidates:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=detail_workers
+            ) as executor:
+                list(executor.map(enrich_api_candidate, detail_candidates))
+        for candidate in api_candidates.values():
+            candidate.pop("_getro_detail_url", None)
+        if api_candidates:
+            return list(api_candidates.values())
+
+    detail_urls: list[str] = []
+    for href in re.findall(
+        r'href=["\']([^"\']*/companies/[^"\']+/jobs/[^"\']+)["\']',
+        raw,
+        flags=re.I,
+    ):
+        url = normalize_job_url(
+            urllib.parse.urljoin(source_url, html.unescape(href))
+        )
+        if url not in detail_urls:
+            detail_urls.append(url)
+    max_details = max(
+        0,
+        min(len(detail_urls), int(source.get("max_detail_pages", len(detail_urls)))),
+    )
+    detail_urls = detail_urls[:max_details]
+    detail_workers = max(1, int(source.get("detail_workers", 8)))
+    source_query = str(source.get("source_query") or source.get("role") or "")
+
+    def fetch_candidate(url: str) -> dict[str, Any]:
+        try:
+            detail_raw = fetch_url(
+                url,
+                timeout=int(source.get("detail_timeout", 20)),
+            )
+        except Exception:
+            detail_raw = ""
+        parsed = parse_json_ld_jobs(detail_raw, url, company) if detail_raw else []
+        if parsed:
+            candidate = parsed[0]
+            candidate["platform"] = "getro_jobs"
+            candidate["source"] = source_url
+            candidate["source_query"] = source_query
+            candidate["freshness_source"] = (
+                "official_posted_at" if candidate.get("posted_at") else "unknown"
+            )
+            candidate["notes"] = "; ".join(
+                item
+                for item in [
+                    candidate.get("notes", ""),
+                    "Getro portfolio job adapter enriched from detail-page JobPosting JSON-LD.",
+                ]
+                if item
+            )
+            return candidate
+
+        parsed_url = urllib.parse.urlparse(url)
+        path_parts = [part for part in parsed_url.path.split("/") if part]
+        company_slug = ""
+        role = infer_role_from_url(url)
+        if "companies" in path_parts:
+            company_index = path_parts.index("companies")
+            if company_index + 1 < len(path_parts):
+                company_slug = path_parts[company_index + 1]
+        if path_parts:
+            role_slug = re.sub(r"^\d+-", "", path_parts[-1])
+            role = re.sub(r"[-_]+", " ", role_slug).title() or role
+        return {
+            "company": re.sub(r"[-_]+", " ", company_slug).title() or company,
+            "role": role,
+            "url": url,
+            "platform": "getro_jobs",
+            "location": "",
+            "posted_at": "",
+            "updated_at": "",
+            "source": source_url,
+            "source_query": source_query,
+            "freshness_source": "unknown",
+            "notes": "Getro portfolio job adapter; detail metadata unavailable.",
+            "_jd_text": "",
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=detail_workers
+    ) as executor:
+        return list(executor.map(fetch_candidate, detail_urls))
 
 
 def discover_consider_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
-    return discover_static_job_board_jobs(source, "consider_jobs", "Portfolio job board adapter for Consider-style pages.")
+    company = str(source.get("company") or "Portfolio Jobs")
+    source_url = str(source.get("url") or "").strip()
+    if not source_url:
+        return []
+    raw = fetch_url(source_url, timeout=int(source.get("timeout", 25)))
+    board_id = str(source.get("board_id") or "").strip()
+    if not board_id:
+        board_match = re.search(
+            r'"clientConfig"\s*:\s*\{.*?"id"\s*:\s*"([^"]+)"',
+            raw,
+            flags=re.I | re.S,
+        )
+        if board_match:
+            board_id = html.unescape(board_match.group(1)).strip()
+
+    if board_id:
+        parsed_source = urllib.parse.urlparse(source_url)
+        origin = urllib.parse.urlunparse(
+            (parsed_source.scheme or "https", parsed_source.netloc, "", "", "", "")
+        )
+        api_url = urllib.parse.urljoin(origin, "/api-boards/search-jobs")
+        try:
+            data = fetch_json_post_with_headers(
+                api_url,
+                {
+                    "meta": {"size": max(15, int(source.get("max_results", 250)))},
+                    "board": {"id": board_id, "isParent": True},
+                    "query": {"promoteFeatured": True},
+                },
+                {
+                    "Accept": "application/json",
+                    "Referer": urllib.parse.urljoin(origin, "/jobs"),
+                },
+                timeout=int(source.get("api_timeout", 25)),
+            )
+        except Exception:
+            data = {}
+        jobs = data.get("jobs", []) if isinstance(data, dict) else []
+        candidates: dict[str, dict[str, Any]] = {}
+        for job in jobs if isinstance(jobs, list) else []:
+            if not isinstance(job, dict):
+                continue
+            role = str(job.get("title") or "").strip()
+            url = normalize_job_url(
+                str(job.get("url") or job.get("applyUrl") or "").strip()
+            )
+            if not role or not url:
+                continue
+            locations = job.get("locations") or []
+            if isinstance(locations, str):
+                locations = [locations]
+            location = "; ".join(
+                merge_unique([], [str(item).strip() for item in locations if str(item).strip()])
+            )
+            if truthy_source_flag(job.get("remote"), default=False) and "remote" not in location.lower():
+                location = "; ".join(item for item in [location, "Remote"] if item)
+            skills = []
+            for skill in job.get("skills") or []:
+                if isinstance(skill, dict):
+                    label = str(skill.get("label") or skill.get("value") or "").strip()
+                else:
+                    label = str(skill).strip()
+                if label:
+                    skills.append(label)
+            min_years = job.get("minYearsExp")
+            metadata_text = " ".join(
+                item
+                for item in [
+                    f"Minimum experience: {min_years} years." if min_years not in (None, "") else "",
+                    f"Skills: {', '.join(merge_unique([], skills))}." if skills else "",
+                ]
+                if item
+            )
+            posted_at = normalize_datetime(job.get("timeStamp"))
+            detected_platform = detect_platform(url)
+            candidates[url] = {
+                "company": str(job.get("companyName") or company).strip(),
+                "role": role,
+                "url": url,
+                "platform": detected_platform if detected_platform != "custom" else "consider_jobs",
+                "location": location,
+                "posted_at": posted_at,
+                "updated_at": "",
+                "source": source_url,
+                "source_query": str(source.get("source_query") or ""),
+                "freshness_source": "consider_timestamp" if posted_at else "unknown",
+                "external_job_id": str(job.get("jobId") or ""),
+                "notes": (
+                    f"Consider public portfolio API; board_id={board_id}; "
+                    f"min_years={min_years if min_years not in (None, '') else 'unknown'}."
+                ),
+                "_jd_text": metadata_text,
+            }
+
+        location_pattern = str(source.get("location_include_regex") or "").strip()
+        if location_pattern:
+            try:
+                candidates = {
+                    url: candidate
+                    for url, candidate in candidates.items()
+                    if re.search(location_pattern, str(candidate.get("location") or ""), flags=re.I)
+                }
+            except re.error:
+                pass
+
+        detail_limit = max(
+            0,
+            min(len(candidates), int(source.get("max_detail_pages", 40))),
+        )
+        detail_workers = max(1, int(source.get("detail_workers", 8)))
+        detail_candidates = sorted(
+            (
+                candidate
+                for candidate in candidates.values()
+                if unclassified_technical_title_relevant(candidate)
+            ),
+            key=lambda candidate: parse_datetime(candidate.get("posted_at"))
+            or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+            reverse=True,
+        )[:detail_limit]
+
+        def enrich(candidate: dict[str, Any]) -> None:
+            try:
+                detail_raw = fetch_url(
+                    str(candidate["url"]),
+                    timeout=int(source.get("detail_timeout", 20)),
+                )
+            except Exception:
+                return
+            parsed = parse_json_ld_jobs(
+                detail_raw,
+                str(candidate["url"]),
+                str(candidate.get("company") or company),
+            )
+            if not parsed:
+                return
+            detail = parsed[0]
+            for key in ["role", "location", "posted_at", "updated_at", "_jd_text"]:
+                if detail.get(key):
+                    candidate[key] = detail[key]
+            if detail.get("posted_at"):
+                candidate["freshness_source"] = "official_posted_at"
+            candidate["notes"] = "; ".join(
+                item
+                for item in [
+                    candidate.get("notes", ""),
+                    "Enriched from the destination ATS JobPosting JSON-LD.",
+                ]
+                if item
+            )
+
+        if detail_candidates:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=detail_workers
+            ) as executor:
+                list(executor.map(enrich, detail_candidates))
+        if candidates:
+            return list(candidates.values())
+
+    return discover_static_job_board_jobs(
+        source,
+        "consider_jobs",
+        "Portfolio job board adapter for Consider-style pages.",
+    )
 
 
 def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -7496,6 +14913,7 @@ def read_job_text(app: dict[str, Any], jd_file: str | None = None) -> str:
         fetch_apple_job_text,
         fetch_providence_job_text,
         fetch_ripplehire_job_text,
+        fetch_jubilant_careers_job_text,
         fetch_direct_platform_job_text,
         fetch_workday_job_text,
     ]:
@@ -8012,10 +15430,33 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "apple_jobs",
         "providence_jobs",
         "jobsyn",
+        "breezy",
         "smartrecruiters",
+        "topechelon",
         "icims",
         "oracle_cx",
+        "clearcompany",
+        "paylocity",
+        "dynamicsats",
+        "hanford_bms",
+        "applicantpro",
+        "dayforce",
+        "kronos_careers",
+        "healthcaresource",
+        "paradox",
+        "adp_myjobs",
+        "adp_workforce_now",
+        "appone",
+        "avature",
+        "jubilant_careers",
         "jobvite",
+        "taleo",
+        "pageup",
+        "talentreef",
+        "peopleadmin",
+        "paycom",
+        "ultipro",
+        "zoho_recruit",
         "workable",
         "bamboohr",
         "yc_jobs",
@@ -8024,9 +15465,27 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         "rss",
         "jibe",
         "talentbrew",
+        "ttcportals",
+        "workgr8",
+        "infor_cloudsuite",
+        "viewpoint_for_cloud",
+        "hireology",
+        "prismhr",
+        "applicantstack",
+        "cyber_recruiter",
         "careerpuck",
         "pinpoint",
         "brassring",
+        "jazzhr",
+        "hiringthing",
+        "paycor",
+        "wp_search_index",
+        "joveo",
+        "clinch",
+        "atkins_jobs",
+        "isg_poweredby",
+        "embedded_jobs",
+        "wordpress_taleo",
     }
     if direct_platform in directly_classifiable:
         result["detected_platform"] = direct_platform
@@ -8060,10 +15519,38 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
             result["detected_platform"] = "jibe"
             result["detected_url"] = url
             result["notes"] = "Jibe careers site detected from page assets/API references."
+        if not result["detected_platform"] and re.search(
+            r'avature\.portal\.id|<list\b[^>]*\blistType[^>]*JobList',
+            raw,
+            flags=re.I,
+        ):
+            result["detected_platform"] = "avature"
+            result["detected_url"] = url
+            result["notes"] = "Avature public job list detected."
+        if not result["detected_platform"] and re.search(
+            r'HiringThing\.Components\.|assets\.applicant-tracking\.com',
+            raw,
+            flags=re.I,
+        ):
+            result["detected_platform"] = "hiringthing"
+            result["detected_url"] = url
+            result["notes"] = "HiringThing public job board detected."
+        if not result["detected_platform"] and re.search(r"\.joveo\.site/jobs-api/", raw, flags=re.I):
+            result["detected_platform"] = "joveo"
+            result["detected_url"] = url
+            result["notes"] = "Joveo public careers API detected; endpoint configuration is required."
         if not result["detected_platform"] and re.search(r"phenom|phenompeople|phenom-people", raw, flags=re.I):
             result["detected_platform"] = "phenom"
             result["detected_url"] = url
             result["notes"] = "Phenom detected."
+        if not result["detected_platform"] and re.search(
+            r"window\.__PRELOAD_STATE__|cdn\.sites\.paradox\.ai",
+            raw,
+            flags=re.I,
+        ):
+            result["detected_platform"] = "paradox"
+            result["detected_url"] = url
+            result["notes"] = "Paradox career site detected from preload data or page assets."
         if not result["detected_platform"] and re.search(r"jobsapi-[a-z-]*\.m-cloud\.io/api", raw, flags=re.I):
             result["detected_platform"] = "m_cloud"
             result["detected_url"] = url
@@ -8082,6 +15569,53 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
             result["detected_platform"] = "careerpuck"
             result["detected_url"] = url
             result["notes"] = "CareerPuck detected."
+        if not result["detected_platform"]:
+            top_echelon_tag = re.search(
+                r"<job-board\b[^>]*\bapi-key=[\"']([^\"']+)",
+                raw,
+                flags=re.I,
+            )
+            if top_echelon_tag:
+                result["detected_platform"] = "topechelon"
+                result["detected_url"] = url
+                result["source"] = {
+                    "company": company,
+                    "platform": "topechelon",
+                    "url": url,
+                    "api_key": html.unescape(top_echelon_tag.group(1)),
+                    "max_pages": 25,
+                }
+                result["notes"] = "Top Echelon public job board detected."
+        if not result["detected_platform"] and re.search(
+            r"CRCareersPage\.css|CRCareers1_|type=DRAWSINGLEGROUPLIST",
+            raw,
+            flags=re.I,
+        ):
+            result["detected_platform"] = "cyber_recruiter"
+            result["detected_url"] = url
+            result["source"] = {
+                "company": company,
+                "platform": "cyber_recruiter",
+                "url": url,
+                "max_list_pages": 50,
+                "max_detail_pages": 100,
+                "detail_workers": 8,
+            }
+            result["notes"] = "Cyber Recruiter server-rendered job board detected."
+        if not result["detected_platform"] and re.search(
+            r"talentReef|marketing-assets\.jobappnetwork\.com|"
+            r"prod-kong\.internal\.talentreef\.com",
+            raw,
+            flags=re.I,
+        ):
+            result["detected_platform"] = "talentreef"
+            result["detected_url"] = url
+            result["source"] = source_from_talentreef_page(company, url, raw)
+            result["notes"] = (
+                "TalentReef detected."
+                if result["source"]
+                else "TalentReef detected but client id could not be parsed."
+            )
         if not result["detected_platform"] and "governmentjobs.com" in urllib.parse.urlparse(url).netloc.lower():
             result["detected_platform"] = "governmentjobs"
             result["detected_url"] = url
@@ -8128,17 +15662,160 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
             "url": detected_url,
             "origin": origin,
         }
+    elif platform == "breezy":
+        parsed = urllib.parse.urlparse(detected_url)
+        board_url = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+        result["source"] = {
+            "company": company or parsed.netloc.removesuffix(".breezy.hr"),
+            "platform": "breezy",
+            "url": board_url,
+            "feed_url": f"{board_url}/json",
+        }
+    elif platform == "hiringthing":
+        result["source"] = {
+            "company": company,
+            "platform": "hiringthing",
+            "url": detected_url,
+            "max_detail_pages": 100,
+            "detail_workers": 8,
+        }
+    elif platform == "paycor":
+        result["source"] = {
+            "company": company,
+            "platform": "paycor",
+            "url": detected_url,
+            "max_detail_pages": 40,
+            "detail_workers": 8,
+        }
+    elif platform == "joveo":
+        result["notes"] = result.get("notes") or "Joveo detected; add api_url and optional geographic filters."
     elif platform == "salesforce_jobs":
         result["source"] = {"company": company or "Salesforce", "platform": "salesforce_jobs", "url": "https://careers.salesforce.com/en/jobs/"}
     elif platform == "smartrecruiters":
         identifier = smartrecruiters_identifier({"company": company, "url": detected_url})
         result["source"] = {"company": company or identifier, "platform": "smartrecruiters", "company_identifier": identifier, "url": detected_url}
+    elif platform == "topechelon" and not result.get("source"):
+        api_key = topechelon_api_key({"url": detected_url})
+        result["source"] = {
+            "company": company,
+            "platform": "topechelon",
+            "url": detected_url,
+            "api_key": api_key,
+            "max_pages": 25,
+        } if api_key else None
+        if not api_key:
+            result["notes"] = (
+                "Top Echelon detected but the public board API key was not "
+                "present in the URL."
+            )
     elif platform == "icims":
         result["source"] = {"company": company, "platform": "icims", "url": detected_url}
     elif platform == "oracle_cx":
         result["source"] = {"company": company, "platform": "oracle_cx", "url": detected_url, "site_number": oracle_site_number({"url": detected_url})}
+    elif platform == "clearcompany":
+        result["source"] = {
+            "company": company,
+            "platform": "clearcompany",
+            "url": detected_url,
+            "api_short_name": clearcompany_short_name({"url": detected_url}),
+        }
+    elif platform == "paylocity":
+        result["source"] = {
+            "company": company,
+            "platform": "paylocity",
+            "url": detected_url,
+        }
+    elif platform == "applicantpro":
+        result["source"] = {
+            "company": company,
+            "platform": "applicantpro",
+            "url": detected_url,
+        }
+    elif platform == "dayforce":
+        client_namespace, job_board_code = dayforce_board_parts({"url": detected_url})
+        result["source"] = {
+            "company": company,
+            "platform": "dayforce",
+            "url": detected_url,
+            "client_namespace": client_namespace,
+            "job_board_code": job_board_code,
+        }
+    elif platform == "adp_myjobs":
+        result["source"] = {
+            "company": company,
+            "platform": "adp_myjobs",
+            "url": detected_url,
+            "domain": adp_myjobs_domain({"url": detected_url}),
+        }
+    elif platform == "adp_workforce_now":
+        cid, career_center_id, locale = adp_board_parts({"url": detected_url})
+        result["source"] = {
+            "company": company,
+            "platform": "adp_workforce_now",
+            "url": detected_url,
+            "cid": cid,
+            "career_center_id": career_center_id,
+            "locale": locale,
+        }
+    elif platform == "appone":
+        result["source"] = {
+            "company": company,
+            "platform": "appone",
+            "url": detected_url,
+        }
+    elif platform == "avature":
+        result["source"] = {
+            "company": company,
+            "platform": "avature",
+            "url": detected_url,
+        }
     elif platform == "jobvite":
         result["source"] = {"company": company, "platform": "jobvite", "company_id": jobvite_company_id({"company": company, "url": detected_url}), "url": detected_url}
+    elif platform == "taleo":
+        result["source"] = {
+            "company": company,
+            "platform": "taleo",
+            "url": detected_url,
+        }
+    elif platform == "pageup":
+        result["source"] = {
+            "company": company,
+            "platform": "pageup",
+            "url": detected_url,
+        }
+    elif platform == "talentreef" and not result.get("source"):
+        result["source"] = source_from_talentreef_page(
+            company,
+            detected_url,
+        )
+        if not result["source"]:
+            result["notes"] = (
+                result.get("notes")
+                or "TalentReef detected but client id could not be parsed."
+            )
+    elif platform == "peopleadmin":
+        result["source"] = {
+            "company": company,
+            "platform": "peopleadmin",
+            "url": detected_url,
+        }
+    elif platform == "paycom":
+        result["source"] = source_from_paycom_url(company, detected_url)
+    elif platform == "ultipro":
+        result["source"] = source_from_ultipro_url(company, detected_url)
+    elif platform == "healthcaresource":
+        result["source"] = {
+            "company": company,
+            "platform": "healthcaresource",
+            "url": detected_url,
+            "site_id": healthcaresource_site_id({"url": detected_url}),
+        }
+    elif platform == "zoho_recruit":
+        result["source"] = {
+            "company": company,
+            "platform": "zoho_recruit",
+            "url": detected_url,
+        }
     elif platform == "workable":
         result["source"] = {"company": company, "platform": "workable", "account": workable_account({"company": company, "url": detected_url}), "url": detected_url}
     elif platform == "bamboohr":
@@ -8155,6 +15832,71 @@ def classify_source(source: dict[str, Any]) -> dict[str, Any]:
         result["source"] = {"company": company, "platform": "jibe", "url": detected_url, "api_url": jibe_api_url({"url": detected_url}), "keywords": DEFAULT_WORKDAY_KEYWORDS}
     elif platform == "talentbrew":
         result["source"] = source_from_talentbrew_url(company, detected_url)
+    elif platform == "ttcportals":
+        result["source"] = {
+            "company": company,
+            "platform": "ttcportals",
+            "url": detected_url,
+            "listing_urls": [detected_url],
+            "max_pages": 3,
+            "browser_subprocess_timeout": 40,
+        }
+    elif platform == "workgr8":
+        result["source"] = {
+            "company": company,
+            "platform": "workgr8",
+            "url": detected_url,
+            "page_size": 100,
+            "max_pages": 5,
+        }
+    elif platform == "infor_cloudsuite":
+        _origin, _app_path, board, organization = infor_cloudsuite_parts(
+            {"url": detected_url}
+        )
+        result["source"] = {
+            "company": company,
+            "platform": "infor_cloudsuite",
+            "url": detected_url,
+            "job_board": board,
+            "hr_organization": organization,
+            "page_size": 100,
+            "max_pages": 10,
+            "max_detail_pages": 20,
+        }
+    elif platform == "viewpoint_for_cloud":
+        result["source"] = {
+            "company": company,
+            "platform": "viewpoint_for_cloud",
+            "url": detected_url,
+            "max_detail_pages": 100,
+            "detail_workers": 8,
+        }
+    elif platform == "hireology":
+        result["source"] = {
+            "company": company,
+            "platform": "hireology",
+            "url": detected_url,
+            "careers_path": hireology_careers_path({"url": detected_url}),
+            "page_size": 500,
+            "max_pages": 10,
+        }
+    elif platform == "applicantstack":
+        result["source"] = {
+            "company": company,
+            "platform": "applicantstack",
+            "url": detected_url,
+            "max_detail_pages": 100,
+            "detail_workers": 8,
+        }
+    elif platform == "cyber_recruiter":
+        result["source"] = {
+            "company": company,
+            "platform": "cyber_recruiter",
+            "url": detected_url,
+            "max_list_pages": 50,
+            "max_detail_pages": 100,
+            "detail_workers": 8,
+        }
     elif platform == "careerpuck":
         result["source"] = source_from_careerpuck_url(company, detected_url)
     elif platform == "pinpoint":
@@ -8206,11 +15948,40 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "meta_jobs",
         "eightfold",
         "oracle_cx",
+        "clearcompany",
+        "paylocity",
+        "applicantpro",
+        "dayforce",
+        "kronos_careers",
+        "healthcaresource",
+        "paradox",
+        "adp_myjobs",
+        "adp_workforce_now",
+        "appone",
+        "avature",
+        "jubilant_careers",
         "smartrecruiters",
+        "topechelon",
         "workable",
         "bamboohr",
         "jobvite",
+        "pageup",
+        "talentreef",
+        "peopleadmin",
+        "paycom",
+        "ultipro",
+        "zoho_recruit",
         "jobsyn",
+        "breezy",
+        "hiringthing",
+        "wp_search_index",
+        "joveo",
+        "atkins_jobs",
+        "workgr8",
+        "infor_cloudsuite",
+        "viewpoint_for_cloud",
+        "hireology",
+        "prismhr",
     }
     api_ok = {
         "phenom",
@@ -8220,9 +15991,12 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "icims",
         "jibe",
         "talentbrew",
+        "ttcportals",
+        "browser_static",
         "careerpuck",
         "pinpoint",
         "governmentjobs",
+        "governmentjobs_global",
         "rss",
         "sitemap",
         "yc_jobs",
@@ -8233,6 +16007,20 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "consider_jobs",
         "hn_who_is_hiring",
         "kula",
+        "jazzhr",
+        "hiringthing",
+        "paycor",
+        "clinch",
+        "isg_poweredby",
+        "embedded_jobs",
+        "wordpress_taleo",
+        "dynamicsats",
+        "hanford_bms",
+        "cadient",
+        "taleo",
+        "static_html",
+        "applicantstack",
+        "cyber_recruiter",
     }
     official_posted_at = {
         "greenhouse",
@@ -8244,16 +16032,52 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         "google_jobs",
         "eightfold",
         "oracle_cx",
+        "clearcompany",
+        "paylocity",
+        "dayforce",
+        "adp_myjobs",
+        "adp_workforce_now",
+        "appone",
+        "avature",
+        "getro_jobs",
+        "consider_jobs",
         "phenom",
         "successfactors",
         "talentbrew",
         "smartrecruiters",
+        "topechelon",
         "jobvite",
+        "pageup",
+        "talentreef",
+        "peopleadmin",
+        "paycom",
+        "ultipro",
+        "healthcaresource",
+        "paradox",
+        "zoho_recruit",
         "workable",
         "bamboohr",
         "careerpuck",
         "governmentjobs",
+        "governmentjobs_global",
         "jobsyn",
+        "jazzhr",
+        "hiringthing",
+        "wp_search_index",
+        "joveo",
+        "clinch",
+        "atkins_jobs",
+        "embedded_jobs",
+        "hanford_bms",
+        "cadient",
+        "taleo",
+        "breezy",
+        "workgr8",
+        "infor_cloudsuite",
+        "viewpoint_for_cloud",
+        "hireology",
+        "applicantstack",
+        "prismhr",
     }
     if platform in api_good:
         quality = "api_good"
@@ -8263,14 +16087,23 @@ def source_quality(source: dict[str, Any]) -> tuple[str, str]:
         quality = "custom_weak"
     else:
         quality = "manual_only"
-    if platform in official_posted_at:
+    if platform == "rss" and (
+        str(source.get("target_platform") or "").lower() == "teamtailor"
+        or truthy_source_flag(source.get("official_feed"), default=False)
+    ):
+        quality = "api_good"
+        posted = "official"
+    elif platform in official_posted_at:
         posted = "official"
     elif platform in {"sitemap", "rss"}:
         posted = "updated_proxy"
-    elif platform in {"kula", "custom", "pinpoint", "brassring", "startup_jobs", "builtin_jobs", "getro_jobs", "consider_jobs"}:
-        posted = "first_seen_only" if platform == "kula" else "unknown"
+    elif platform in {"kula", "dynamicsats", "paycor", "kronos_careers", "ttcportals", "browser_static", "static_html", "custom", "pinpoint", "brassring", "startup_jobs", "builtin_jobs"}:
+        posted = "first_seen_only" if platform in {"kula", "dynamicsats", "paycor", "kronos_careers", "ttcportals", "browser_static", "static_html"} else "unknown"
     else:
         posted = "unknown"
+    posted_override = str(source.get("posted_at_quality_override") or "").strip()
+    if posted_override in {"official", "updated_proxy", "first_seen_only", "unknown"}:
+        posted = posted_override
     return quality, posted
 
 

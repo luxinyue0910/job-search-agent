@@ -129,7 +129,8 @@ mkdir -p "$HOME/job-search-private"
 export JOB_SEARCH_PRIVATE_DIR="$HOME/job-search-private"
 ```
 
-Install the optional Node dependencies used by the browser filler:
+Install the optional Node dependencies used by the browser filler and browser-backed
+discovery adapters:
 
 ```bash
 cd job-search-agent/job-search
@@ -237,10 +238,29 @@ The codebase also supports company-specific or platform-specific adapters, inclu
 - `meta_jobs`
 - `jobsyn`
 - `oracle_cx`
+- `topechelon`
 - `boa_careers`
+- `peopleadmin`
+- `pageup`
+- `taleo`
+- `talentreef`
+- `infor_cloudsuite`
+- `viewpoint_for_cloud`
+- `hireology`
+- `applicantstack`
+- `cyber_recruiter`
+- `prismhr`
+- `ttcportals`
+- `browser_static` for configured public boards that require browser rendering
+- `static_html` for stable server-rendered official job lists
 - RSS-based sources
 
 Direct ATS/API sources are preferred because they are cheaper, more reliable, and expose better metadata than general web search.
+`browser_static` is a fallback for a small number of official public boards whose
+listings are visible in Chrome but blocked to normal HTTP clients. Each source
+declares selectors for job rows, ids, titles, locations, and dates. The helper
+uses a short-lived offscreen Chrome process, exits nonzero on bot challenges or
+selector failures, and uses `first_seen` unless the page exposes an official date.
 
 ## Company Watchlist
 
