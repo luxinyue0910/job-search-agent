@@ -308,15 +308,15 @@ python3 job-search/scripts/job_search.py discover-all \
   --include-maybe-backlog \
   --maybe-old-posted-date \
   --score \
-  --max-maybe-scores 20 \
+  --score-all-maybe \
   --workers 12 \
-  --score-workers 4 \
+  --score-workers 8 \
   --quiet
 ```
 
 `discover-all` fetches each configured source once. Full-board ATS adapters return their normal board snapshot; query-based adapters receive the union of source keywords, track overrides, and five broad role-family queries. Each candidate is routed to zero or more tracks, its JD is cached once, and matching tracks receive independent evaluations. Repeat `--track` to limit the run to selected tracks.
 
-Source fetches run concurrently through `--workers`. After every source has been normalized and filtered, strict candidates are queued for scoring and maybe candidates are ranked as one global pool. `--max-maybe-scores 20` limits expensive JD fetches to the top 20 maybe candidates across the entire run, rather than per source. JD downloads use `--score-workers`; score calculations and tracker writes remain serial to protect `applications.json`. `--quiet` suppresses per-source and per-score output while preserving the final summary and JSON report.
+Source fetches run concurrently through `--workers`. After every source has been normalized and filtered, strict candidates are queued for scoring and every maybe candidate receives a cheap prefilter. The prefilter rejects already-applied jobs, clearly senior/III+ titles, known 3+ year requirements, non-US locations, and known citizenship/clearance requirements before any JD fetch. `--score-all-maybe` scores every remaining maybe candidate; omit it to retain the backward-compatible global `--max-maybe-scores 20` limit. JD downloads use `--score-workers`; score calculations and tracker writes remain serial to protect `applications.json`. `--quiet` suppresses per-source and per-score output while preserving the final summary and JSON report.
 
 The output remains track-centric: `matched_tracks` and `track_evaluations` power separate SDE, QA, AI/FDE, traditional IT, and data-center review views. Technical titles that do not match a configured track can enter the existing maybe bucket as `unclassified_technical`.
 
@@ -333,11 +333,14 @@ Re-score recent tracker backlog after scoring or track rules change:
 ```bash
 python3 job-search/scripts/job_search.py rescore-backlog \
   --since-days 30 \
+  --bucket maybe \
   --all-tracks \
-  --score-workers 4
+  --missing-tracks-only \
+  --limit 300 \
+  --score-workers 8
 ```
 
-`rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed. Existing track evaluations are deliberately overwritten, while human notes are preserved. Use `--dry-run` to inspect the selected jobs and track evaluations first; pass repeatable `--track` or `--status` options for a narrower run.
+`rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed. `--bucket maybe` applies the same cheap prefilter to the maybe pool, while `--missing-tracks-only` avoids recalculating successful evaluations. Omit that flag when a scoring-rule or track-config change requires existing evaluations to be overwritten. Human notes are preserved. Use `--dry-run` to inspect the selected jobs and track evaluations first; pass repeatable `--track` or `--status` options for a narrower run.
 
 Run only one source:
 

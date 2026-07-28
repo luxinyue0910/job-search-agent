@@ -5538,6 +5538,41 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             score_job.assert_called_once()
             self.assertEqual(report["totals"]["maybe_scored"], 1)
 
+    def test_score_all_maybe_overrides_per_source_limit(self):
+        candidates = [
+            {
+                "company": "SupportCo",
+                "role": "Integrations Support Specialist",
+                "url": f"https://example.com/jobs/support-{index}",
+                "platform": "custom",
+                "location": "Seattle, WA",
+            }
+            for index in range(2)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(
+                private_root,
+                [{"company": "SupportCo", "platform": "custom", "url": "https://example.com/jobs"}],
+            )
+            job_search = load_job_search(private_root)
+            with mock.patch.object(job_search, "source_candidates_subprocess", return_value=(candidates, "")):
+                with mock.patch.object(job_search, "command_score_job") as score_job:
+                    job_search.command_discover_jobs(
+                        discover_args(
+                            include_maybe_backlog=True,
+                            score=True,
+                            score_maybe_limit=1,
+                            score_all_maybe=True,
+                        )
+                    )
+
+            report_path = next((private_root / "data" / "discovery_runs").glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(score_job.call_count, 2)
+            self.assertEqual(report["totals"]["maybe_eligible_for_scoring"], 2)
+            self.assertEqual(report["totals"]["maybe_scored"], 2)
+
     def test_old_posted_at_can_enter_maybe_backlog_only_when_newly_seen(self):
         candidate = {
             "company": "OldButNewCo",

@@ -81,7 +81,7 @@ python3 job-search/scripts/job_search.py sync-csv
 python3 job-search/scripts/job_search.py find-jobs
 python3 job-search/scripts/job_search.py discover-jobs --since-days 7 --score
 python3 job-search/scripts/job_search.py score-job --id <application-id>
-python3 job-search/scripts/job_search.py rescore-backlog --since-days 30 --all-tracks --dry-run
+python3 job-search/scripts/job_search.py rescore-backlog --since-days 30 --bucket maybe --all-tracks --missing-tracks-only --dry-run
 python3 job-search/scripts/job_search.py prepare-application --id <application-id>
 python3 job-search/scripts/job_search.py notify
 ```
@@ -112,7 +112,7 @@ Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lev
 
 Discovery reports keep the legacy `status` and `result_status` fields and add `health` plus `failure_category` for source diagnostics. Use `discovery-summary` for a run summary, `source-health` to review failed/config-broken sources, and `daily-review` to write a combined priority/relocation/maybe/rejected/retry review file under the private repo. Location buckets are additive: Washington and Remote US are preferred, other US locations remain eligible with a smaller score, unclear locations go to manual review, and clearly non-US roles are rejected. The Washington-focused traditional IT source set remains regional.
 
-When scoring rules or track definitions change, use `rescore-backlog` to refresh recent unsubmitted tracker entries without rerunning source discovery. It defaults to 30 days and the `found`, `needs_review`, `needs_retry`, and `scored` statuses. `--all-tracks` refreshes the five primary track evaluations; without it, the command uses repeatable `--track` values or each application's existing matched/evaluated tracks. Start with `--dry-run` for a non-mutating selection preview.
+When scoring rules or track definitions change, use `rescore-backlog` to refresh recent unsubmitted tracker entries without rerunning source discovery. It defaults to 30 days and the `found`, `needs_review`, `needs_retry`, and `scored` statuses. Use `--bucket maybe` to limit the run to maybe candidates and apply the cheap senior/experience/location/authorization prefilter. `--all-tracks` targets the five primary track evaluations; `--missing-tracks-only` skips successful evaluations and only fills missing or retryable results. Without `--all-tracks`, the command uses repeatable `--track` values or each application's existing matched/evaluated tracks. Start with `--dry-run` for a non-mutating selection preview.
 
 Use `classify-sources --custom-only` before maintaining large company lists. It inspects configured career pages and reports whether a `custom` source can be upgraded to a direct platform such as Greenhouse, Lever, Ashby, Gem, or Workday. Use `--apply` after reviewing the output. Workday sources use the public CXS API and parse relative posting dates such as `Posted Today` and `Posted 3 Days Ago`. Phenom pages are detected but still need a dedicated adapter.
 

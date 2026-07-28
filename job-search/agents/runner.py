@@ -22,6 +22,7 @@ def main() -> None:
     daily.add_argument("--since-days", type=float, default=7)
     daily.add_argument("--no-score", action="store_true")
     daily.add_argument("--include-maybe-backlog", action="store_true")
+    daily.add_argument("--score-all-maybe", action="store_true")
     daily.add_argument("--source-company", action="append", default=[])
     daily.add_argument("--workers", type=int, default=1)
     daily.add_argument("--private-dir", help="Private job-search repo path. Defaults to JOB_SEARCH_PRIVATE_DIR.")
@@ -40,6 +41,7 @@ def main() -> None:
             include_maybe_backlog=args.include_maybe_backlog,
             source_company=args.source_company,
             workers=args.workers,
+            score_all_maybe=args.score_all_maybe,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
     elif args.command == "eval":

@@ -125,6 +125,7 @@ class DiscoveryAgent:
         include_maybe_backlog: bool = False,
         source_company: list[str] | None = None,
         workers: int = 1,
+        score_all_maybe: bool = False,
     ) -> dict[str, Any]:
         run_dir = self.tools.agent_runs_dir / now_run_id(track)
         input_payload = {
@@ -134,6 +135,7 @@ class DiscoveryAgent:
             "include_maybe_backlog": include_maybe_backlog,
             "source_company": source_company or [],
             "workers": workers,
+            "score_all_maybe": score_all_maybe,
         }
         recorder = AgentRunRecorder(run_dir, agent="discovery_agent", input_payload=input_payload)
 
@@ -144,6 +146,7 @@ class DiscoveryAgent:
             include_maybe_backlog=include_maybe_backlog,
             source_company=source_company or [],
             workers=workers,
+            score_all_maybe=score_all_maybe,
         )
         recorder.record_tool_call(
             "discover_jobs",
@@ -170,4 +173,3 @@ class DiscoveryAgent:
         recorder.write_report(render_daily_report(summary))
         recorder.finish(summary)
         return {"run_dir": str(run_dir), **summary}
-

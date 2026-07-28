@@ -29,6 +29,7 @@ class JobSearchTools:
         include_maybe_backlog: bool,
         source_company: list[str],
         workers: int,
+        score_all_maybe: bool = False,
     ) -> dict[str, Any]:
         command = [
             sys.executable,
@@ -45,6 +46,8 @@ class JobSearchTools:
             command.append("--score")
         if include_maybe_backlog:
             command.append("--include-maybe-backlog")
+        if score_all_maybe:
+            command.append("--score-all-maybe")
         for company in source_company:
             command.extend(["--source-company", company])
         return self.run(command)
@@ -78,4 +81,3 @@ class JobSearchTools:
     def save_source_health(self, source_health: dict[str, Any]) -> None:
         self.source_health_path.parent.mkdir(parents=True, exist_ok=True)
         self.source_health_path.write_text(json.dumps(source_health, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
