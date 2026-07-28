@@ -12234,6 +12234,44 @@ US_LOCATION_PATTERN = re.compile(
 )
 
 
+MAYBE_SCORING_TITLE_EXCLUSION_PATTERN = re.compile(
+    r"\b(?:senior|sr\.?|staff|principal|distinguished|lead|manager|director|head|vp|chief|cto|"
+    r"intern|internship)\b|"
+    r"\b(?:software (?:development )?engineer|sde|developer)\s+(?:iii|iv|v|3|4|5)\b|"
+    r"\blevel\s+(?:iv|v|4|5)\b",
+    flags=re.I,
+)
+MAYBE_SCORING_DEALBREAKER_PATTERN = re.compile(
+    r"\b(?:security clearance|active clearance|us citizenship required|u\.s\. citizenship required|"
+    r"must be (?:a )?u\.s\. citizen|requires? (?:a )?u\.s\. citizenship)\b",
+    flags=re.I,
+)
+
+
+def maybe_scoring_prefilter(app: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Cheaply reject obvious misses before fetching a maybe candidate's full JD."""
+    reasons: list[str] = []
+    if str(app.get("date_applied") or "").strip():
+        reasons.append("already_applied")
+
+    role = re.sub(r"\s+", " ", str(app.get("role") or "")).strip()
+    if MAYBE_SCORING_TITLE_EXCLUSION_PATTERN.search(role):
+        reasons.append("senior_or_level_3_plus_title")
+
+    location_bucket = str(app.get("location_bucket") or "").strip()
+    if location_bucket == "rejected":
+        reasons.append("non_us_location")
+
+    if str(app.get("experience_bucket") or "").strip() == "3_plus":
+        reasons.append("known_3_plus_years_requirement")
+
+    dealbreaker_text = " ".join(str(item) for item in app.get("dealbreakers", []) if str(item).strip())
+    if MAYBE_SCORING_DEALBREAKER_PATTERN.search(dealbreaker_text):
+        reasons.append("citizenship_or_clearance_requirement")
+
+    return not reasons, reasons
+
+
 def location_preference_bucket(location: str, profile: dict[str, Any] | None = None, context: str = "") -> str:
     """Classify location without treating accepted US relocation roles as dealbreakers."""
     value = re.sub(r"\s+", " ", str(location or "")).strip()
@@ -12434,6 +12472,8 @@ def empty_discovery_stats() -> dict[str, int]:
         "added": 0,
         "existing": 0,
         "maybe_backlog": 0,
+        "maybe_eligible_for_scoring": 0,
+        "maybe_prefilter_rejected": 0,
         "skipped_old": 0,
         "skipped_unknown_date": 0,
         "skipped_title": 0,
@@ -12462,6 +12502,7 @@ def process_discovered_candidates(
     track_id = str(track.get("id", "")).strip()
     track_resume = path_from_track(track, "resume_file") if track else None
     maybe_score_limit = max(0, int(getattr(args, "score_maybe_limit", 3) or 0))
+    score_all_maybe = bool(getattr(args, "score_all_maybe", False))
     for candidate in candidates:
         stats["discovered"] += 1
         if track_id:
@@ -12570,7 +12611,14 @@ def process_discovered_candidates(
             stats["added"] += 1
         else:
             stats["existing"] += 1
+        triage_allowed = True
+        triage_reasons: list[str] = []
         if maybe_reasons:
+            triage_allowed, triage_reasons = maybe_scoring_prefilter(app)
+            if triage_allowed:
+                stats["maybe_eligible_for_scoring"] += 1
+            else:
+                stats["maybe_prefilter_rejected"] += 1
             app = update_application(
                 app["id"],
                 {
@@ -12579,6 +12627,8 @@ def process_discovered_candidates(
                     "discovery_bucket": "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
+                    "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
+                    "triage_reasons": triage_reasons or maybe_reasons,
                 },
             )
         evaluation_track_id = track_evaluation_key(track_id)
@@ -12588,7 +12638,8 @@ def process_discovered_candidates(
         should_score_maybe = (
             bool(maybe_reasons)
             and bool(args.score)
-            and stats["maybe_scored"] < maybe_score_limit
+            and triage_allowed
+            and (score_all_maybe or stats["maybe_scored"] < maybe_score_limit)
             and (exact_title_match or maybe_backlog_title_relevant(candidate, profile))
             and scoreable_status
             and (needs_track_evaluation or app.get("status") in {"found", "needs_retry"})
@@ -12636,6 +12687,7 @@ def process_discovered_candidates_all_tracks(
         if app.get("url")
     }
     maybe_score_limit = max(0, int(getattr(args, "score_maybe_limit", 3) or 0))
+    score_all_maybe = bool(getattr(args, "score_all_maybe", False))
     for candidate in candidates:
         stats["discovered"] += 1
         candidate["url"] = normalize_job_url(candidate["url"])
@@ -12761,7 +12813,14 @@ def process_discovered_candidates_all_tracks(
             stats["added"] += 1
         else:
             stats["existing"] += 1
+        triage_allowed = True
+        triage_reasons: list[str] = []
         if maybe_reasons:
+            triage_allowed, triage_reasons = maybe_scoring_prefilter(app)
+            if triage_allowed:
+                stats["maybe_eligible_for_scoring"] += 1
+            else:
+                stats["maybe_prefilter_rejected"] += 1
             app = update_application(
                 app["id"],
                 {
@@ -12770,11 +12829,15 @@ def process_discovered_candidates_all_tracks(
                     "discovery_bucket": "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
+                    "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
+                    "triage_reasons": triage_reasons or maybe_reasons,
                 },
             )
             tracker_apps_by_url[key] = app
 
         if not args.score or app.get("date_applied"):
+            continue
+        if maybe_reasons and not triage_allowed:
             continue
         scoreable_status = app.get("status") in {"found", "needs_review", "needs_retry", "scored", "skipped"}
         if not scoreable_status:
@@ -12787,7 +12850,12 @@ def process_discovered_candidates_all_tracks(
         ]
         if not tracks_to_score:
             continue
-        if score_queue is None and maybe_reasons and stats["maybe_scored"] >= maybe_score_limit:
+        if (
+            score_queue is None
+            and maybe_reasons
+            and not score_all_maybe
+            and stats["maybe_scored"] >= maybe_score_limit
+        ):
             continue
 
         if score_queue is not None:
@@ -12851,7 +12919,7 @@ def deduplicate_score_queue(score_queue: list[dict[str, Any]]) -> list[dict[str,
 
 def select_discovery_score_tasks(
     score_queue: list[dict[str, Any]],
-    max_maybe_scores: int,
+    max_maybe_scores: int | None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     tasks = deduplicate_score_queue(score_queue)
     strict_tasks = [task for task in tasks if not task.get("maybe")]
@@ -12880,7 +12948,11 @@ def select_discovery_score_tasks(
         ),
         reverse=True,
     )
-    selected_maybe_apps = set(ranked_maybe_apps[: max(0, max_maybe_scores)])
+    selected_maybe_apps = (
+        set(ranked_maybe_apps)
+        if max_maybe_scores is None
+        else set(ranked_maybe_apps[: max(0, max_maybe_scores)])
+    )
     selected_maybe_tasks = [task for task in maybe_tasks if str(task.get("app_id") or "") in selected_maybe_apps]
     return strict_tasks + selected_maybe_tasks, len(maybe_apps), len(selected_maybe_apps)
 
@@ -12899,7 +12971,12 @@ def execute_discovery_score_queue(
     score_queue: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> dict[str, int]:
-    max_maybe_scores = max(0, int(getattr(args, "max_maybe_scores", 20) or 0))
+    score_all_maybe = bool(getattr(args, "score_all_maybe", False))
+    max_maybe_scores = (
+        None
+        if score_all_maybe
+        else max(0, int(getattr(args, "max_maybe_scores", 20) or 0))
+    )
     selected_tasks, maybe_candidates, maybe_selected = select_discovery_score_tasks(
         score_queue,
         max_maybe_scores,
@@ -13099,16 +13176,20 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
         f"- Discovered: {totals.get('discovered', 0)}",
         f"- Added: {totals.get('added', 0)}",
         f"- Existing: {totals.get('existing', 0)}",
+        f"- Maybe backlog: {totals.get('maybe_backlog', 0)}",
+        f"- Maybe eligible for scoring: {totals.get('maybe_eligible_for_scoring', 0)}",
+        f"- Maybe prefilter rejected: {totals.get('maybe_prefilter_rejected', 0)}",
+        f"- Maybe scored: {totals.get('maybe_scored', 0)}",
         "",
-        "| Status | Result | Health | Failure | Attempts | Company | Platform | Candidates | Added | Existing | Maybe | Old | Unknown date | Title | Location | Error / warnings |",
-        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Status | Result | Health | Failure | Attempts | Company | Platform | Candidates | Added | Existing | Maybe | Maybe eligible | Maybe rejected | Old | Unknown date | Title | Location | Error / warnings |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for source in report.get("sources", []):
         stats = source.get("stats", {})
         warning = source.get("error") or source.get("warnings") or ""
         warning = " ".join(str(warning).split())[:180]
         lines.append(
-            "| {status} | {result} | {health} | {failure} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {maybe} | {old} | {unknown} | {title} | {location} | {warning} |".format(
+            "| {status} | {result} | {health} | {failure} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {maybe} | {maybe_eligible} | {maybe_rejected} | {old} | {unknown} | {title} | {location} | {warning} |".format(
                 status=source.get("status", ""),
                 result=source.get("result_status", ""),
                 health=source.get("health", ""),
@@ -13120,6 +13201,8 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
                 added=stats.get("added", 0),
                 existing=stats.get("existing", 0),
                 maybe=stats.get("maybe_backlog", 0),
+                maybe_eligible=stats.get("maybe_eligible_for_scoring", 0),
+                maybe_rejected=stats.get("maybe_prefilter_rejected", 0),
                 old=stats.get("skipped_old", 0),
                 unknown=stats.get("skipped_unknown_date", 0),
                 title=stats.get("skipped_title", 0),
@@ -13173,6 +13256,8 @@ def print_source_rows(title: str, rows: list[dict[str, Any]], limit: int = 12) -
             f"candidates={source.get('candidates_returned', 0)}, "
             f"added={stats.get('added', 0)}, existing={stats.get('existing', 0)}, "
             f"maybe={stats.get('maybe_backlog', 0)}, "
+            f"maybe_eligible={stats.get('maybe_eligible_for_scoring', 0)}, "
+            f"maybe_rejected={stats.get('maybe_prefilter_rejected', 0)}, "
             f"old={stats.get('skipped_old', 0)}, title={stats.get('skipped_title', 0)}, "
             f"location={stats.get('skipped_location', 0)}"
         )
@@ -13219,7 +13304,10 @@ def command_discovery_summary(args: argparse.Namespace) -> None:
         f"unknown_date={totals.get('skipped_unknown_date', 0)}, "
         f"title={totals.get('skipped_title', 0)}, "
         f"location={totals.get('skipped_location', 0)}, "
-        f"maybe={totals.get('maybe_backlog', 0)}"
+        f"maybe={totals.get('maybe_backlog', 0)}, "
+        f"maybe_eligible={totals.get('maybe_eligible_for_scoring', 0)}, "
+        f"maybe_rejected={totals.get('maybe_prefilter_rejected', 0)}, "
+        f"maybe_scored={totals.get('maybe_scored', 0)}"
     )
     if health_counts:
         print("- Health: " + ", ".join(f"{key}={value}" for key, value in sorted(health_counts.items())))
@@ -16389,6 +16477,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
         "score_maybe_limit": int(getattr(args, "score_maybe_limit", 3) or 0),
+        "score_all_maybe": bool(getattr(args, "score_all_maybe", False)),
         "max_maybe_scores": (
             int(getattr(args, "max_maybe_scores", 20) or 0)
             if deferred_score_queue is not None
@@ -16568,6 +16657,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 f"    {status_detail}: candidates={len(candidates)} "
                 f"added={source_stats['added']} existing={source_stats['existing']} "
                 f"maybe={source_stats['maybe_backlog']} maybe_scored={source_stats['maybe_scored']} "
+                f"maybe_eligible={source_stats['maybe_eligible_for_scoring']} "
+                f"maybe_rejected={source_stats['maybe_prefilter_rejected']} "
                 f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
                 f"title={source_stats['skipped_title']} location={source_stats['skipped_location']} "
                 f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
@@ -16609,6 +16700,8 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
         f"Maybe backlog: {stats['maybe_backlog']}. Maybe scored: {stats['maybe_scored']}. "
+        f"Maybe eligible: {stats['maybe_eligible_for_scoring']}. "
+        f"Maybe prefilter rejected: {stats['maybe_prefilter_rejected']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
         f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}. "
@@ -16635,17 +16728,40 @@ def application_rescore_datetime(app: dict[str, Any]) -> tuple[dt.datetime | Non
     return max(candidates, key=lambda item: item[0])
 
 
+def rescore_bucket_matches(app: dict[str, Any], bucket: str | None) -> bool:
+    if not bucket:
+        return True
+    if bucket == "maybe":
+        return is_maybe_backlog_app(app) or str(app.get("location_bucket") or "") == "maybe"
+    if bucket == "priority":
+        return (
+            str(app.get("location_bucket") or "") == "preferred"
+            and not is_maybe_backlog_app(app)
+        )
+    if bucket == "relocation":
+        return str(app.get("location_bucket") or "") == "relocation"
+    if bucket == "retry":
+        return str(app.get("status") or "") == "needs_retry" or any(
+            str(evaluation.get("status") or "") == "needs_retry"
+            for evaluation in track_evaluations_with_legacy(app).values()
+        )
+    return True
+
+
 def select_rescore_backlog_applications(
     applications: list[dict[str, Any]],
     cutoff: dt.datetime,
     statuses: set[str],
     limit: int = 0,
+    bucket: str | None = None,
 ) -> list[tuple[dict[str, Any], dt.datetime, str]]:
     selected: list[tuple[dict[str, Any], dt.datetime, str]] = []
     for app in applications:
         if str(app.get("date_applied") or "").strip():
             continue
         if str(app.get("status") or "") not in statuses:
+            continue
+        if not rescore_bucket_matches(app, bucket):
             continue
         reference_at, reference_field = application_rescore_datetime(app)
         if reference_at is None or reference_at < cutoff:
@@ -16700,15 +16816,41 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
         cutoff,
         statuses,
         max(0, int(args.limit or 0)),
+        getattr(args, "bucket", None),
     )
     score_queue: list[dict[str, Any]] = []
     selected_rows: list[tuple[dict[str, Any], dt.datetime, str, list[str | None]]] = []
+    prefilter_rejected = 0
+    existing_evaluations_skipped = 0
+    tracker_changed = False
     for app, reference_at, reference_field in selected:
+        if getattr(args, "bucket", None) == "maybe":
+            triage_allowed, triage_reasons = maybe_scoring_prefilter(app)
+            if not args.dry_run:
+                app["triage_status"] = "eligible_for_scoring" if triage_allowed else "quick_rejected"
+                app["triage_reasons"] = triage_reasons or ["passed_quick_prefilter"]
+                tracker_changed = True
+            if not triage_allowed:
+                prefilter_rejected += 1
+                continue
         tracks = rescore_tracks_for_application(
             app,
             requested_tracks,
             bool(args.all_tracks),
         )
+        if bool(getattr(args, "missing_tracks_only", False)):
+            evaluations = track_evaluations_with_legacy(app)
+            tracks = [
+                track_id
+                for track_id in tracks
+                if (
+                    track_evaluation_key(track_id) not in evaluations
+                    or evaluations[track_evaluation_key(track_id)].get("status") == "needs_retry"
+                )
+            ]
+            if not tracks:
+                existing_evaluations_skipped += 1
+                continue
         selected_rows.append((app, reference_at, reference_field, tracks))
         for track_id in tracks:
             score_queue.append(
@@ -16726,7 +16868,10 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
             "Backlog rescore dry run. "
             f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
             f"Statuses: {', '.join(sorted(statuses))}. "
-            f"Jobs: {len(selected_rows)}. Track evaluations: {len(score_queue)}."
+            f"Bucket: {getattr(args, 'bucket', None) or 'all'}. "
+            f"Jobs: {len(selected_rows)}. Track evaluations: {len(score_queue)}. "
+            f"Prefilter rejected: {prefilter_rejected}. "
+            f"Existing evaluations skipped: {existing_evaluations_skipped}."
         )
         if not args.quiet:
             for app, reference_at, reference_field, tracks in selected_rows:
@@ -16738,14 +16883,20 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
                 )
         return
 
+    if tracker_changed:
+        save_tracker(tracker)
     args.max_maybe_scores = 0
+    args.score_all_maybe = False
     args.preserve_notes = True
     summary = execute_discovery_score_queue(score_queue, args)
     print(
         "Backlog rescore complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Bucket: {getattr(args, 'bucket', None) or 'all'}. "
         f"Jobs: {len(selected_rows)}. "
         f"Track evaluations: {summary['selected_tasks']}. "
+        f"Prefilter rejected: {prefilter_rejected}. "
+        f"Existing evaluations skipped: {existing_evaluations_skipped}. "
         f"Failures: {summary['scoring_failed']}."
     )
 
@@ -18196,6 +18347,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --score, fetch and score at most this many relevant maybe candidates per source. Use 0 to disable.",
     )
     discover.add_argument(
+        "--score-all-maybe",
+        action="store_true",
+        help="With --score, score every maybe candidate that passes the cheap prefilter instead of applying the per-source limit.",
+    )
+    discover.add_argument(
         "--source-timeout-seconds",
         type=float,
         default=45,
@@ -18275,6 +18431,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="With --score, score at most this many maybe candidates globally. Use 0 to disable.",
+    )
+    discover_all.add_argument(
+        "--score-all-maybe",
+        action="store_true",
+        help="With --score, score every maybe candidate that passes the cheap prefilter; overrides --max-maybe-scores.",
     )
     discover_all.add_argument(
         "--score-workers",
@@ -18427,6 +18588,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-tracks",
         action="store_true",
         help="Refresh every configured primary track for each selected job.",
+    )
+    rescore.add_argument(
+        "--bucket",
+        choices=["maybe", "priority", "relocation", "retry"],
+        help="Only re-score tracker jobs in this review bucket.",
+    )
+    rescore.add_argument(
+        "--missing-tracks-only",
+        action="store_true",
+        help="Only score track evaluations that are missing or previously ended in needs_retry.",
     )
     rescore.add_argument("--limit", type=int, default=0, help="Maximum jobs to re-score. Use 0 for no limit.")
     rescore.add_argument(

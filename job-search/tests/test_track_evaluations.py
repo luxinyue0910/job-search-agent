@@ -613,6 +613,60 @@ class TrackEvaluationTest(unittest.TestCase):
                 },
             )
 
+    def test_unified_scoring_can_select_all_maybe_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            queue = [
+                {
+                    "app_id": f"maybe-{index}",
+                    "track": "general_sde",
+                    "maybe": True,
+                    "priority": index,
+                    "posted_timestamp": index,
+                }
+                for index in range(3)
+            ]
+
+            selected, maybe_candidates, maybe_selected = job_search.select_discovery_score_tasks(
+                queue,
+                None,
+            )
+
+            self.assertEqual(maybe_candidates, 3)
+            self.assertEqual(maybe_selected, 3)
+            self.assertEqual({task["app_id"] for task in selected}, {"maybe-0", "maybe-1", "maybe-2"})
+
+    def test_maybe_scoring_prefilter_rejects_obvious_level_and_experience_misses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+
+            allowed, reasons = job_search.maybe_scoring_prefilter(
+                {
+                    "role": "Software Engineer III",
+                    "location_bucket": "relocation",
+                    "experience_bucket": "3_plus",
+                    "date_applied": "",
+                    "dealbreakers": [],
+                }
+            )
+            eligible, eligible_reasons = job_search.maybe_scoring_prefilter(
+                {
+                    "role": "Associate Software Engineer",
+                    "location_bucket": "preferred",
+                    "experience_bucket": "1_2",
+                    "date_applied": "",
+                    "dealbreakers": [],
+                }
+            )
+
+            self.assertFalse(allowed)
+            self.assertIn("senior_or_level_3_plus_title", reasons)
+            self.assertIn("known_3_plus_years_requirement", reasons)
+            self.assertTrue(eligible)
+            self.assertEqual(eligible_reasons, [])
+
     def test_unified_scoring_prefetches_each_selected_job_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -688,6 +742,58 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertEqual(summary["scoring_failed"], 1)
             self.assertIn("Keep this note.", tracker["applications"][0]["notes"])
             self.assertIn("Scoring failed: test failure", tracker["applications"][0]["notes"])
+
+    def test_rescore_maybe_bucket_only_queues_missing_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update(
+                {
+                    "status": "needs_review",
+                    "date_found": dt.date.today().isoformat(),
+                    "review_bucket": "maybe",
+                    "discovery_bucket": "maybe_backlog",
+                    "location_bucket": "preferred",
+                    "experience_bucket": "1_2",
+                    "matched_tracks": ["general_sde", "qa_engineer"],
+                    "track_evaluations": {
+                        "general_sde": {
+                            **score_result(8.0, 75),
+                            "track_id": "general_sde",
+                        }
+                    },
+                }
+            )
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                since_hours=None,
+                since_days=30,
+                status=None,
+                tracks=["general_sde", "qa_engineer"],
+                all_tracks=False,
+                bucket="maybe",
+                missing_tracks_only=True,
+                limit=0,
+                score_workers=2,
+                dry_run=False,
+                quiet=True,
+            )
+
+            with mock.patch.object(
+                job_search,
+                "execute_discovery_score_queue",
+                return_value={"selected_tasks": 1, "scoring_failed": 0},
+            ) as execute:
+                job_search.command_rescore_backlog(args)
+
+            queue, _forwarded_args = execute.call_args.args
+            self.assertEqual(
+                [(task["app_id"], task["track"]) for task in queue],
+                [(app["id"], "qa_engineer")],
+            )
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            self.assertEqual(tracker["applications"][0]["triage_status"], "eligible_for_scoring")
 
     def test_discover_all_quiet_suppresses_per_source_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
