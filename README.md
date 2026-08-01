@@ -81,6 +81,9 @@ flowchart TD
   Filters --> Scoring["Fit and ATS scoring"]
   Scoring --> Tracker
 
+  Tracker --> BacklogPlanner["Backlog planner<br/>local prefilter, track routing,<br/>canonical dedupe, priority ranking"]
+  BacklogPlanner --> Scoring
+
   Tracker --> Materials["prepare-application<br/>tailored materials"]
   PrivateRepo --> Materials
   Templates["Templates<br/>cover letter, screening answers"] --> Materials
@@ -332,15 +335,44 @@ Re-score recent tracker backlog after scoring or track rules change:
 
 ```bash
 python3 job-search/scripts/job_search.py rescore-backlog \
-  --since-days 30 \
+  --since-days 7 \
   --bucket maybe \
-  --all-tracks \
   --missing-tracks-only \
-  --limit 300 \
+  --limit 50 \
   --score-workers 8
 ```
 
-`rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed. `--bucket maybe` applies the same cheap prefilter to the maybe pool, while `--missing-tracks-only` avoids recalculating successful evaluations. Omit that flag when a scoring-rule or track-config change requires existing evaluations to be overwritten. Human notes are preserved. Use `--dry-run` to inspect the selected jobs and track evaluations first; pass repeatable `--track` or `--status` options for a narrower run.
+`rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed.
+
+Backlog recovery is intentionally a two-stage pipeline:
+
+1. A cheap local planning pass scans every row in the requested date, status, and bucket scope. It recalculates the location bucket, rejects obvious level, experience, citizenship, clearance, and non-software QA misses, routes legacy rows to relevant tracks, skips completed evaluations, and chooses one owner for each canonical URL.
+2. Only the highest-priority planned rows are allowed through `--limit` to fetch full JDs and run track scoring. Washington and Remote US rank first, California second, and other US locations next; cached JDs, explicit track matches, and freshness break ties.
+
+The limit is applied after local filtering, duplicate removal, and existing-evaluation checks. A batch of 50 therefore means up to 50 jobs that can actually be scored, rather than the first 50 tracker rows before exclusions. Local triage writes `triage_status` and `triage_reasons` so rejected rows remain auditable instead of disappearing.
+
+Use a dry run to measure or inspect a backlog without fetching JDs or changing tracker data:
+
+```bash
+# Count the complete eligible queue after local planning.
+python3 job-search/scripts/job_search.py rescore-backlog \
+  --since-days 7 \
+  --bucket maybe \
+  --missing-tracks-only \
+  --limit 0 \
+  --dry-run \
+  --quiet
+
+# Preview the next batch with per-job output.
+python3 job-search/scripts/job_search.py rescore-backlog \
+  --since-days 7 \
+  --bucket maybe \
+  --missing-tracks-only \
+  --limit 50 \
+  --dry-run
+```
+
+For large legacy backlogs, process 50-100 jobs at a time and review the yield before continuing. This bounds network work, exposes weak routing rules early, and prevents thousands of ambiguous titles from triggering full-page fetches at once. By default, legacy rows are inferred into relevant tracks from their titles and existing track metadata. Pass repeatable `--track` only when a specific cross-track evaluation is wanted; use `--all-tracks` sparingly because it deliberately evaluates every selected job against every primary track. Omit `--missing-tracks-only` when a scoring-rule or track-config change requires successful evaluations to be overwritten. Human notes are preserved.
 
 Run only one source:
 
@@ -420,6 +452,8 @@ Priority recommendation views prefer `new grad`, `0-1`, and `1-2` year roles, th
 
 Location filtering uses four additive buckets without changing application statuses: `priority` for Washington or Remote US, `relocation` for other US locations, `maybe` for unclear locations, and `rejected` for clearly non-US roles. Other US states remain discoverable and receive a smaller location score instead of a zero fit score. Sources that require a location query should include one `United States` query; the Washington-focused traditional IT source set remains intentionally regional.
 
+Location parsing gives explicit country and state evidence precedence over ambiguous city names and two-letter codes. For example, `Aberdeen, South Dakota` is not treated as Aberdeen, Washington, while `IN, Pune` and `CA, Ontario` are not interpreted as Indiana and California. City-only Washington locations remain supported when no conflicting state or country is present.
+
 ## Freshness and Deduplication
 
 The discovery pipeline records:
@@ -432,6 +466,8 @@ The discovery pipeline records:
 - `source_query`: search query when relevant.
 
 Deduplication uses canonical URLs and source-specific job identifiers where available. A job found today and again tomorrow should update `last_seen`, not become a duplicate application. Different roles at the same company are tracked separately.
+
+Canonicalization also normalizes equivalent Greenhouse hosts such as `boards.greenhouse.io` and `job-boards.greenhouse.io`. During backlog planning, duplicate tracker rows are resolved to one canonical owner, preferring applied or already-evaluated history. Duplicate rows remain in the tracker with an auditable `duplicate_of:<application-id>` triage reason; genuinely different ATS job IDs remain separate even when company and title are the same.
 
 By default, fresh discovery prefers jobs with known posting dates. Jobs with unknown posting dates can be included with `--include-unknown-posted-date`.
 
@@ -453,6 +489,8 @@ Adapters only fetch and normalize jobs. Scoring happens after discovery filterin
 Existing tracker records are migrated lazily. The first new track evaluation imports legacy top-level scores into the original track entry, so an older strong score is not lost. No destructive tracker migration is required.
 
 Scoring is a triage aid, not an automated decision maker. The intended workflow is to review high-scoring roles first, then manually decide whether to apply.
+
+Track routing is deliberately narrower than generic keyword matching. QA backlog routing emphasizes SDET, software QA, test automation, and software quality titles while filtering manufacturing, welding, metrology, and language-QA roles before a JD fetch. The data-center track requires data-center, network, infrastructure-operations, or systems-operations evidence; generic satellite, aircraft, or product systems engineering titles are not treated as data-center roles. Traditional IT retains explicit support for IT systems engineering and administration roles.
 
 ## Preparing Applications
 
@@ -654,6 +692,20 @@ python3 job-search/scripts/job_search.py sync-csv
 ```
 
 Then review `applications.csv`, choose jobs to apply to, prepare materials, and run the browser filler one job at a time.
+
+Backlog maintenance should run separately from fresh discovery:
+
+```bash
+python3 job-search/scripts/job_search.py rescore-backlog \
+  --since-days 7 \
+  --bucket maybe \
+  --missing-tracks-only \
+  --limit 50 \
+  --score-workers 8 \
+  --quiet
+```
+
+Repeat only after reviewing the previous batch. A daily discovery run answers "what is new"; backlog rescoring answers "which previously stored rows still deserve a more expensive JD review." Keeping those concerns separate makes run cost and failure diagnosis explicit.
 
 ## More Details
 

@@ -247,6 +247,102 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertIn("Backlog rescore dry run.", stdout.getvalue())
             self.assertIn(app["id"], stdout.getvalue())
 
+    def test_rescore_limit_is_applied_after_prefilter_and_existing_evaluation_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            senior = base_application()
+            senior.update(
+                {
+                    "id": "newest-senior",
+                    "role": "Senior Software Engineer",
+                    "url": "https://example.com/jobs/senior",
+                    "date_found": dt.date.today().isoformat(),
+                    "review_bucket": "maybe",
+                    "location_bucket": "preferred",
+                }
+            )
+            evaluated = base_application()
+            evaluated.update(
+                {
+                    "id": "already-evaluated",
+                    "url": "https://example.com/jobs/evaluated",
+                    "date_found": dt.date.today().isoformat(),
+                    "review_bucket": "maybe",
+                    "location_bucket": "preferred",
+                    "track_evaluations": {
+                        "general_sde": {**score_result(8.0, 80), "track_id": "general_sde"}
+                    },
+                }
+            )
+            eligible = base_application()
+            eligible.update(
+                {
+                    "id": "eligible-after-skips",
+                    "role": "Associate Software Engineer",
+                    "url": "https://example.com/jobs/eligible",
+                    "date_found": dt.date.today().isoformat(),
+                    "review_bucket": "maybe",
+                    "location_bucket": "preferred",
+                }
+            )
+            write_workspace(private_root, senior)
+            (private_root / "data" / "applications.json").write_text(
+                json.dumps({"applications": [senior, evaluated, eligible]}),
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                since_hours=None,
+                since_days=30,
+                status=None,
+                tracks=["general_sde"],
+                all_tracks=False,
+                bucket="maybe",
+                missing_tracks_only=True,
+                limit=1,
+                score_workers=2,
+                dry_run=False,
+                quiet=True,
+            )
+
+            with mock.patch.object(
+                job_search,
+                "execute_discovery_score_queue",
+                return_value={"selected_tasks": 1, "scoring_failed": 0},
+            ) as execute:
+                job_search.command_rescore_backlog(args)
+
+            queue, _forwarded_args = execute.call_args.args
+            self.assertEqual([task["app_id"] for task in queue], ["eligible-after-skips"])
+
+    def test_canonical_owner_prefers_an_evaluated_greenhouse_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            legacy = base_application()
+            legacy.update(
+                {
+                    "id": "legacy-unscored",
+                    "url": "https://boards.greenhouse.io/example/jobs/123",
+                }
+            )
+            evaluated = base_application()
+            evaluated.update(
+                {
+                    "id": "current-evaluated",
+                    "url": "https://job-boards.greenhouse.io/example/jobs/123",
+                    "track_evaluations": {
+                        "general_sde": {**score_result(8.0, 80), "track_id": "general_sde"}
+                    },
+                }
+            )
+
+            owners = job_search.canonical_application_owner_ids([legacy, evaluated])
+
+            self.assertEqual(
+                owners["https://job-boards.greenhouse.io/example/jobs/123"],
+                "current-evaluated",
+            )
+
     def test_source_for_tracks_unions_track_queries_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -666,6 +762,28 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertIn("known_3_plus_years_requirement", reasons)
             self.assertTrue(eligible)
             self.assertEqual(eligible_reasons, [])
+
+            level_three, level_three_reasons = job_search.maybe_scoring_prefilter(
+                {
+                    "role": "Systems Administrator III",
+                    "location_bucket": "preferred",
+                    "date_applied": "",
+                    "dealbreakers": [],
+                }
+            )
+            clearance, clearance_reasons = job_search.maybe_scoring_prefilter(
+                {
+                    "role": "Network Engineer (Active Clearance)",
+                    "location_bucket": "preferred",
+                    "date_applied": "",
+                    "dealbreakers": [],
+                }
+            )
+
+            self.assertFalse(level_three)
+            self.assertIn("senior_or_level_3_plus_title", level_three_reasons)
+            self.assertFalse(clearance)
+            self.assertIn("citizenship_or_clearance_requirement", clearance_reasons)
 
     def test_unified_scoring_prefetches_each_selected_job_once(self):
         with tempfile.TemporaryDirectory() as tmp:

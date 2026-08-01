@@ -1024,6 +1024,11 @@ def relative_search_days(args: argparse.Namespace) -> float | None:
 def normalize_job_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url.strip())
     host = parsed.netloc.lower()
+    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io"}:
+        greenhouse_match = re.search(r"^/([^/]+)/jobs/(\d+)", parsed.path, flags=re.I)
+        if greenhouse_match:
+            board, job_id = greenhouse_match.groups()
+            return f"https://job-boards.greenhouse.io/{board.lower()}/jobs/{job_id}"
     if host == "governmentjobs.com" or host.endswith(".governmentjobs.com"):
         job_match = re.search(r"/(?:careers/[^/]+/)?jobs/(?:newprint/)?(\d+)", parsed.path, flags=re.I)
         if job_match:
@@ -12115,11 +12120,13 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bsite reliability engineer\b|\bsre\b",
     ),
     "qa_engineer": (
-        r"\bqa\b|\bquality assurance\b|\bsdet\b",
+        r"\bsdet\b",
+        r"\bqa (?:engineer|analyst|automation|software|test(?:er|ing)?)\b",
+        r"\bquality assurance (?:engineer|analyst|automation|software|test(?:er|ing)?)\b",
         r"\bsoftware (?:development )?engineer in test\b",
         r"\b(?:software )?test automation engineer\b",
         r"\bautomation qa engineer\b|\bqa automation engineer\b",
-        r"\bsoftware quality engineer\b",
+        r"\bsoftware quality (?:assurance )?(?:engineer|analyst|specialist|tester)\b",
     ),
     "fde_ai_engineer": (
         r"\bforward deployed (?:software |ai )?engineer\b",
@@ -12134,6 +12141,7 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bit operations (?:engineer|analyst|specialist|technician)\b",
         r"\b(?:systems?|business systems|application systems|it systems) (?:analyst|administrator|specialist)\b",
         r"\b(?:network|cloud|server|infrastructure) (?:analyst|administrator|specialist|engineer)\b",
+        r"\bit systems? engineer\b",
         r"\b(?:information|cyber) security (?:analyst|administrator|specialist|engineer)\b",
         r"\b(?:database|data systems|data management|business intelligence|reporting|technology) analyst\b",
         r"\b(?:application|applications|data systems|database|report|bi|integration|gis) developer\b",
@@ -12150,7 +12158,7 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bdata cent(?:er|re) (?:operations )?(?:engineer|technician|specialist)\b",
         r"\bnetwork (?:operations |development )?(?:engineer|technician|specialist)\b",
         r"\binfrastructure operations (?:engineer|technician|specialist)\b",
-        r"\bsystems? (?:operations )?(?:engineer|technician|administrator)\b",
+        r"\bsystems? operations (?:engineer|technician|administrator)\b",
     ),
 }
 
@@ -12223,7 +12231,8 @@ REMOTE_US_PATTERN = re.compile(
 )
 FOREIGN_LOCATION_PATTERN = re.compile(
     r"(?:\b(?:canada|toronto|montreal|calgary|edmonton|british columbia|ontario|quebec|india|argentina|"
-    r"colombia|mexico|spain|germany|poland|egypt|japan|france|ireland|netherlands|singapore|australia|"
+    r"gurugram|gurgaon|new delhi|bengaluru|hyderabad|pune|chennai|noida|colombia|mexico|spain|germany|"
+    r"poland|egypt|japan|france|ireland|netherlands|nl|singapore|australia|"
     r"new zealand|brazil|vancouver|london|paris|berlin|latam|latin america|emea|apac|europe|"
     r"european union|united kingdom|uk only|eu only)\b|\bremote\s*\(ca\))",
     flags=re.I,
@@ -12238,7 +12247,14 @@ MAYBE_SCORING_TITLE_EXCLUSION_PATTERN = re.compile(
     r"\b(?:senior|sr\.?|staff|principal|distinguished|lead|manager|director|head|vp|chief|cto|"
     r"intern|internship)\b|"
     r"\b(?:software (?:development )?engineer|sde|developer)\s+(?:iii|iv|v|3|4|5)\b|"
+    r"\b(?:engineer|administrator|analyst|developer|specialist|technician)\s+(?:iii|iv|v|3|4|5)\b|"
     r"\blevel\s+(?:iv|v|4|5)\b",
+    flags=re.I,
+)
+MAYBE_SCORING_NON_SOFTWARE_QA_PATTERN = re.compile(
+    r"\b(?:quality assurance|quality control|qa)\b.*\b(?:cwi|welding|structural|manufacturing|supplier|metrology)\b|"
+    r"\b(?:cwi|welding|structural|manufacturing|supplier|metrology)\b.*\b(?:quality assurance|quality control|qa)\b|"
+    r"\blanguage qa (?:test(?:er|ing)|analyst)\b",
     flags=re.I,
 )
 MAYBE_SCORING_DEALBREAKER_PATTERN = re.compile(
@@ -12257,6 +12273,8 @@ def maybe_scoring_prefilter(app: dict[str, Any]) -> tuple[bool, list[str]]:
     role = re.sub(r"\s+", " ", str(app.get("role") or "")).strip()
     if MAYBE_SCORING_TITLE_EXCLUSION_PATTERN.search(role):
         reasons.append("senior_or_level_3_plus_title")
+    if MAYBE_SCORING_NON_SOFTWARE_QA_PATTERN.search(role):
+        reasons.append("non_software_quality_role")
 
     location_bucket = str(app.get("location_bucket") or "").strip()
     if location_bucket == "rejected":
@@ -12265,7 +12283,10 @@ def maybe_scoring_prefilter(app: dict[str, Any]) -> tuple[bool, list[str]]:
     if str(app.get("experience_bucket") or "").strip() == "3_plus":
         reasons.append("known_3_plus_years_requirement")
 
-    dealbreaker_text = " ".join(str(item) for item in app.get("dealbreakers", []) if str(item).strip())
+    dealbreaker_text = " ".join(
+        [role]
+        + [str(item) for item in app.get("dealbreakers", []) if str(item).strip()]
+    )
     if MAYBE_SCORING_DEALBREAKER_PATTERN.search(dealbreaker_text):
         reasons.append("citizenship_or_clearance_requirement")
 
@@ -12284,12 +12305,37 @@ def location_preference_bucket(location: str, profile: dict[str, Any] | None = N
         re.search(r"\b(?:washington,?\s+(?:district of columbia|dc)|district of columbia|washington dc)\b", lower)
     )
     explicit_us = bool(US_LOCATION_PATTERN.search(lower)) or lower in {"us", "u.s", "u.s."}
+    wa_state_marker = bool(
+        not is_washington_dc
+        and (
+            re.search(r"\bwashington(?:\s+state)?\b", lower)
+            or re.search(r"(?:^|[,;/])\s*wa(?:\s+state)?\s*(?:[,;/]|$)", lower)
+        )
+    )
+    other_state_name = any(
+        state != "washington" and re.search(rf"\b{re.escape(state)}\b", lower)
+        for state in US_STATE_NAMES
+    )
+    other_state_code = bool(
+        re.search(
+            rf"(?:^|[,;/])\s*(?:{'|'.join(sorted(US_STATE_ABBREVIATIONS - {'wa'}))})\s*(?:[,;/]|$)",
+            lower,
+        )
+    )
+    foreign_location = bool(FOREIGN_LOCATION_PATTERN.search(lower)) or bool(
+        re.search(r"\b(?:ab|bc|on|qc),\s*ca\b", lower)
+    )
+    # Country names and overseas city/state pairs take precedence over ambiguous
+    # two-letter US state codes such as IN and CA.
+    if foreign_location and not explicit_us and not wa_state_marker:
+        return "rejected"
     if REMOTE_US_PATTERN.search(lower):
         return "preferred"
-    if not is_washington_dc and (
-        lower == "washington"
-        or WA_LOCATION_PATTERN.search(lower)
-        or re.search(r"(?:^|[,;/])\s*wa(?:\s+state)?\s*(?:[,;/]|$)", lower)
+    if wa_state_marker or (
+        not is_washington_dc
+        and not other_state_name
+        and not other_state_code
+        and WA_LOCATION_PATTERN.search(lower)
     ):
         return "preferred"
 
@@ -12301,9 +12347,6 @@ def location_preference_bucket(location: str, profile: dict[str, Any] | None = N
         )
     )
     explicit_us_location = explicit_us or state_name or state_code
-    foreign_location = bool(FOREIGN_LOCATION_PATTERN.search(lower)) or bool(
-        re.search(r"\b(?:ab|bc|on|qc),\s*ca\b", lower)
-    )
     if foreign_location and not explicit_us_location:
         return "rejected"
     if explicit_us_location:
@@ -16797,6 +16840,93 @@ def rescore_tracks_for_application(
     return deduplicated or [None]
 
 
+def relevant_rescore_tracks_for_application(
+    app: dict[str, Any],
+    requested_tracks: list[str],
+    all_tracks: bool,
+    profiles: dict[str, dict[str, Any]],
+) -> list[str | None]:
+    """Route legacy backlog rows to relevant tracks before spending a JD fetch."""
+    if requested_tracks or all_tracks:
+        return rescore_tracks_for_application(app, requested_tracks, all_tracks)
+
+    configured = [
+        track_id
+        for track_id in rescore_tracks_for_application(app, [], False)
+        if track_id
+    ]
+    candidates = list(dict.fromkeys(configured + list(profiles)))
+    matched = [
+        track_id
+        for track_id in candidates
+        if track_id in profiles and maybe_backlog_title_relevant(app, profiles[track_id])
+    ]
+    if matched:
+        return matched
+    if unclassified_technical_title_relevant(app):
+        return [None]
+    return []
+
+
+def rescore_backlog_priority(
+    app: dict[str, Any],
+    reference_at: dt.datetime,
+    tracks: list[str | None],
+    location_bucket: str,
+) -> tuple[int, int, int, float, str]:
+    """Prefer WA/Remote US, then CA, cached JDs, and fresh records."""
+    location = str(app.get("location") or "")
+    if location_bucket == "preferred":
+        location_rank = 3
+    elif location_bucket == "relocation" and re.search(
+        r"\b(?:california|san francisco|bay area|palo alto|sunnyvale|san jose)\b|(?:^|[,;/])\s*ca\s*(?:[,;/]|$)",
+        location,
+        flags=re.I,
+    ):
+        location_rank = 2
+    elif location_bucket == "relocation":
+        location_rank = 1
+    else:
+        location_rank = 0
+    has_cached_jd = int(
+        any(
+            str(evaluation.get("jd_text") or "").strip()
+            for evaluation in track_evaluations_with_legacy(app).values()
+        )
+    )
+    explicit_track_count = sum(1 for track_id in tracks if track_id)
+    return (
+        location_rank,
+        has_cached_jd,
+        explicit_track_count,
+        reference_at.timestamp(),
+        str(app.get("id") or ""),
+    )
+
+
+def canonical_application_owner_ids(applications: list[dict[str, Any]]) -> dict[str, str]:
+    """Choose one tracker row for each canonical URL, preferring reviewed history."""
+    owners: dict[str, tuple[tuple[int, int, int, float, str], str]] = {}
+    for app in applications:
+        normalized_url = normalize_job_url(str(app.get("url") or ""))
+        app_id = str(app.get("id") or "")
+        if not normalized_url or not app_id:
+            continue
+        evaluations = track_evaluations_with_legacy(app)
+        first_seen = parse_datetime(app.get("first_seen") or app.get("date_found"))
+        rank = (
+            int(bool(str(app.get("date_applied") or "").strip())),
+            len(evaluations),
+            int(isinstance(app.get("fit_score"), (int, float))),
+            -(first_seen.timestamp() if first_seen else float("inf")),
+            app_id,
+        )
+        current = owners.get(normalized_url)
+        if current is None or rank > current[0]:
+            owners[normalized_url] = (rank, app_id)
+    return {url: owner_id for url, (_rank, owner_id) in owners.items()}
+
+
 def command_rescore_backlog(args: argparse.Namespace) -> None:
     require_person_files()
     if args.since_hours is None and args.since_days is None:
@@ -16809,35 +16939,66 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
     tracks_to_validate = DEFAULT_DISCOVER_ALL_TRACKS if args.all_tracks else requested_tracks
     for track_id in tracks_to_validate:
         load_track(track_id)
+    profiles = {}
+    if not requested_tracks and not args.all_tracks:
+        profiles = {
+            track_id: profile_for_track(track_id)
+            for track_id in DEFAULT_DISCOVER_ALL_TRACKS
+        }
+    base_profile = load_profile()
 
     tracker = load_tracker()
+    canonical_owners = canonical_application_owner_ids(tracker.get("applications", []))
     selected = select_rescore_backlog_applications(
         tracker.get("applications", []),
         cutoff,
         statuses,
-        max(0, int(args.limit or 0)),
+        0,
         getattr(args, "bucket", None),
     )
     score_queue: list[dict[str, Any]] = []
     selected_rows: list[tuple[dict[str, Any], dt.datetime, str, list[str | None]]] = []
     prefilter_rejected = 0
+    title_rejected = 0
+    duplicate_rejected = 0
     existing_evaluations_skipped = 0
     tracker_changed = False
     for app, reference_at, reference_field in selected:
+        normalized_url = normalize_job_url(str(app.get("url") or ""))
+        canonical_owner = canonical_owners.get(normalized_url)
+        if canonical_owner and canonical_owner != str(app.get("id") or ""):
+            duplicate_rejected += 1
+            if not args.dry_run and getattr(args, "bucket", None) == "maybe":
+                app["triage_status"] = "quick_rejected"
+                app["triage_reasons"] = [f"duplicate_of:{canonical_owner}"]
+                tracker_changed = True
+            continue
+        location_bucket = location_preference_bucket(str(app.get("location") or ""), base_profile)
+        triage_app = dict(app)
+        triage_app["location_bucket"] = location_bucket
         if getattr(args, "bucket", None) == "maybe":
-            triage_allowed, triage_reasons = maybe_scoring_prefilter(app)
+            triage_allowed, triage_reasons = maybe_scoring_prefilter(triage_app)
             if not args.dry_run:
                 app["triage_status"] = "eligible_for_scoring" if triage_allowed else "quick_rejected"
                 app["triage_reasons"] = triage_reasons or ["passed_quick_prefilter"]
+                app["location_bucket"] = location_bucket
                 tracker_changed = True
             if not triage_allowed:
                 prefilter_rejected += 1
                 continue
-        tracks = rescore_tracks_for_application(
+        tracks = relevant_rescore_tracks_for_application(
             app,
             requested_tracks,
             bool(args.all_tracks),
+            profiles,
         )
+        if not tracks:
+            title_rejected += 1
+            if not args.dry_run and getattr(args, "bucket", None) == "maybe":
+                app["triage_status"] = "quick_rejected"
+                app["triage_reasons"] = ["title_not_relevant_to_configured_tracks"]
+                tracker_changed = True
+            continue
         if bool(getattr(args, "missing_tracks_only", False)):
             evaluations = track_evaluations_with_legacy(app)
             tracks = [
@@ -16852,6 +17013,36 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
                 existing_evaluations_skipped += 1
                 continue
         selected_rows.append((app, reference_at, reference_field, tracks))
+
+    selected_rows.sort(
+        key=lambda row: rescore_backlog_priority(
+            row[0],
+            row[1],
+            row[3],
+            location_preference_bucket(str(row[0].get("location") or ""), base_profile),
+        ),
+        reverse=True,
+    )
+    unique_rows: list[tuple[dict[str, Any], dt.datetime, str, list[str | None]]] = []
+    selected_urls: dict[str, str] = {}
+    for row in selected_rows:
+        app = row[0]
+        normalized_url = normalize_job_url(str(app.get("url") or ""))
+        if normalized_url and normalized_url in selected_urls:
+            duplicate_rejected += 1
+            if not args.dry_run and getattr(args, "bucket", None) == "maybe":
+                app["triage_status"] = "quick_rejected"
+                app["triage_reasons"] = [f"duplicate_of:{selected_urls[normalized_url]}"]
+                tracker_changed = True
+            continue
+        if normalized_url:
+            selected_urls[normalized_url] = str(app.get("id") or "")
+        unique_rows.append(row)
+    selected_rows = unique_rows
+    limit = max(0, int(getattr(args, "limit", 0) or 0))
+    if limit:
+        selected_rows = selected_rows[:limit]
+    for app, reference_at, _reference_field, tracks in selected_rows:
         for track_id in tracks:
             score_queue.append(
                 {
@@ -16871,6 +17062,8 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
             f"Bucket: {getattr(args, 'bucket', None) or 'all'}. "
             f"Jobs: {len(selected_rows)}. Track evaluations: {len(score_queue)}. "
             f"Prefilter rejected: {prefilter_rejected}. "
+            f"Title rejected: {title_rejected}. "
+            f"Duplicate rejected: {duplicate_rejected}. "
             f"Existing evaluations skipped: {existing_evaluations_skipped}."
         )
         if not args.quiet:
@@ -16896,6 +17089,8 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
         f"Jobs: {len(selected_rows)}. "
         f"Track evaluations: {summary['selected_tasks']}. "
         f"Prefilter rejected: {prefilter_rejected}. "
+        f"Title rejected: {title_rejected}. "
+        f"Duplicate rejected: {duplicate_rejected}. "
         f"Existing evaluations skipped: {existing_evaluations_skipped}. "
         f"Failures: {summary['scoring_failed']}."
     )

@@ -1092,6 +1092,26 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(job_search.location_preference_bucket("Spokane Valley", profile), "preferred")
             self.assertEqual(job_search.location_preference_bucket("Richland, Washington", profile), "preferred")
             self.assertEqual(job_search.location_preference_bucket("Wenatchee, WA", profile), "preferred")
+            self.assertEqual(job_search.location_preference_bucket("US, South Dakota, Aberdeen", profile), "relocation")
+            self.assertEqual(job_search.location_preference_bucket("IN, Pune", profile), "rejected")
+            self.assertEqual(job_search.location_preference_bucket("CA, Ontario, Milton", profile), "rejected")
+
+    def test_greenhouse_url_normalization_merges_legacy_and_current_board_hosts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+
+            legacy = job_search.normalize_job_url(
+                "https://boards.greenhouse.io/YoodliInc/jobs/4322980009?gh_src=old"
+            )
+            current = job_search.normalize_job_url(
+                "https://job-boards.greenhouse.io/yoodliinc/jobs/4322980009?gh_src=new"
+            )
+
+            self.assertEqual(legacy, current)
+            self.assertEqual(
+                current,
+                "https://job-boards.greenhouse.io/yoodliinc/jobs/4322980009",
+            )
 
     def test_wa_traditional_it_titles_include_gis_security_erp_and_cloud(self):
         with tempfile.TemporaryDirectory() as tmp:
