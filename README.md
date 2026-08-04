@@ -41,6 +41,8 @@ job-search-private/        private data repository, not published
   data/
     sources.json
     company_watchlist.json
+    local_company_registry.json
+    local_coverage.json
     applications.json
     applications.csv
     seen_jobs.json
@@ -202,6 +204,8 @@ $JOB_SEARCH_PRIVATE_DIR/
 
 `data/sources.json` defines official career boards and ATS sources. Whenever possible, sources should use structured identifiers instead of generic HTML scraping.
 
+`data/local_company_registry.json` is a curated regional company directory. It is separate from `sources.json`: the registry answers which Washington employers should be covered, while `sources.json` answers how each employer is crawled. This separation makes missing local coverage visible instead of silently treating an absent source as a successful search.
+
 Example:
 
 ```json
@@ -318,6 +322,10 @@ python3 job-search/scripts/job_search.py discover-all \
 ```
 
 `discover-all` fetches each configured source once. Full-board ATS adapters return their normal board snapshot; query-based adapters receive the union of source keywords, track overrides, and five broad role-family queries. Each candidate is routed to zero or more tracks, its JD is cached once, and matching tracks receive independent evaluations. Repeat `--track` to limit the run to selected tracks.
+
+The strict freshness cutoff remains the primary path. A second `local_catchup` path retains a newly seen, still-active Washington or registry-company job when its official date is outside seven days but no more than 45 days old. These jobs are marked `review_bucket=maybe` and `discovery_bucket=local_catchup`; they do not appear as strictly fresh jobs. Set `--local-catchup-days 0` to disable the path or choose a different bounded window.
+
+Local portfolio sources can set `auto_promote_ats_sources: true`. When an aggregator returns a direct Greenhouse, Lever, Ashby, Gem, or Workday URL, discovery adds the official company board to `sources.json` with provenance. The new board is scanned on the next run, avoiding repeated dependence on an aggregator while keeping the current run deterministic.
 
 Source fetches run concurrently through `--workers`. After every source has been normalized and filtered, strict candidates are queued for scoring and every maybe candidate receives a cheap prefilter. The prefilter rejects already-applied jobs, clearly senior/III+ titles, known 3+ year requirements, non-US locations, and known citizenship/clearance requirements before any JD fetch. `--score-all-maybe` scores every remaining maybe candidate; omit it to retain the backward-compatible global `--max-maybe-scores 20` limit. JD downloads use `--score-workers`; score calculations and tracker writes remain serial to protect `applications.json`. `--quiet` suppresses per-source and per-score output while preserving the final summary and JSON report.
 
@@ -441,6 +449,7 @@ Discovery run reports preserve `status` and `result_status` and add `health` / `
 ```bash
 python3 job-search/scripts/job_search.py discovery-summary --latest
 python3 job-search/scripts/job_search.py source-health --latest
+python3 job-search/scripts/job_search.py audit-local-coverage
 python3 job-search/scripts/job_search.py application-backlog --bucket priority --preferred-locations --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --bucket relocation --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --track qa_engineer --bucket priority --preferred-locations --exclude-years 3 --hide-intern
@@ -470,6 +479,10 @@ Deduplication uses canonical URLs and source-specific job identifiers where avai
 Canonicalization also normalizes equivalent Greenhouse hosts such as `boards.greenhouse.io` and `job-boards.greenhouse.io`. During backlog planning, duplicate tracker rows are resolved to one canonical owner, preferring applied or already-evaluated history. Duplicate rows remain in the tracker with an auditable `duplicate_of:<application-id>` triage reason; genuinely different ATS job IDs remain separate even when company and title are the same.
 
 By default, fresh discovery prefers jobs with known posting dates. Jobs with unknown posting dates can be included with `--include-unknown-posted-date`.
+
+For Washington-local discovery, the default 45-day catch-up window also permits a newly seen active local job with an unknown date, but sends it to manual review instead of labeling it fresh. A direct ATS returning the job is treated as evidence that it is still open; closed jobs no longer returned by the board cannot re-enter through catch-up.
+
+Run `audit-local-coverage` after editing the registry or completing discovery. The generated `data/local_coverage.json` distinguishes `direct`, `aggregator_only`, `inactive_direct`, and `uncovered` companies and joins direct sources with their latest discovery health. This separates “searched successfully with no new match” from “source failed” and “company has no crawler.”
 
 ## Scoring
 

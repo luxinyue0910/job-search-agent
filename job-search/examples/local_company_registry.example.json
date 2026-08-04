@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "region": "Washington State",
+  "default_local_catchup_days": 45,
+  "companies": [
+    {
+      "company": "Example Seattle Startup",
+      "aliases": ["ExampleCo"],
+      "sector": "enterprise_software",
+      "wa_locations": ["Seattle", "Bellevue"],
+      "source_url": "https://job-boards.greenhouse.io/exampleco",
+      "discovery_sources": ["Example Local Portfolio Jobs"],
+      "active": true
+    },
+    {
+      "company": "Example Regional Hospital",
+      "sector": "healthcare",
+      "wa_locations": ["Tacoma", "Olympia"],
+      "discovery_sources": [],
+      "active": true
+    }
+  ]
+}

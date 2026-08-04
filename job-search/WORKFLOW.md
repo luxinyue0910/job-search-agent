@@ -110,6 +110,16 @@ If a job is found by both QA and SDE searches, the tracker keeps one application
 
 Use `discover-jobs` when freshness matters. It uses ATS APIs for Greenhouse, Lever, and Ashby where possible, records `posted_at`, `updated_at`, `first_seen`, and `last_seen`, and only adds jobs whose posted date is inside the cutoff. Jobs with no posted date are skipped by default. It also applies a title filter for software, backend, AI, new grad, junior, DevOps, platform, startup-friendly engineering titles, and related roles; pass `--no-role-filter` to review every fresh posting. Source fetches run concurrently by default with `--workers 8`, while tracker, seen-job, scoring, and report writes stay single-threaded. Use `--include-maybe-backlog` only when you want unknown-date or fuzzy-title startup candidates saved as `needs_review` with `review_bucket: maybe`. For startup/portfolio sweeps, add `--maybe-old-posted-date` when a newly seen job with an older `posted_at` should enter maybe backlog instead of being dropped.
 
+Washington-local employers use a bounded catch-up path by default. A job returned by an active source can enter `discovery_bucket: local_catchup` when it is new to the tracker, belongs to a WA location or a company in `data/local_company_registry.json`, and was posted within the last 45 days. This does not redefine it as a fresh seven-day job. Use `--local-catchup-days 0` for a strictly fresh-only run.
+
+Portfolio and local aggregator sources may enable `auto_promote_ats_sources`. Direct Greenhouse, Lever, Ashby, Gem, and Workday destinations are then added to `sources.json` with aggregator provenance and scanned on the next run. Review regional coverage with:
+
+```bash
+python3 job-search/scripts/job_search.py audit-local-coverage
+```
+
+The resulting `data/local_coverage.json` reports direct, aggregator-only, inactive, and missing company coverage together with the latest source health.
+
 Discovery reports keep the legacy `status` and `result_status` fields and add `health` plus `failure_category` for source diagnostics. Use `discovery-summary` for a run summary, `source-health` to review failed/config-broken sources, and `daily-review` to write a combined priority/relocation/maybe/rejected/retry review file under the private repo. Location buckets are additive: Washington and Remote US are preferred, other US locations remain eligible with a smaller score, unclear locations go to manual review, and clearly non-US roles are rejected. The Washington-focused traditional IT source set remains regional.
 
 When scoring rules or track definitions change, use `rescore-backlog` to refresh recent unsubmitted tracker entries without rerunning source discovery. It defaults to 30 days and the `found`, `needs_review`, `needs_retry`, and `scored` statuses. Use `--bucket maybe` to limit the run to maybe candidates and apply the cheap senior/experience/location/authorization prefilter. `--all-tracks` targets the five primary track evaluations; `--missing-tracks-only` skips successful evaluations and only fills missing or retryable results. Without `--all-tracks`, the command uses repeatable `--track` values or each application's existing matched/evaluated tracks. Start with `--dry-run` for a non-mutating selection preview.

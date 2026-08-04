@@ -48,6 +48,7 @@ APPLICATIONS_JSON = PRIVATE_BASE_ROOT / "data" / "applications.json"
 APPLICATIONS_CSV = PRIVATE_BASE_ROOT / "data" / "applications.csv"
 SOURCES_PATH = PRIVATE_BASE_ROOT / "data" / "sources.json"
 WATCHLIST_PATH = PRIVATE_BASE_ROOT / "data" / "company_watchlist.json"
+LOCAL_COMPANY_REGISTRY_PATH = PRIVATE_BASE_ROOT / "data" / "local_company_registry.json"
 SEEN_JOBS_PATH = PRIVATE_BASE_ROOT / "data" / "seen_jobs.json"
 SEEN_JOBS_DIR = PRIVATE_BASE_ROOT / "data" / "seen_jobs"
 SEEN_JOBS_INDEX_PATH = SEEN_JOBS_DIR / "index.json"
@@ -56,6 +57,8 @@ TRACKS_DIR = PRIVATE_BASE_ROOT / "tracks"
 OUTPUT_DIR = PRIVATE_BASE_ROOT / "output"
 NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
 DISCOVERY_RUNS_DIR = PRIVATE_BASE_ROOT / "data" / "discovery_runs"
+_LOCAL_COMPANY_REGISTRY_CACHE: tuple[str, float, list[dict[str, Any]]] | None = None
+_LOCAL_COMPANY_INDEX_CACHE: dict[str, dict[str, Any]] = {}
 SEEN_JOBS_SHARD_COUNT = 256
 SEEN_JOBS_INTERNAL_KEYS = {"_seen_jobs_format"}
 
@@ -286,7 +289,7 @@ def configure_person(person: str) -> None:
     The root files remain the backward-compatible default. Any explicit person
     uses job-search/profiles/<person>/..., which keeps private data separate.
     """
-    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, SEEN_JOBS_PATH, SEEN_JOBS_DIR, SEEN_JOBS_INDEX_PATH, SEEN_JOBS_SHARDS_DIR, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR, DISCOVERY_RUNS_DIR
+    global PERSON, PERSON_ROOT, PROFILE_PATH, APPLICATIONS_JSON, APPLICATIONS_CSV, SOURCES_PATH, WATCHLIST_PATH, LOCAL_COMPANY_REGISTRY_PATH, SEEN_JOBS_PATH, SEEN_JOBS_DIR, SEEN_JOBS_INDEX_PATH, SEEN_JOBS_SHARDS_DIR, TRACKS_DIR, OUTPUT_DIR, NOTIFICATIONS_DIR, DISCOVERY_RUNS_DIR, _LOCAL_COMPANY_REGISTRY_CACHE, _LOCAL_COMPANY_INDEX_CACHE
 
     PERSON = slugify(person or "default")
     default_profile_dir = PRIVATE_BASE_ROOT / "profiles" / "default"
@@ -299,6 +302,7 @@ def configure_person(person: str) -> None:
     APPLICATIONS_CSV = PERSON_ROOT / "data" / "applications.csv"
     SOURCES_PATH = PERSON_ROOT / "data" / "sources.json"
     WATCHLIST_PATH = PERSON_ROOT / "data" / "company_watchlist.json"
+    LOCAL_COMPANY_REGISTRY_PATH = PERSON_ROOT / "data" / "local_company_registry.json"
     SEEN_JOBS_PATH = PERSON_ROOT / "data" / "seen_jobs.json"
     SEEN_JOBS_DIR = PERSON_ROOT / "data" / "seen_jobs"
     SEEN_JOBS_INDEX_PATH = SEEN_JOBS_DIR / "index.json"
@@ -307,6 +311,8 @@ def configure_person(person: str) -> None:
     OUTPUT_DIR = PERSON_ROOT / "output"
     NOTIFICATIONS_DIR = OUTPUT_DIR / "notifications"
     DISCOVERY_RUNS_DIR = PERSON_ROOT / "data" / "discovery_runs"
+    _LOCAL_COMPANY_REGISTRY_CACHE = None
+    _LOCAL_COMPANY_INDEX_CACHE = {}
 
 
 def require_person_files() -> None:
@@ -1345,6 +1351,22 @@ def discover_lever_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
+def ashby_job_location(job: dict[str, Any]) -> str:
+    locations: list[str] = []
+    primary = str(job.get("location", "") or "").strip()
+    if primary:
+        locations.append(primary)
+    secondary = job.get("secondaryLocations")
+    if isinstance(secondary, list):
+        for item in secondary:
+            if not isinstance(item, dict):
+                continue
+            location = str(item.get("location", "") or "").strip()
+            if location and location not in locations:
+                locations.append(location)
+    return " / ".join(locations)
+
+
 def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     board = ashby_board_from_source(source)
     if not board:
@@ -1362,7 +1384,7 @@ def discover_ashby_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
         url = normalize_job_url(str(job.get("jobUrl") or ""))
         if not url:
             continue
-        location = str(job.get("location", "") or "")
+        location = ashby_job_location(job)
         if not source_location_allowed(source, location):
             continue
         candidates.append(
@@ -12004,7 +12026,7 @@ def ashby_candidate_from_url(url: str) -> dict[str, Any] | None:
             "role": job.get("title") or infer_role_from_url(job_url or url),
             "url": job_url or normalize_job_url(url),
             "platform": "ashby",
-            "location": job.get("location", "") or "",
+            "location": ashby_job_location(job),
             "posted_at": normalize_datetime(job.get("publishedDate") or job.get("publishedAt") or job.get("createdAt")),
             "updated_at": normalize_datetime(job.get("updatedAt")),
             "source": f"https://jobs.ashbyhq.com/{board}",
@@ -12183,6 +12205,76 @@ def maybe_backlog_title_relevant(candidate: dict[str, Any], profile: dict[str, A
     if not patterns:
         patterns = tuple(pattern for values in MAYBE_TITLE_PATTERNS.values() for pattern in values)
     return any(re.search(pattern, role, flags=re.I) for pattern in patterns)
+
+
+def normalize_company_identity(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return re.sub(
+        r"\b(?:incorporated|corporation|company|technologies|technology|holdings|inc|corp|co|llc|ltd)\b",
+        "",
+        normalized,
+    ).strip()
+
+
+def load_local_company_registry() -> list[dict[str, Any]]:
+    global _LOCAL_COMPANY_REGISTRY_CACHE, _LOCAL_COMPANY_INDEX_CACHE
+    if not LOCAL_COMPANY_REGISTRY_PATH.exists():
+        _LOCAL_COMPANY_REGISTRY_CACHE = None
+        _LOCAL_COMPANY_INDEX_CACHE = {}
+        return []
+    cache_key = str(LOCAL_COMPANY_REGISTRY_PATH.resolve())
+    modified_at = LOCAL_COMPANY_REGISTRY_PATH.stat().st_mtime
+    if _LOCAL_COMPANY_REGISTRY_CACHE and _LOCAL_COMPANY_REGISTRY_CACHE[:2] == (cache_key, modified_at):
+        return _LOCAL_COMPANY_REGISTRY_CACHE[2]
+    data = load_json(LOCAL_COMPANY_REGISTRY_PATH)
+    companies = data.get("companies", [])
+    active_companies = [
+        item for item in companies if isinstance(item, dict) and truthy_source_flag(item.get("active"), True)
+    ]
+    _LOCAL_COMPANY_REGISTRY_CACHE = (cache_key, modified_at, active_companies)
+    _LOCAL_COMPANY_INDEX_CACHE = {
+        normalize_company_identity(name): company
+        for company in active_companies
+        for name in [company.get("company", ""), *(company.get("aliases") or [])]
+        if str(name).strip()
+    }
+    return active_companies
+
+
+def local_registry_company(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    candidate_name = normalize_company_identity(candidate.get("company"))
+    if not candidate_name:
+        return None
+    load_local_company_registry()
+    return _LOCAL_COMPANY_INDEX_CACHE.get(candidate_name)
+
+
+def candidate_is_wa_local(candidate: dict[str, Any]) -> bool:
+    location = str(candidate.get("location") or "")
+    if WA_LOCATION_PATTERN.search(location):
+        return True
+    return local_registry_company(candidate) is not None
+
+
+def local_catchup_reason(
+    candidate: dict[str, Any],
+    args: argparse.Namespace,
+    posted_at: dt.datetime | None,
+    cutoff: dt.datetime | None,
+    newly_relevant: bool,
+) -> str:
+    """Return a review reason for active WA jobs missed by the strict freshness window."""
+    catchup_days = max(0.0, float(getattr(args, "local_catchup_days", 45) or 0))
+    if not catchup_days or not newly_relevant or not candidate_is_wa_local(candidate):
+        return ""
+    if posted_at is None:
+        return "local_catchup_unknown_posted_at"
+    if cutoff is None or posted_at >= cutoff:
+        return ""
+    oldest_allowed = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=catchup_days)
+    if posted_at < oldest_allowed:
+        return ""
+    return "local_catchup_old_posted_at"
 
 
 def unclassified_technical_title_relevant(candidate: dict[str, Any]) -> bool:
@@ -12515,6 +12607,8 @@ def empty_discovery_stats() -> dict[str, int]:
         "added": 0,
         "existing": 0,
         "maybe_backlog": 0,
+        "local_catchup": 0,
+        "promoted_sources": 0,
         "maybe_eligible_for_scoring": 0,
         "maybe_prefilter_rejected": 0,
         "skipped_old": 0,
@@ -12601,15 +12695,29 @@ def process_discovered_candidates(
 
         posted_at = parse_datetime(candidate.get("posted_at"))
         maybe_reasons: list[str] = []
+        local_catchup = False
+        catchup_reason = local_catchup_reason(
+            candidate,
+            args,
+            posted_at,
+            cutoff,
+            seen_created or needs_existing_cross_track_evaluation,
+        )
         if not posted_at:
             if not args.include_unknown_posted_date:
-                if getattr(args, "include_maybe_backlog", False):
+                if catchup_reason:
+                    maybe_reasons.append(catchup_reason)
+                    local_catchup = True
+                elif getattr(args, "include_maybe_backlog", False):
                     maybe_reasons.append("unknown_posted_at")
                 else:
                     stats["skipped_unknown_date"] += 1
                     continue
         elif cutoff and posted_at < cutoff:
-            if (
+            if catchup_reason:
+                maybe_reasons.append(catchup_reason)
+                local_catchup = True
+            elif (
                 getattr(args, "include_maybe_backlog", False)
                 and getattr(args, "maybe_old_posted_date", False)
                 and (seen_created or needs_existing_cross_track_evaluation)
@@ -12642,11 +12750,13 @@ def process_discovered_candidates(
             maybe_reasons.append("unknown_location")
         if maybe_reasons:
             candidate["review_bucket"] = "maybe"
-            candidate["discovery_bucket"] = "maybe_backlog"
+            candidate["discovery_bucket"] = "local_catchup" if local_catchup else "maybe_backlog"
             existing_notes = str(candidate.get("notes") or "").strip()
-            reason_text = "maybe_backlog: " + ", ".join(maybe_reasons)
+            reason_text = f"{candidate['discovery_bucket']}: " + ", ".join(maybe_reasons)
             candidate["notes"] = "; ".join(item for item in [existing_notes, reason_text] if item)
             stats["maybe_backlog"] += 1
+            if local_catchup:
+                stats["local_catchup"] += 1
 
         app, created = upsert_application(candidate)
         existing_apps_by_url[key] = app
@@ -12667,7 +12777,7 @@ def process_discovered_candidates(
                 {
                     "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
                     "review_bucket": "maybe",
-                    "discovery_bucket": "maybe_backlog",
+                    "discovery_bucket": "local_catchup" if local_catchup else "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
                     "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
@@ -12799,16 +12909,30 @@ def process_discovered_candidates_all_tracks(
             for key_name in evaluation_keys
         )
         maybe_reasons: list[str] = []
+        local_catchup = False
         posted_at = parse_datetime(candidate.get("posted_at"))
+        catchup_reason = local_catchup_reason(
+            candidate,
+            args,
+            posted_at,
+            cutoff,
+            seen_created or existing_app is None or needs_cross_track_evaluation,
+        )
         if not posted_at:
             if not args.include_unknown_posted_date:
-                if getattr(args, "include_maybe_backlog", False):
+                if catchup_reason:
+                    maybe_reasons.append(catchup_reason)
+                    local_catchup = True
+                elif getattr(args, "include_maybe_backlog", False):
                     maybe_reasons.append("unknown_posted_at")
                 else:
                     stats["skipped_unknown_date"] += 1
                     continue
         elif cutoff and posted_at < cutoff:
-            if (
+            if catchup_reason:
+                maybe_reasons.append(catchup_reason)
+                local_catchup = True
+            elif (
                 getattr(args, "include_maybe_backlog", False)
                 and getattr(args, "maybe_old_posted_date", False)
                 and (seen_created or existing_app is None or needs_cross_track_evaluation)
@@ -12844,11 +12968,13 @@ def process_discovered_candidates_all_tracks(
 
         if maybe_reasons:
             candidate["review_bucket"] = "maybe"
-            candidate["discovery_bucket"] = "maybe_backlog"
+            candidate["discovery_bucket"] = "local_catchup" if local_catchup else "maybe_backlog"
             existing_notes = str(candidate.get("notes") or "").strip()
-            reason_text = "maybe_backlog: " + ", ".join(maybe_reasons)
+            reason_text = f"{candidate['discovery_bucket']}: " + ", ".join(maybe_reasons)
             candidate["notes"] = "; ".join(item for item in [existing_notes, reason_text] if item)
             stats["maybe_backlog"] += 1
+            if local_catchup:
+                stats["local_catchup"] += 1
 
         app, created = upsert_application(candidate)
         tracker_apps_by_url[key] = app
@@ -12869,7 +12995,7 @@ def process_discovered_candidates_all_tracks(
                 {
                     "status": "needs_review" if app.get("status") == "found" else app.get("status", "needs_review"),
                     "review_bucket": "maybe",
-                    "discovery_bucket": "maybe_backlog",
+                    "discovery_bucket": "local_catchup" if local_catchup else "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
                     "notes": candidate.get("notes", app.get("notes", "")),
                     "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
@@ -13220,19 +13346,21 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
         f"- Added: {totals.get('added', 0)}",
         f"- Existing: {totals.get('existing', 0)}",
         f"- Maybe backlog: {totals.get('maybe_backlog', 0)}",
+        f"- Local catchup: {totals.get('local_catchup', 0)}",
+        f"- ATS sources promoted: {totals.get('promoted_sources', 0)}",
         f"- Maybe eligible for scoring: {totals.get('maybe_eligible_for_scoring', 0)}",
         f"- Maybe prefilter rejected: {totals.get('maybe_prefilter_rejected', 0)}",
         f"- Maybe scored: {totals.get('maybe_scored', 0)}",
         "",
-        "| Status | Result | Health | Failure | Attempts | Company | Platform | Candidates | Added | Existing | Maybe | Maybe eligible | Maybe rejected | Old | Unknown date | Title | Location | Error / warnings |",
-        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Status | Result | Health | Failure | Attempts | Company | Platform | Candidates | Added | Existing | Maybe | Local catchup | Promoted sources | Maybe eligible | Maybe rejected | Old | Unknown date | Title | Location | Error / warnings |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for source in report.get("sources", []):
         stats = source.get("stats", {})
         warning = source.get("error") or source.get("warnings") or ""
         warning = " ".join(str(warning).split())[:180]
         lines.append(
-            "| {status} | {result} | {health} | {failure} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {maybe} | {maybe_eligible} | {maybe_rejected} | {old} | {unknown} | {title} | {location} | {warning} |".format(
+            "| {status} | {result} | {health} | {failure} | {attempts} | {company} | {platform} | {candidates} | {added} | {existing} | {maybe} | {local_catchup} | {promoted_sources} | {maybe_eligible} | {maybe_rejected} | {old} | {unknown} | {title} | {location} | {warning} |".format(
                 status=source.get("status", ""),
                 result=source.get("result_status", ""),
                 health=source.get("health", ""),
@@ -13244,6 +13372,8 @@ def write_discovery_run_report(report: dict[str, Any]) -> Path:
                 added=stats.get("added", 0),
                 existing=stats.get("existing", 0),
                 maybe=stats.get("maybe_backlog", 0),
+                local_catchup=stats.get("local_catchup", 0),
+                promoted_sources=stats.get("promoted_sources", 0),
                 maybe_eligible=stats.get("maybe_eligible_for_scoring", 0),
                 maybe_rejected=stats.get("maybe_prefilter_rejected", 0),
                 old=stats.get("skipped_old", 0),
@@ -13299,6 +13429,8 @@ def print_source_rows(title: str, rows: list[dict[str, Any]], limit: int = 12) -
             f"candidates={source.get('candidates_returned', 0)}, "
             f"added={stats.get('added', 0)}, existing={stats.get('existing', 0)}, "
             f"maybe={stats.get('maybe_backlog', 0)}, "
+            f"local_catchup={stats.get('local_catchup', 0)}, "
+            f"promoted_sources={stats.get('promoted_sources', 0)}, "
             f"maybe_eligible={stats.get('maybe_eligible_for_scoring', 0)}, "
             f"maybe_rejected={stats.get('maybe_prefilter_rejected', 0)}, "
             f"old={stats.get('skipped_old', 0)}, title={stats.get('skipped_title', 0)}, "
@@ -13348,6 +13480,8 @@ def command_discovery_summary(args: argparse.Namespace) -> None:
         f"title={totals.get('skipped_title', 0)}, "
         f"location={totals.get('skipped_location', 0)}, "
         f"maybe={totals.get('maybe_backlog', 0)}, "
+        f"local_catchup={totals.get('local_catchup', 0)}, "
+        f"promoted_sources={totals.get('promoted_sources', 0)}, "
         f"maybe_eligible={totals.get('maybe_eligible_for_scoring', 0)}, "
         f"maybe_rejected={totals.get('maybe_prefilter_rejected', 0)}, "
         f"maybe_scored={totals.get('maybe_scored', 0)}"
@@ -15366,7 +15500,16 @@ def candidate_from_watchlist_url(
 
 
 def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
-    source_url = candidate.get("source") or candidate.get("url")
+    urls = [
+        str(candidate.get("url") or "").strip(),
+        str(candidate.get("source") or "").strip(),
+    ]
+    source_url = next(
+        (url for url in urls if url and detect_platform(url) in {"greenhouse", "lever", "ashby", "gem", "workday"}),
+        "",
+    )
+    if not source_url:
+        return None
     platform = detect_platform(source_url)
     if platform == "greenhouse":
         board = greenhouse_board_from_source({"url": source_url})
@@ -15424,7 +15567,10 @@ def source_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def update_sources_from_candidates(candidates: list[dict[str, Any]]) -> int:
+def update_sources_from_candidates(
+    candidates: list[dict[str, Any]],
+    discovered_from: str = "web_discovery",
+) -> int:
     data = load_json(SOURCES_PATH)
     sources = data.setdefault("sources", [])
     existing_urls = {normalize_job_url(source.get("url", "")) for source in sources}
@@ -15433,6 +15579,10 @@ def update_sources_from_candidates(candidates: list[dict[str, Any]]) -> int:
         source = source_from_candidate(candidate)
         if not source:
             continue
+        source["source_quality"] = source_quality(source)[0]
+        source["posted_at_quality"] = source_quality(source)[1]
+        source["discovered_from"] = discovered_from
+        source["auto_promoted_at"] = now_utc_iso()
         source_url = normalize_job_url(source["url"])
         if source_url in existing_urls:
             continue
@@ -16275,6 +16425,166 @@ def command_audit_sources(args: argparse.Namespace) -> None:
         print(f"Wrote source_quality and posted_at_quality to {SOURCES_PATH}.")
 
 
+LOCAL_AGGREGATOR_PLATFORMS = {
+    "builtin_jobs",
+    "consider_jobs",
+    "getro_jobs",
+    "startup_jobs",
+}
+
+
+def source_matches_registry_company(source: dict[str, Any], company: dict[str, Any]) -> bool:
+    source_name = normalize_company_identity(source.get("company"))
+    registry_names = {
+        normalize_company_identity(name)
+        for name in [company.get("company", ""), *(company.get("aliases") or [])]
+        if str(name).strip()
+    }
+    if source_name and source_name in registry_names:
+        return True
+    configured_url = normalize_job_url(str(company.get("source_url") or ""))
+    return bool(configured_url and normalize_job_url(str(source.get("url") or "")) == configured_url)
+
+
+def command_audit_local_coverage(args: argparse.Namespace) -> None:
+    require_person_files()
+    companies = load_local_company_registry()
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    latest_report: dict[str, Any] = {}
+    report_path = ""
+    try:
+        selected_path = discovery_run_path(getattr(args, "run_id", ""))
+        latest_report = load_json(selected_path)
+        report_path = str(selected_path)
+    except SystemExit:
+        latest_report = {}
+    latest_by_company = {
+        normalize_company_identity(item.get("company")): item
+        for item in latest_report.get("sources", [])
+        if item.get("company")
+    }
+
+    rows: list[dict[str, Any]] = []
+    for company in sorted(companies, key=lambda item: str(item.get("company", "")).lower()):
+        matching = [source for source in sources if source_matches_registry_company(source, company)]
+        direct = [
+            source
+            for source in matching
+            if source_platform(source) not in LOCAL_AGGREGATOR_PLATFORMS | {"custom"}
+        ]
+        active_direct = [source for source in direct if source_is_active(source)]
+        aggregator_names = [str(item) for item in company.get("discovery_sources", []) if str(item).strip()]
+        aggregator_sources = [
+            source
+            for source in sources
+            if str(source.get("company") or "") in aggregator_names and source_is_active(source)
+        ]
+        if active_direct:
+            coverage = "direct"
+        elif direct:
+            coverage = "inactive_direct"
+        elif aggregator_sources:
+            coverage = "aggregator_only"
+        else:
+            coverage = "uncovered"
+
+        health_rows = []
+        for source in active_direct:
+            latest = latest_by_company.get(normalize_company_identity(source.get("company")))
+            if latest:
+                health_rows.append(
+                    {
+                        "company": source.get("company", ""),
+                        "platform": source_platform(source),
+                        "status": latest.get("status", ""),
+                        "result_status": latest.get("result_status", ""),
+                        "health": latest.get("health", ""),
+                        "error": latest.get("error") or latest.get("warnings") or "",
+                    }
+                )
+        if not report_path:
+            latest_scan_status = "no_discovery_report"
+        elif not active_direct:
+            latest_scan_status = "no_active_direct_source"
+        elif not health_rows:
+            latest_scan_status = "not_attempted_in_report"
+        elif any(
+            health.get("status") in {"failed", "failed_after_retries", "partial_success"}
+            or health.get("health") in {"config_broken", "adapter_broken", "fetch_failed", "partial_success"}
+            for health in health_rows
+        ):
+            latest_scan_status = "search_failed"
+        elif any(health.get("result_status") == "new_jobs_added" for health in health_rows):
+            latest_scan_status = "new_jobs_added"
+        else:
+            latest_scan_status = "searched_no_new_jobs"
+        rows.append(
+            {
+                "company": company.get("company", ""),
+                "sector": company.get("sector", ""),
+                "wa_locations": company.get("wa_locations", []),
+                "coverage": coverage,
+                "direct_sources": [
+                    {
+                        "company": source.get("company", ""),
+                        "platform": source_platform(source),
+                        "url": source.get("url", ""),
+                        "active": source_is_active(source),
+                    }
+                    for source in direct
+                ],
+                "aggregator_sources": aggregator_names,
+                "latest_scan_status": latest_scan_status,
+                "latest_health": health_rows,
+            }
+        )
+
+    counts = collections.Counter(row["coverage"] for row in rows)
+    scan_counts = collections.Counter(row["latest_scan_status"] for row in rows)
+    payload = {
+        "generated_at": now_utc_iso(),
+        "registry_path": str(LOCAL_COMPANY_REGISTRY_PATH),
+        "sources_path": str(SOURCES_PATH),
+        "discovery_report": report_path,
+        "totals": {
+            "companies": len(rows),
+            "coverage": dict(sorted(counts.items())),
+            "latest_scan": dict(sorted(scan_counts.items())),
+        },
+        "companies": rows,
+    }
+    output_value = str(getattr(args, "output", "") or "data/local_coverage.json")
+    output_path = Path(output_value).expanduser()
+    if not output_path.is_absolute():
+        output_path = PERSON_ROOT / output_path
+    write_json(output_path, payload)
+
+    print(f"Local company coverage: {len(rows)} companies")
+    print(
+        "- "
+        + ", ".join(
+            f"{key}={counts.get(key, 0)}"
+            for key in ["direct", "aggregator_only", "inactive_direct", "uncovered"]
+        )
+    )
+    print("- Latest scan: " + ", ".join(f"{key}={value}" for key, value in sorted(scan_counts.items())))
+    if report_path:
+        print(f"- Latest discovery report: {report_path}")
+    for row in rows:
+        if row["coverage"] == "direct" and row["latest_scan_status"] in {
+            "searched_no_new_jobs",
+            "new_jobs_added",
+        }:
+            continue
+        health = row["latest_health"][0] if row["latest_health"] else {}
+        health_text = f"; latest={health.get('status')}" if health else ""
+        print(
+            f"  {row['coverage']}: {row['company']}; "
+            f"scan={row['latest_scan_status']}{health_text}"
+        )
+    print(f"Coverage report: {output_path}")
+
+
 def command_find_jobs(args: argparse.Namespace) -> None:
     require_person_files()
     track = load_track(getattr(args, "track", None))
@@ -16516,6 +16826,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "include_unknown_posted_date": bool(args.include_unknown_posted_date),
         "include_maybe_backlog": bool(getattr(args, "include_maybe_backlog", False)),
         "maybe_old_posted_date": bool(getattr(args, "maybe_old_posted_date", False)),
+        "local_catchup_days": float(getattr(args, "local_catchup_days", 45) or 0),
         "include_inactive_sources": bool(getattr(args, "include_inactive_sources", False)),
         "no_role_filter": bool(args.no_role_filter),
         "score": bool(args.score),
@@ -16656,6 +16967,15 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 )
             continue
 
+        promoted_sources = 0
+        if truthy_source_flag(source.get("auto_promote_ats_sources"), default=False):
+            local_promotion_candidates = [
+                candidate for candidate in candidates if candidate_is_wa_local(candidate)
+            ]
+            promoted_sources = update_sources_from_candidates(
+                local_promotion_candidates,
+                discovered_from=f"aggregator:{source.get('company', 'unknown')}",
+            )
         effective_cutoff = source_discovery_cutoff(source, cutoff)
         source_report["cutoff"] = effective_cutoff.replace(microsecond=0).isoformat() if effective_cutoff else ""
         if track_ids:
@@ -16677,6 +16997,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 effective_cutoff,
                 current_seen_at,
             )
+        source_stats["promoted_sources"] = promoted_sources
         source_report["candidates_returned"] = len(candidates)
         source_report["stats"] = source_stats
         result_status = discovery_source_status(len(candidates), source_stats, str(source_report["warnings"]))
@@ -16700,6 +17021,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 f"    {status_detail}: candidates={len(candidates)} "
                 f"added={source_stats['added']} existing={source_stats['existing']} "
                 f"maybe={source_stats['maybe_backlog']} maybe_scored={source_stats['maybe_scored']} "
+                f"local_catchup={source_stats['local_catchup']} promoted_sources={source_stats['promoted_sources']} "
                 f"maybe_eligible={source_stats['maybe_eligible_for_scoring']} "
                 f"maybe_rejected={source_stats['maybe_prefilter_rejected']} "
                 f"old={source_stats['skipped_old']} unknown_date={source_stats['skipped_unknown_date']} "
@@ -16743,6 +17065,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
         f"Discovered: {stats['discovered']}. Added: {stats['added']}. Existing: {stats['existing']}. "
         f"Maybe backlog: {stats['maybe_backlog']}. Maybe scored: {stats['maybe_scored']}. "
+        f"Local catchup: {stats['local_catchup']}. Promoted sources: {stats['promoted_sources']}. "
         f"Maybe eligible: {stats['maybe_eligible_for_scoring']}. "
         f"Maybe prefilter rejected: {stats['maybe_prefilter_rejected']}. "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
@@ -18529,6 +18852,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --include-maybe-backlog, keep newly seen candidates whose posted_at is older than the cutoff in the maybe bucket.",
     )
     discover.add_argument(
+        "--local-catchup-days",
+        type=float,
+        default=45,
+        help="Also retain newly seen active WA/local-company jobs posted within this many days. Use 0 to disable.",
+    )
+    discover.add_argument(
         "--include-inactive-sources",
         action="store_true",
         help="Also run sources marked active=false. Default skips inactive sources.",
@@ -18607,6 +18936,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--maybe-old-posted-date",
         action="store_true",
         help="With --include-maybe-backlog, keep newly seen old-post candidates for review.",
+    )
+    discover_all.add_argument(
+        "--local-catchup-days",
+        type=float,
+        default=45,
+        help="Also retain newly seen active WA/local-company jobs posted within this many days. Use 0 to disable.",
     )
     discover_all.add_argument(
         "--include-inactive-sources",
@@ -18821,6 +19156,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = subcommands.add_parser("audit-sources", help="Summarize configured sources by platform and confidence.")
     audit.add_argument("--write-quality", action="store_true", help="Write source_quality and posted_at_quality fields to sources.json.")
+    local_audit = subcommands.add_parser(
+        "audit-local-coverage",
+        help="Compare the WA company registry with direct ATS sources and the latest discovery health report.",
+    )
+    local_audit.add_argument("--run-id", help="Discovery run id or JSON path. Defaults to the latest report.")
+    local_audit.add_argument(
+        "--output",
+        help="JSON output path. Defaults to data/local_coverage.json in the private workspace.",
+    )
     discovery_summary = subcommands.add_parser("discovery-summary", help="Summarize a discovery run report.")
     discovery_summary.add_argument("--latest", action="store_true", help="Summarize the most recent discovery run report.")
     discovery_summary.add_argument("--run-id", help="Run id or JSON report path. Defaults to latest.")
@@ -18919,6 +19263,8 @@ def main() -> None:
         command_classify_sources(args)
     elif args.command == "audit-sources":
         command_audit_sources(args)
+    elif args.command == "audit-local-coverage":
+        command_audit_local_coverage(args)
     elif args.command == "discovery-summary":
         command_discovery_summary(args)
     elif args.command == "source-health":

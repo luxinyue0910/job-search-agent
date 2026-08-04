@@ -62,6 +62,7 @@ def discover_args(**overrides):
         "include_unknown_posted_date": False,
         "include_maybe_backlog": False,
         "maybe_old_posted_date": False,
+        "local_catchup_days": 0,
         "include_inactive_sources": False,
         "no_role_filter": False,
         "score": False,
@@ -129,6 +130,13 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                         "location": "Denver, CO",
                         "publishedDate": "2026-07-23T12:30:00Z",
                     },
+                    {
+                        "title": "Backend Engineer",
+                        "jobUrl": "https://jobs.ashbyhq.com/example/multi-location-job",
+                        "location": "Denver, CO",
+                        "secondaryLocations": [{"location": "Seattle, WA"}],
+                        "publishedAt": "2026-07-24T12:30:00Z",
+                    },
                 ]
             }
 
@@ -143,8 +151,10 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                     }
                 )
 
-            self.assertEqual(len(candidates), 1)
+            self.assertEqual(len(candidates), 2)
             self.assertEqual(candidates[0]["location"], "Seattle, WA")
+            self.assertEqual(candidates[1]["location"], "Denver, CO / Seattle, WA")
+            self.assertEqual(candidates[1]["posted_at"], "2026-07-24T12:30:00+00:00")
 
     def test_cyber_recruiter_adapter_walks_groups_and_enriches_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5628,6 +5638,98 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                 job_search.command_discover_jobs(discover_args(include_maybe_backlog=True, maybe_old_posted_date=True))
             tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
             self.assertEqual(len(tracker["applications"]), 1)
+
+    def test_local_catchup_keeps_new_active_wa_job_outside_strict_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(
+                private_root,
+                [{"company": "LocalCo", "platform": "greenhouse", "url": "https://example.com/jobs"}],
+            )
+            job_search = load_job_search(private_root)
+            posted_at = (
+                job_search.dt.datetime.now(job_search.dt.timezone.utc) - job_search.dt.timedelta(days=20)
+            ).replace(microsecond=0).isoformat()
+            candidate = {
+                "company": "LocalCo",
+                "role": "Software Engineer",
+                "url": "https://example.com/jobs/local",
+                "platform": "greenhouse",
+                "location": "Seattle, WA",
+                "posted_at": posted_at,
+            }
+
+            stats = job_search.process_discovered_candidates(
+                [candidate],
+                discover_args(local_catchup_days=45),
+                job_search.load_profile(),
+                {"jobs": {}},
+                job_search.dt.datetime.now(job_search.dt.timezone.utc) - job_search.dt.timedelta(days=7),
+                job_search.now_utc_iso(),
+            )
+            app = job_search.load_tracker()["applications"][0]
+
+            self.assertEqual(stats["local_catchup"], 1)
+            self.assertEqual(app["discovery_bucket"], "local_catchup")
+            self.assertEqual(app["review_bucket"], "maybe")
+            self.assertIn("local_catchup_old_posted_at", app["notes"])
+
+    def test_aggregator_candidate_promotes_destination_ats_board(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
+            candidate = {
+                "company": "Pipe17",
+                "role": "Junior Software Engineer",
+                "url": "https://job-boards.greenhouse.io/pipe17/jobs/4717950005",
+                "source": "https://jobs.madrona.com/jobs",
+            }
+
+            source = job_search.source_from_candidate(candidate)
+            added = job_search.update_sources_from_candidates([candidate], discovered_from="aggregator:Madrona Jobs")
+            sources = json.loads((private_root / "data" / "sources.json").read_text(encoding="utf-8"))["sources"]
+
+            self.assertEqual(source["board"], "pipe17")
+            self.assertEqual(added, 1)
+            self.assertEqual(sources[0]["platform"], "greenhouse")
+            self.assertEqual(sources[0]["discovered_from"], "aggregator:Madrona Jobs")
+
+    def test_local_coverage_audit_distinguishes_direct_and_aggregator_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(
+                private_root,
+                [
+                    {"company": "DirectCo", "platform": "greenhouse", "url": "https://job-boards.greenhouse.io/directco"},
+                    {"company": "Local Portfolio", "platform": "getro_jobs", "url": "https://jobs.example.com/jobs"},
+                ],
+            )
+            (private_root / "data" / "local_company_registry.json").write_text(
+                json.dumps(
+                    {
+                        "companies": [
+                            {"company": "DirectCo", "wa_locations": ["Seattle"]},
+                            {
+                                "company": "PortfolioCo",
+                                "wa_locations": ["Bellevue"],
+                                "discovery_sources": ["Local Portfolio"],
+                            },
+                            {"company": "MissingCo", "wa_locations": ["Tacoma"]},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+
+            job_search.command_audit_local_coverage(argparse.Namespace(run_id=None, output=None))
+            report = json.loads((private_root / "data" / "local_coverage.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(report["totals"]["coverage"]["direct"], 1)
+            self.assertEqual(report["totals"]["coverage"]["aggregator_only"], 1)
+            self.assertEqual(report["totals"]["coverage"]["uncovered"], 1)
+            self.assertEqual(report["totals"]["latest_scan"]["no_discovery_report"], 3)
 
     def test_inactive_sources_are_skipped_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
