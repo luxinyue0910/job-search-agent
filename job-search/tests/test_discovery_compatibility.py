@@ -6148,6 +6148,34 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertTrue(job_search.discovery_title_matches({"role": "Product Engineer", "url": "https://example.com"}, profile))
             self.assertTrue(job_search.discovery_title_matches({"role": "Developer Tools Engineer", "url": "https://example.com"}, profile))
 
+    def test_system_development_titles_route_to_sde_and_infra_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            for track_id in ["general_sde", "data_center_infra"]:
+                profile = {"_track": {"id": track_id}}
+                for role in [
+                    "System Development Engineer, ESCAPE",
+                    "Systems Development Engineer",
+                    "System Dev Engineer",
+                    "Systems Dev Engineer II",
+                ]:
+                    with self.subTest(track_id=track_id, role=role):
+                        self.assertTrue(
+                            job_search.maybe_backlog_title_relevant({"role": role}, profile)
+                        )
+
+    def test_system_development_titles_match_default_discovery_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            profile = {"targets": {"roles": [], "levels": []}}
+            for role in ["System Development Engineer", "Systems Dev Engineer"]:
+                with self.subTest(role=role):
+                    self.assertTrue(
+                        job_search.discovery_title_matches(
+                            {"role": role, "url": "https://example.com"}, profile
+                        )
+                    )
+
     def test_extract_years_ignores_age_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))

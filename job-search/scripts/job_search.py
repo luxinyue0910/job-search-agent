@@ -148,6 +148,8 @@ DEFAULT_DISCOVERY_TITLE_KEYWORDS = [
     "infrastructure",
     "system development engineer",
     "systems development engineer",
+    "system dev engineer",
+    "systems dev engineer",
     "cloud",
     "new grad",
     "junior",
@@ -2843,6 +2845,17 @@ def amazon_location_text(job: dict[str, Any]) -> str:
     return "; ".join(merge_unique(parsed_locations, [])) or str(job.get("normalized_location") or job.get("location") or "")
 
 
+def amazon_job_text(job: dict[str, Any]) -> str:
+    blocks = [
+        str(job.get("title") or "").strip(),
+        amazon_location_text(job),
+        html_to_text(str(job.get("description") or "")),
+        html_to_text(str(job.get("basic_qualifications") or "")),
+        html_to_text(str(job.get("preferred_qualifications") or "")),
+    ]
+    return "\n\n".join(block for block in blocks if block)
+
+
 def discover_amazon_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     company = source.get("company", "Amazon")
     keywords = source.get("keywords") or [
@@ -2898,6 +2911,7 @@ def discover_amazon_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
                         "updated_at": normalize_datetime(job.get("updated_time")),
                         "source": source.get("url", "https://www.amazon.jobs"),
                         "notes": f"Amazon jobs direct adapter; id_icims={job_number}",
+                        "_jd_text": amazon_job_text(job),
                     }
                 if len(jobs) < page_size:
                     break
@@ -12136,6 +12150,7 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
 MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
     "general_sde": (
         r"\bsoftware\s+(?:development\s+)?engineer\b",
+        r"\bsystems?\s+(?:development|dev)\s+engineer\b",
         r"\bsoftware\s+developer\b",
         r"\b(?:back[- ]?end|front[- ]?end|full[- ]?stack|product|platform|devops|developer tools?)\s+(?:software\s+)?engineer\b",
         r"\b(?:founding|integration|integrations)\s+engineer\b",
@@ -12177,6 +12192,7 @@ MAYBE_TITLE_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bforms? (?:and|&) records? analyst\b",
     ),
     "data_center_infra": (
+        r"\bsystems?\s+(?:development|dev)\s+engineer\b",
         r"\bdata cent(?:er|re) (?:operations )?(?:engineer|technician|specialist)\b",
         r"\bnetwork (?:operations |development )?(?:engineer|technician|specialist)\b",
         r"\binfrastructure operations (?:engineer|technician|specialist)\b",
@@ -13676,6 +13692,26 @@ def fetch_amazon_job_text(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     if "amazon.jobs" not in parsed.netloc.lower():
         return None
+    path_parts = [part for part in parsed.path.split("/") if part]
+    try:
+        job_id = path_parts[path_parts.index("jobs") + 1]
+    except (ValueError, IndexError):
+        job_id = ""
+    if job_id:
+        params = {
+            "base_query": job_id,
+            "offset": "0",
+            "result_limit": "10",
+            "sort": "recent",
+        }
+        api_url = f"https://www.amazon.jobs/en/search.json?{urllib.parse.urlencode(params)}"
+        with contextlib.suppress(Exception):
+            data = fetch_json(api_url)
+            for job in data.get("jobs", []) if isinstance(data, dict) else []:
+                if str(job.get("id_icims") or "") == job_id:
+                    text = amazon_job_text(job)
+                    if text:
+                        return text
     raw = fetch_url(url)
     return html_to_text(raw)
 
@@ -14635,6 +14671,34 @@ def discover_consider_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def persist_adapter_job_text(app: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    text = str(candidate.get("_jd_text") or "").strip()
+    if len(text) < 200 or len(text.split()) < 30:
+        return False
+    if job_text_fetch_failure_reason(text):
+        return False
+    if str(app.get("jd_source") or "").startswith("manual"):
+        return False
+
+    output_dir = app_output_dir(app)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    jd_path = output_dir / "jd.md"
+    current_text = ""
+    if jd_path.exists():
+        current_text = jd_path.read_text(encoding="utf-8", errors="replace").strip()
+    normalized_text = text.rstrip() + "\n"
+    changed = current_text != text or str(app.get("jd_path") or "") != str(jd_path)
+    if current_text != text:
+        jd_path.write_text(normalized_text, encoding="utf-8")
+    if str(app.get("jd_path") or "") != str(jd_path):
+        app["jd_path"] = str(jd_path)
+    source = f"adapter:{candidate.get('platform') or app.get('platform') or 'unknown'}"
+    if app.get("jd_source") != source:
+        app["jd_source"] = source
+        changed = True
+    return changed
+
+
 def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     tracker = load_tracker()
     apps = tracker.setdefault("applications", [])
@@ -14670,6 +14734,8 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
                 if merged != app.get("matched_tracks", []):
                     app["matched_tracks"] = merged
                     changed = True
+            if persist_adapter_job_text(app, candidate):
+                changed = True
             if changed:
                 save_tracker(tracker)
             return app, False
@@ -14712,6 +14778,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
         "action_items": [],
     }
     apps.append(app)
+    persist_adapter_job_text(app, candidate)
     save_tracker(tracker)
     return app, True
 
@@ -17736,6 +17803,12 @@ def job_text_fetch_failure_reason(jd_text: str) -> str:
         return text[:240]
     if re.fullmatch(r"internal server error\.?\s*(?:\(id:\s*[^)]*\))?", text, flags=re.I):
         return "job board returned Internal Server Error"
+    unsupported_browser_markers = [
+        "you are using an unsupported browser",
+        "to use this site, please use a supported browser",
+    ]
+    if any(marker in lower for marker in unsupported_browser_markers):
+        return "job board returned an unsupported-browser shell instead of a job description"
     if len(text) <= 300:
         transient_markers = [
             "workday is currently unavailable",

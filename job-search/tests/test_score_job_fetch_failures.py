@@ -23,6 +23,108 @@ def load_job_search(private_root: Path):
 
 
 class ScoreJobFetchFailureTest(unittest.TestCase):
+    def test_long_unsupported_browser_shell_is_a_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            shell = (
+                "Powering our way of life. You are using an unsupported browser. "
+                "To use this site, please use a supported browser. "
+                + "navigation " * 100
+            )
+
+            reason = job_search.job_text_fetch_failure_reason(shell)
+
+            self.assertIn("unsupported-browser shell", reason)
+
+    def test_upsert_persists_substantive_adapter_job_text_for_scoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            (private_root / "data").mkdir()
+            (private_root / "data" / "applications.json").write_text(
+                '{"applications": []}\n',
+                encoding="utf-8",
+            )
+            (private_root / "data" / "sources.json").write_text(
+                '{"sources": []}\n',
+                encoding="utf-8",
+            )
+            (private_root / "profile.json").write_text('{}\n', encoding="utf-8")
+            job_search = load_job_search(private_root)
+            adapter_text = " ".join(
+                [
+                    "Business Systems Analyst I supports requirements analysis, data reporting,",
+                    "test planning, user acceptance testing, process improvement, SQL, and Python.",
+                ]
+                * 8
+            )
+
+            app, created = job_search.upsert_application(
+                {
+                    "company": "Example Utility",
+                    "role": "Business Systems Analyst I",
+                    "url": "https://example.com/jobs/123",
+                    "platform": "ultipro",
+                    "location": "Ephrata, WA",
+                    "_jd_text": adapter_text,
+                }
+            )
+
+            self.assertTrue(created)
+            self.assertEqual(app["jd_source"], "adapter:ultipro")
+            jd_path = Path(app["jd_path"])
+            self.assertTrue(jd_path.is_file())
+            self.assertEqual(jd_path.read_text(encoding="utf-8").strip(), adapter_text)
+            with mock.patch.object(job_search, "read_job_text", side_effect=AssertionError("unexpected refetch")):
+                self.assertEqual(job_search.cached_job_text_for_scoring(app), adapter_text)
+
+    def test_upsert_rejects_adapter_browser_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            (private_root / "data").mkdir()
+            (private_root / "data" / "applications.json").write_text(
+                '{"applications": []}\n',
+                encoding="utf-8",
+            )
+            (private_root / "data" / "sources.json").write_text(
+                '{"sources": []}\n',
+                encoding="utf-8",
+            )
+            (private_root / "profile.json").write_text('{}\n', encoding="utf-8")
+            job_search = load_job_search(private_root)
+            shell = "You are using an unsupported browser. " + "navigation " * 100
+
+            app, _created = job_search.upsert_application(
+                {
+                    "company": "Example Utility",
+                    "role": "Business Systems Analyst I",
+                    "url": "https://example.com/jobs/456",
+                    "platform": "ultipro",
+                    "location": "Ephrata, WA",
+                    "_jd_text": shell,
+                }
+            )
+
+            self.assertNotIn("jd_path", app)
+            self.assertNotIn("jd_source", app)
+
+    def test_amazon_job_text_includes_official_qualifications(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+
+            text = job_search.amazon_job_text(
+                {
+                    "title": "System Development Engineer",
+                    "normalized_location": "Seattle, Washington, USA",
+                    "description": "Build secure infrastructure automation.",
+                    "basic_qualifications": "Experience with Python and Linux.",
+                    "preferred_qualifications": "Experience with CI/CD pipelines.",
+                }
+            )
+
+            self.assertIn("Build secure infrastructure automation", text)
+            self.assertIn("Python and Linux", text)
+            self.assertIn("CI/CD pipelines", text)
+
     def test_score_job_marks_internal_server_error_as_needs_retry_without_scoring(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
