@@ -521,6 +521,29 @@ def merge_unique(base: list[Any], extra: list[Any]) -> list[Any]:
     return items
 
 
+def note_items(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            items.extend(note_items(item))
+        return items
+    text = str(value or "").strip()
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def merge_notes(*values: Any) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in note_items(value):
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return "\n".join(merged)
+
+
 def profile_for_track(track_id: str | None) -> dict[str, Any]:
     profile = json.loads(json.dumps(load_profile()))
     track = load_track(track_id)
@@ -12795,7 +12818,7 @@ def process_discovered_candidates(
                     "review_bucket": "maybe",
                     "discovery_bucket": "local_catchup" if local_catchup else "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
-                    "notes": candidate.get("notes", app.get("notes", "")),
+                    "notes": merge_notes(app.get("notes"), candidate.get("notes")),
                     "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
                     "triage_reasons": triage_reasons or maybe_reasons,
                 },
@@ -13013,7 +13036,7 @@ def process_discovered_candidates_all_tracks(
                     "review_bucket": "maybe",
                     "discovery_bucket": "local_catchup" if local_catchup else "maybe_backlog",
                     "location_bucket": candidate.get("location_bucket", "maybe"),
-                    "notes": candidate.get("notes", app.get("notes", "")),
+                    "notes": merge_notes(app.get("notes"), candidate.get("notes")),
                     "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
                     "triage_reasons": triage_reasons or maybe_reasons,
                 },

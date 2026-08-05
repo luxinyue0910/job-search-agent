@@ -5524,6 +5524,63 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(app["review_bucket"], "maybe")
             self.assertEqual(app["discovery_bucket"], "maybe_backlog")
 
+    def test_repeat_discovery_preserves_applied_human_notes(self):
+        candidate = {
+            "company": "Taskrabbit",
+            "role": "Software Engineer II, Fulfillment",
+            "url": "https://job-boards.greenhouse.io/taskrabbit/jobs/8026277",
+            "platform": "greenhouse",
+            "location": "San Francisco, California, United States",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_private_workspace(
+                private_root,
+                [
+                    {
+                        "company": "Taskrabbit",
+                        "platform": "greenhouse",
+                        "board": "taskrabbit",
+                        "url": "https://job-boards.greenhouse.io/taskrabbit",
+                    }
+                ],
+            )
+            tracker_path = private_root / "data" / "applications.json"
+            tracker_path.write_text(
+                json.dumps(
+                    {
+                        "applications": [
+                            {
+                                "id": "taskrabbit-software-engineer-ii-fulfillment",
+                                **candidate,
+                                "status": "applied",
+                                "date_applied": "2026-07-15",
+                                "notes": ["Submitted by user on 2026-07-15."],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+
+            for _ in range(2):
+                with mock.patch.object(
+                    job_search,
+                    "source_candidates_subprocess",
+                    return_value=([dict(candidate)], ""),
+                ):
+                    job_search.command_discover_jobs(
+                        discover_args(include_maybe_backlog=True)
+                    )
+
+            tracker = json.loads(tracker_path.read_text(encoding="utf-8"))
+            app = tracker["applications"][0]
+            self.assertEqual(app["status"], "applied")
+            self.assertEqual(app["date_applied"], "2026-07-15")
+            self.assertEqual(app["notes"].count("Submitted by user on 2026-07-15."), 1)
+            self.assertEqual(app["notes"].count("maybe_backlog: unknown_posted_at"), 1)
+
     def test_maybe_backlog_title_prefilter_rejects_unrelated_roles(self):
         candidate = {
             "company": "HospitalCo",
