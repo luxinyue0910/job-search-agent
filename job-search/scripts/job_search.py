@@ -88,6 +88,10 @@ CSV_FIELDS = [
     "location_bucket",
     "target_track",
     "matched_tracks",
+    "campaigns",
+    "early_career_score",
+    "early_career_bucket",
+    "early_career_signals",
     "resume_file",
     "date_applied",
     "resume_path",
@@ -1152,6 +1156,17 @@ DEFAULT_DISCOVER_ALL_TRACKS = [
     "data_center_infra",
 ]
 
+EARLY_CAREER_CAMPAIGN = "early_career_us"
+SUPPORTED_CAMPAIGNS = {EARLY_CAREER_CAMPAIGN}
+
+EARLY_CAREER_DISCOVERY_QUERIES = [
+    "New Grad",
+    "Early Career",
+    "Entry Level",
+    "University Graduate",
+    "Engineer I",
+]
+
 DEFAULT_RESCORE_BACKLOG_STATUSES = [
     "found",
     "needs_review",
@@ -1168,7 +1183,11 @@ DISCOVER_ALL_ROLE_QUERIES = [
 ]
 
 
-def source_for_tracks(source: dict[str, Any], track_ids: list[str]) -> dict[str, Any]:
+def source_for_tracks(
+    source: dict[str, Any],
+    track_ids: list[str],
+    campaigns: list[str] | None = None,
+) -> dict[str, Any]:
     """Build one source request configuration that covers all requested tracks."""
     selected = dict(source)
     keywords = [str(item) for item in source.get("keywords", []) if str(item).strip()]
@@ -1185,7 +1204,34 @@ def source_for_tracks(source: dict[str, Any], track_ids: list[str]) -> dict[str,
         )
     if truthy_source_flag(source.get("include_default_union_queries"), default=True):
         keywords = merge_unique(keywords, DISCOVER_ALL_ROLE_QUERIES)
+    active_campaigns = [
+        campaign
+        for campaign in (campaigns or [])
+        if campaign in SUPPORTED_CAMPAIGNS
+    ]
+    include_campaign_queries = truthy_source_flag(
+        source.get("include_campaign_queries"),
+        default=not truthy_source_flag(source.get("search_all"), default=False),
+    )
+    if EARLY_CAREER_CAMPAIGN in active_campaigns and include_campaign_queries:
+        campaign_keywords = source.get("campaign_keywords", {})
+        configured_queries = (
+            campaign_keywords.get(EARLY_CAREER_CAMPAIGN)
+            if isinstance(campaign_keywords, dict)
+            else None
+        )
+        queries = (
+            configured_queries
+            if isinstance(configured_queries, list) and configured_queries
+            else EARLY_CAREER_DISCOVERY_QUERIES
+        )
+        keywords = merge_unique(
+            keywords,
+            [str(item) for item in queries if str(item).strip()],
+        )
     selected["keywords"] = keywords
+    if active_campaigns:
+        selected["campaigns"] = active_campaigns
     if locations:
         selected["locations"] = locations
     return selected
@@ -12656,6 +12702,12 @@ def empty_discovery_stats() -> dict[str, int]:
         "skipped_location": 0,
         "maybe_scored": 0,
         "scoring_failed": 0,
+        "early_career_candidates": 0,
+        "early_career_priority": 0,
+        "early_career_strong": 0,
+        "early_career_stretch": 0,
+        "early_career_manual_review": 0,
+        "early_career_rejected": 0,
     }
 
 
@@ -13009,6 +13061,25 @@ def process_discovered_candidates_all_tracks(
         seen_record["matched_tracks"] = merge_unique(seen_record.get("matched_tracks", []), matched_tracks)
         if selected_track and not seen_record.get("target_track"):
             seen_record["target_track"] = selected_track
+
+        active_campaigns = set(getattr(args, "campaigns", None) or [])
+        if EARLY_CAREER_CAMPAIGN in active_campaigns:
+            campaign_evaluation = early_career_campaign_evaluation(
+                candidate,
+                str(candidate.get("_jd_text") or ""),
+                assume_candidate=True,
+            )
+            candidate.update(campaign_evaluation)
+            for field in [
+                "campaigns",
+                "early_career_score",
+                "early_career_bucket",
+                "early_career_signals",
+            ]:
+                seen_record[field] = candidate.get(field, "")
+            campaign_bucket = str(candidate.get("early_career_bucket") or "manual_review")
+            stats["early_career_candidates"] += 1
+            stats[f"early_career_{campaign_bucket}"] += 1
 
         if maybe_reasons:
             candidate["review_bucket"] = "maybe"
@@ -14766,8 +14837,13 @@ def upsert_application(
                 "review_bucket",
                 "discovery_bucket",
                 "location_bucket",
+                "early_career_score",
+                "early_career_bucket",
+                "early_career_signals",
             ]:
-                if candidate.get(field) and app.get(field) != candidate[field]:
+                value = candidate.get(field)
+                has_value = bool(value) or (field == "early_career_score" and value == 0.0)
+                if has_value and app.get(field) != value:
                     app[field] = candidate[field]
                     changed = True
             if candidate.get("target_track") and not app.get("target_track"):
@@ -14780,6 +14856,11 @@ def upsert_application(
                 merged = merge_unique(app.get("matched_tracks", []), candidate.get("matched_tracks", []))
                 if merged != app.get("matched_tracks", []):
                     app["matched_tracks"] = merged
+                    changed = True
+            if candidate.get("campaigns"):
+                merged = merge_unique(app.get("campaigns", []), candidate.get("campaigns", []))
+                if merged != app.get("campaigns", []):
+                    app["campaigns"] = merged
                     changed = True
             if persist_adapter_job_text(app, candidate):
                 changed = True
@@ -14814,6 +14895,10 @@ def upsert_application(
         "location_bucket": candidate.get("location_bucket", ""),
         "target_track": candidate.get("target_track", ""),
         "matched_tracks": candidate.get("matched_tracks", []),
+        "campaigns": candidate.get("campaigns", []),
+        "early_career_score": candidate.get("early_career_score", ""),
+        "early_career_bucket": candidate.get("early_career_bucket", ""),
+        "early_career_signals": candidate.get("early_career_signals", []),
         "track_evaluations": candidate.get("track_evaluations", {}),
         "resume_file": candidate.get("resume_file", ""),
         "date_applied": "",
@@ -16898,6 +16983,8 @@ def source_candidates_subprocess(
     ]
     for track_id in getattr(args, "tracks", None) or []:
         command.extend(["--union-track", str(track_id)])
+    for campaign in getattr(args, "campaigns", None) or []:
+        command.extend(["--campaign", str(campaign)])
     if not getattr(args, "tracks", None) and getattr(args, "track", None):
         command.extend(["--track", str(args.track)])
     command.append("--payload-file-output")
@@ -16949,10 +17036,15 @@ def command_discover_source_candidates(args: argparse.Namespace) -> None:
     except (IndexError, ValueError) as error:
         raise SystemExit(f"Invalid source index: {args.source_index}") from error
     union_tracks = [str(track_id).strip() for track_id in (getattr(args, "union_track", None) or []) if str(track_id).strip()]
+    campaigns = [
+        str(campaign).strip()
+        for campaign in (getattr(args, "campaigns", None) or [])
+        if str(campaign).strip()
+    ]
     if union_tracks:
         for track_id in union_tracks:
             load_track(track_id)
-        source = source_for_tracks(source, union_tracks)
+        source = source_for_tracks(source, union_tracks, campaigns)
     else:
         track = load_track(getattr(args, "track", None))
         source = source_for_track(source, str(track.get("id", "")).strip())
@@ -16990,6 +17082,14 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         if str(track_id).strip()
     ]
     profiles = {track_id: profile_for_track(track_id) for track_id in track_ids}
+    campaigns = [
+        str(campaign).strip()
+        for campaign in (getattr(args, "campaigns", None) or [])
+        if str(campaign).strip()
+    ]
+    unsupported_campaigns = sorted(set(campaigns) - SUPPORTED_CAMPAIGNS)
+    if unsupported_campaigns:
+        raise SystemExit(f"Unsupported campaign(s): {', '.join(unsupported_campaigns)}")
     profile = profile_for_track(None) if track_ids else profile_for_track(getattr(args, "track", None))
     all_sources = load_json(SOURCES_PATH).get("sources", [])
     source_company_filters = {item.lower() for item in (getattr(args, "source_company", None) or [])}
@@ -17030,6 +17130,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         "finished_at": "",
         "track": "all" if track_ids else (getattr(args, "track", None) or ""),
         "tracks": track_ids,
+        "campaigns": campaigns,
         "cutoff": cutoff.replace(microsecond=0).isoformat(),
         "source_company_filters": sorted(source_company_filters),
         "include_unknown_posted_date": bool(args.include_unknown_posted_date),
@@ -17070,7 +17171,7 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     report["workers"] = worker_count
     work_items = []
     for ordinal, (source_index, source) in enumerate(source_pairs, 1):
-        source = source_for_tracks(source, track_ids) if track_ids else source_for_track(source, track_id)
+        source = source_for_tracks(source, track_ids, campaigns) if track_ids else source_for_track(source, track_id)
         work_items.append(
             {
                 "ordinal": ordinal,
@@ -17261,6 +17362,22 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
+    if EARLY_CAREER_CAMPAIGN in campaigns:
+        final_tracker = load_tracker()
+        current_campaign_apps = [
+            app
+            for app in final_tracker.get("applications", [])
+            if str(app.get("last_seen") or "") == current_seen_at
+            and EARLY_CAREER_CAMPAIGN in (app.get("campaigns") or [])
+        ]
+        stats["early_career_candidates"] = len(current_campaign_apps)
+        for campaign_bucket in ["priority", "strong", "stretch", "manual_review", "rejected"]:
+            stats[f"early_career_{campaign_bucket}"] = sum(
+                1
+                for app in current_campaign_apps
+                if str(app.get("early_career_bucket") or "manual_review") == campaign_bucket
+            )
+
     save_seen_jobs(seen)
     report["finished_at"] = now_utc_iso()
     failed_sources = sum(1 for source in report["sources"] if source.get("status") in {"failed", "failed_after_retries"})
@@ -17283,6 +17400,10 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
         f"Local catchup: {stats['local_catchup']}. Promoted sources: {stats['promoted_sources']}. "
         f"Maybe eligible: {stats['maybe_eligible_for_scoring']}. "
         f"Maybe prefilter rejected: {stats['maybe_prefilter_rejected']}. "
+        f"Early career: {stats['early_career_candidates']} "
+        f"(priority={stats['early_career_priority']}, strong={stats['early_career_strong']}, "
+        f"stretch={stats['early_career_stretch']}, manual={stats['early_career_manual_review']}, "
+        f"rejected={stats['early_career_rejected']}). "
         f"Skipped old: {stats['skipped_old']}. Skipped unknown posted_at: {stats['skipped_unknown_date']}. "
         f"Skipped title: {stats['skipped_title']}. Skipped location: {stats['skipped_location']}. "
         f"Scoring failed: {stats['scoring_failed']}. Failed sources: {failed_sources}. "
@@ -17940,6 +18061,23 @@ def command_score_job(args: argparse.Namespace) -> None:
     )
     existing_notes = str(app.get("notes") or "")
     notes = existing_notes if bool(getattr(args, "preserve_notes", False)) and existing_notes else score_notes
+    campaign_updates: dict[str, Any] = {}
+    if EARLY_CAREER_CAMPAIGN in (app.get("campaigns") or []):
+        campaign_app = dict(app)
+        campaign_app.update(
+            {
+                "experience_bucket": best_evaluation.get("experience_bucket", ""),
+                "experience_requirements": list(best_evaluation.get("experience_requirements") or []),
+                "location_bucket": best_evaluation.get("location_bucket", app.get("location_bucket", "")),
+                "dealbreakers": list(best_evaluation.get("dealbreakers") or []),
+                "action_items": list(best_evaluation.get("action_items") or []),
+            }
+        )
+        campaign_updates = early_career_campaign_evaluation(
+            campaign_app,
+            jd_text,
+            assume_candidate=True,
+        )
     update_application(
         app["id"],
         {
@@ -17962,6 +18100,7 @@ def command_score_job(args: argparse.Namespace) -> None:
             "notes": notes,
             "track_evaluations": evaluations,
             "last_scored_at": now_utc_iso(),
+            **campaign_updates,
         },
         tracker=tracker,
         save=save_immediately,
@@ -18345,6 +18484,10 @@ def render_screening_answers(template: str, app: dict[str, Any], profile: dict[s
 def command_application_backlog(args: argparse.Namespace) -> None:
     bucket = getattr(args, "bucket", "") or ""
     requested_track = str(getattr(args, "track", "") or "").strip()
+    requested_campaign = str(getattr(args, "campaign", "") or "").strip()
+    requested_campaign_bucket = str(getattr(args, "campaign_bucket", "") or "").strip()
+    if requested_campaign_bucket and not requested_campaign:
+        raise SystemExit("--campaign-bucket requires --campaign")
     if requested_track:
         load_track(requested_track)
     if not args.status and bucket == "retry":
@@ -18359,6 +18502,10 @@ def command_application_backlog(args: argparse.Namespace) -> None:
     apps: list[dict[str, Any]] = []
     for app in tracker.get("applications", []):
         if str(app.get("date_applied") or "").strip():
+            continue
+        if requested_campaign and requested_campaign not in (app.get("campaigns") or []):
+            continue
+        if requested_campaign_bucket and str(app.get("early_career_bucket") or "manual_review") != requested_campaign_bucket:
             continue
         candidate_app = app
         if requested_track:
@@ -18407,7 +18554,11 @@ def command_application_backlog(args: argparse.Namespace) -> None:
             continue
         if candidate_app.get("status") not in statuses:
             continue
-        min_fit = 0.0 if bucket in {"maybe", "retry", "skipped", "rejected"} else args.min_fit
+        min_fit = (
+            float(getattr(args, "campaign_min_fit", 0.0) or 0)
+            if requested_campaign
+            else (0.0 if bucket in {"maybe", "retry", "skipped", "rejected"} else args.min_fit)
+        )
         if numeric_score(candidate_app.get("fit_score")) < min_fit:
             continue
         filter_text = application_filter_text(candidate_app)
@@ -18425,15 +18576,18 @@ def command_application_backlog(args: argparse.Namespace) -> None:
             continue
         apps.append(candidate_app)
 
-    apps.sort(key=recommendation_sort_key, reverse=True)
-    if bucket in {"priority", "relocation"}:
+    apps.sort(
+        key=early_career_campaign_sort_key if requested_campaign else recommendation_sort_key,
+        reverse=True,
+    )
+    if bucket in {"priority", "relocation"} and not requested_campaign:
         apps = cap_recommendations_by_company(apps, getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT))
     if args.limit and args.limit > 0:
         apps = apps[: args.limit]
 
     rows = [
-        "| Fit | ATS | Experience | Status | Review Bucket | Location Bucket | Company | Role | Location | Posted/Found | ID |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Fit | ATS | Early Career | EC Score | Experience | Status | Review Bucket | Location Bucket | Company | Role | Location | Posted/Found | ID |",
+        "| ---: | ---: | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for app in apps:
         posted = app.get("posted_at") or app.get("date_found") or ""
@@ -18443,6 +18597,8 @@ def command_application_backlog(args: argparse.Namespace) -> None:
                 [
                     str(app.get("fit_score", "")),
                     str(app.get("ats_score", "")),
+                    str(app.get("early_career_bucket", "")),
+                    str(app.get("early_career_score", "")),
                     experience_requirement_bucket(app),
                     str(app.get("status", "")),
                     str(app.get("review_bucket") or app.get("discovery_bucket") or "").replace("|", "\\|"),
@@ -18468,7 +18624,9 @@ def command_application_backlog(args: argparse.Namespace) -> None:
         - hide_intern: {bool(args.hide_intern)}
         - bucket: {getattr(args, "bucket", "") or "default"}
         - track: {requested_track or "all"}
-        - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket in {"priority", "relocation"} else "none"}
+        - campaign: {requested_campaign or "none"}
+        - campaign_bucket: {requested_campaign_bucket or "all"}
+        - company_limit: {getattr(args, "company_limit", DEFAULT_RECOMMENDATION_COMPANY_LIMIT) if bucket in {"priority", "relocation"} and not requested_campaign else "none"}
         - count: {len(apps)}
 
         """
@@ -18599,6 +18757,135 @@ def experience_requirement_bucket(app: dict[str, Any]) -> str:
     return "unknown"
 
 
+def early_career_campaign_evaluation(
+    app: dict[str, Any],
+    jd_text: str = "",
+    *,
+    assume_candidate: bool = False,
+) -> dict[str, Any]:
+    """Classify an already technical US role for the early-career campaign."""
+    role = re.sub(r"\s+", " ", str(app.get("role") or "")).strip()
+    source_query = re.sub(r"\s+", " ", str(app.get("source_query") or "")).strip()
+    existing_notes = str(app.get("notes") or "")
+    text = "\n".join(part for part in [role, source_query, existing_notes, jd_text] if part).strip()
+    lower = text.lower()
+    signals: list[str] = []
+
+    explicit_title_patterns = [
+        (r"\bnew\s+(?:college\s+)?grad(?:uate)?\b", "new_grad_title"),
+        (r"\brecent\s+grad(?:uate)?\b", "recent_graduate_title"),
+        (r"\buniversity\s+(?:graduate|hire)\b|\bcampus\s+(?:hire|role|program)\b", "university_hiring_title"),
+        (r"\bearly[-\s]?career\b|\bemerging\s+talent\b", "early_career_title"),
+        (r"\bentry[-\s]?level\b", "entry_level_title"),
+        (r"\bjunior\b", "junior_title"),
+        (r"\bapprentice(?:ship)?\b|\brotational\s+program\b", "apprentice_or_rotation_title"),
+        (
+            r"\b(?:software\s+|application\s+|systems?\s+|data\s+|cloud\s+|qa\s+|technical\s+)?"
+            r"(?:engineer|developer|analyst|specialist|technician)\s+(?:i|1)\b",
+            "level_i_title",
+        ),
+        (
+            r"\bassociate\s+(?:software|application|systems?|data|cloud|platform|qa|technical|it|"
+            r"engineer|developer|analyst|specialist)",
+            "associate_title",
+        ),
+    ]
+    for pattern, signal in explicit_title_patterns:
+        if re.search(pattern, role, flags=re.I):
+            signals.append(signal)
+
+    if re.search(
+        r"\b(?:new\s+(?:college\s+)?grad(?:uate)?|early[-\s]?career|entry[-\s]?level|"
+        r"university\s+graduate|recent\s+graduate|engineer\s+i)\b",
+        source_query,
+        flags=re.I,
+    ):
+        signals.append("early_career_source_query")
+    if re.search(r"\b(?:0\s*[-–]\s*2|0\s*[-–]\s*1|one|1)\s+years?\b", lower):
+        signals.append("early_career_experience_language")
+    if re.search(r"\b(?:within|up to)\s+(?:one|two|1|2)\s+years?\s+(?:of|after|from)\s+graduat", lower):
+        signals.append("recent_graduate_eligibility")
+
+    experience_text = jd_text or recommendation_jd_text(app)
+    required_years = application_required_experience_years(app, experience_text) if experience_text else 0
+    month_requirements = extract_month_requirements(experience_text) if experience_text else []
+    experience_bucket = str(app.get("experience_bucket") or "").strip()
+    if experience_text:
+        experience_app = dict(app)
+        experience_app["notes"] = experience_text
+        experience_app["experience_bucket"] = ""
+        experience_app["experience_requirements"] = []
+        experience_app["action_items"] = []
+        experience_app["dealbreakers"] = []
+        experience_app["jd_path"] = ""
+        experience_bucket = experience_requirement_bucket(experience_app)
+    if required_years:
+        signals.append(f"required_{required_years}_years")
+    elif month_requirements:
+        signals.append(f"required_{min(month_requirements)}_months")
+    elif experience_bucket and experience_bucket != "unknown":
+        signals.append(f"experience_bucket_{experience_bucket}")
+
+    signals = merge_unique([], signals)
+    positive_signal = bool(signals)
+    if not positive_signal and not assume_candidate:
+        return {}
+
+    rejection_reasons: list[str] = []
+    if application_location_bucket(app) == "rejected":
+        rejection_reasons.append("outside_us")
+    if has_seniority_title_signal(app):
+        rejection_reasons.append("senior_or_level_iii")
+    if has_phd_signal(app):
+        rejection_reasons.append("phd_only_title")
+    if re.search(r"\bintern(?:ship)?\b", role, flags=re.I):
+        rejection_reasons.append("internship")
+    if required_years >= 3 or experience_bucket == "3_plus":
+        rejection_reasons.append("requires_3_plus_years")
+    dealbreaker_text = " ".join(str(item) for item in app.get("dealbreakers", []) if str(item).strip())
+    if re.search(r"\b(?:security clearance|u\.s\. citizen|us citizen|citizenship)\b", dealbreaker_text, flags=re.I):
+        rejection_reasons.append("clearance_or_citizenship")
+
+    if rejection_reasons:
+        return {
+            "campaigns": merge_unique(app.get("campaigns", []), [EARLY_CAREER_CAMPAIGN]),
+            "early_career_score": 0.0,
+            "early_career_bucket": "rejected",
+            "early_career_signals": merge_unique(signals, rejection_reasons),
+        }
+
+    explicit_title_signal = any(
+        signal.endswith("_title") or signal in {"early_career_source_query", "recent_graduate_eligibility"}
+        for signal in signals
+    )
+    min_months = min(month_requirements) if month_requirements else 0
+    if required_years == 2 or experience_bucket in {"2_plus", "2_range"}:
+        bucket = "stretch"
+        score = 6.5
+    elif explicit_title_signal or (min_months and min_months <= 12) or experience_bucket in {"new_grad", "0_1"}:
+        bucket = "priority"
+        score = 10.0
+    elif required_years == 1 or experience_bucket == "1_2":
+        bucket = "strong"
+        score = 8.5
+    else:
+        bucket = "manual_review"
+        score = 4.0
+
+    if application_location_bucket(app) == "preferred":
+        score = min(10.0, score + 0.5)
+        signals = merge_unique(signals, ["wa_or_remote_us"])
+    elif application_location_bucket(app) == "relocation":
+        signals = merge_unique(signals, ["us_relocation"])
+
+    return {
+        "campaigns": merge_unique(app.get("campaigns", []), [EARLY_CAREER_CAMPAIGN]),
+        "early_career_score": score,
+        "early_career_bucket": bucket,
+        "early_career_signals": signals,
+    }
+
+
 def recommendation_jd_text(app: dict[str, Any], max_chars: int = 60000) -> str:
     path_value = str(app.get("jd_path") or "").strip()
     if not path_value:
@@ -18691,6 +18978,53 @@ def cap_recommendations_by_company(apps: list[dict[str, Any]], company_limit: in
         counts[company_key] = count + 1
         capped.append(app)
     return capped
+
+
+def early_career_campaign_sort_key(app: dict[str, Any]) -> tuple[Any, ...]:
+    bucket_priority = {
+        "priority": 5,
+        "strong": 4,
+        "stretch": 3,
+        "manual_review": 2,
+        "rejected": 0,
+    }
+    return (
+        bucket_priority.get(str(app.get("early_career_bucket") or "manual_review"), 1),
+        numeric_score(app.get("early_career_score")),
+        numeric_score(app.get("fit_score")),
+        numeric_score(app.get("ats_score")),
+        location_bucket_priority_score(application_location_bucket(app)),
+        str(app.get("posted_at") or app.get("date_found") or ""),
+    )
+
+
+def early_career_campaign_rows(
+    apps: list[dict[str, Any]],
+    bucket: str,
+    min_fit: float,
+    limit: int,
+    company_limit: int = DEFAULT_RECOMMENDATION_COMPANY_LIMIT,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for app in apps:
+        if str(app.get("date_applied") or "").strip():
+            continue
+        if EARLY_CAREER_CAMPAIGN not in (app.get("campaigns") or []):
+            continue
+        if str(app.get("early_career_bucket") or "manual_review") != bucket:
+            continue
+        if bucket not in {"manual_review", "rejected"}:
+            if app.get("status") not in {"found", "prepared", "needs_review", "scored"}:
+                continue
+            if numeric_score(app.get("fit_score")) < min_fit:
+                continue
+            if app.get("dealbreakers"):
+                continue
+        rows.append(app)
+    rows.sort(key=early_career_campaign_sort_key, reverse=True)
+    if company_limit > 0:
+        rows = cap_recommendations_by_company(rows, company_limit)
+    return rows[:limit] if limit > 0 else rows
 
 
 def is_maybe_backlog_app(app: dict[str, Any]) -> bool:
@@ -18794,6 +19128,13 @@ def render_daily_review_app_section(title: str, apps: list[dict[str, Any]]) -> l
             f"{app.get('review_bucket') or app.get('discovery_bucket') or ''}; "
             f"location bucket: {application_location_bucket(app)}"
         )
+        if EARLY_CAREER_CAMPAIGN in (app.get("campaigns") or []):
+            signals = ", ".join(str(item) for item in app.get("early_career_signals", []) if str(item))
+            lines.append(
+                f"   - Early career: {app.get('early_career_bucket') or 'manual_review'} "
+                f"({app.get('early_career_score', '')}/10)"
+                + (f"; signals: {signals}" if signals else "")
+            )
         rejection_reasons = recommendation_rejection_reasons(app)
         if rejection_reasons:
             lines.append(f"   - Rejected because: {', '.join(rejection_reasons)}")
@@ -18859,6 +19200,22 @@ def command_daily_review(args: argparse.Namespace) -> None:
     maybe = [app for app in maybe if str(app.get("id", "")) not in promoted_ids]
     rejected = daily_review_app_rows(apps, "rejected", 0, args.limit)
     retry = daily_review_app_rows(apps, "retry", 0, args.limit)
+    requested_campaign = str(getattr(args, "campaign", "") or "").strip()
+    campaign_sections: dict[str, list[dict[str, Any]]] = {}
+    if requested_campaign == EARLY_CAREER_CAMPAIGN:
+        for campaign_bucket in ["priority", "strong", "stretch", "manual_review", "rejected"]:
+            campaign_min_fit = (
+                0.0
+                if campaign_bucket in {"manual_review", "rejected"}
+                else float(getattr(args, "campaign_min_fit", 6.0) or 0)
+            )
+            campaign_sections[campaign_bucket] = early_career_campaign_rows(
+                apps,
+                campaign_bucket,
+                campaign_min_fit,
+                args.limit,
+                args.company_limit,
+            )
     source_issues: list[dict[str, Any]] = []
     for report in reports:
         for source in report.get("sources", []):
@@ -18883,6 +19240,13 @@ def command_daily_review(args: argparse.Namespace) -> None:
         f"- Company limit: {args.company_limit if args.company_limit > 0 else 'none'}",
         "",
     ]
+    if campaign_sections:
+        lines.insert(-1, f"- Early career candidates: {sum(len(rows) for rows in campaign_sections.values())}")
+        lines.extend(render_daily_review_app_section("Early Career Priority", campaign_sections["priority"]))
+        lines.extend(render_daily_review_app_section("Early Career Strong Match", campaign_sections["strong"]))
+        lines.extend(render_daily_review_app_section("Early Career Stretch", campaign_sections["stretch"]))
+        lines.extend(render_daily_review_app_section("Early Career Manual Review", campaign_sections["manual_review"]))
+        lines.extend(render_daily_review_app_section("Early Career Rejected", campaign_sections["rejected"]))
     lines.extend(render_daily_review_app_section("Priority", priority))
     lines.extend(render_daily_review_app_section("Relocation", relocation))
     lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
@@ -19172,6 +19536,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Track to include. Repeat for multiple tracks. Defaults to all configured primary tracks.",
     )
     discover_all.add_argument(
+        "--campaign",
+        dest="campaigns",
+        action="append",
+        choices=sorted(SUPPORTED_CAMPAIGNS),
+        help="Enable a cross-track discovery campaign. Repeatable; default behavior is unchanged.",
+    )
+    discover_all.add_argument(
         "--include-unknown-posted-date",
         action="store_true",
         help="Add jobs even when the source does not expose a posted date.",
@@ -19261,6 +19632,13 @@ def build_parser() -> argparse.ArgumentParser:
     discover_source.add_argument("--source-index", required=True)
     discover_source.add_argument("--track", help=argparse.SUPPRESS)
     discover_source.add_argument("--union-track", action="append", help=argparse.SUPPRESS)
+    discover_source.add_argument(
+        "--campaign",
+        dest="campaigns",
+        action="append",
+        choices=sorted(SUPPORTED_CAMPAIGNS),
+        help=argparse.SUPPRESS,
+    )
     discover_source.add_argument("--payload-file-output", action="store_true", help=argparse.SUPPRESS)
 
     classify = subcommands.add_parser("classify-sources", help="Detect direct ATS platforms behind configured sources.")
@@ -19460,6 +19838,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use one track's independent evaluation instead of the selected top-level score.",
     )
     backlog.add_argument(
+        "--campaign",
+        choices=sorted(SUPPORTED_CAMPAIGNS),
+        help="Only include jobs tagged for this cross-track campaign.",
+    )
+    backlog.add_argument(
+        "--campaign-bucket",
+        choices=["priority", "strong", "stretch", "manual_review", "rejected"],
+        help="Only include one campaign eligibility bucket.",
+    )
+    backlog.add_argument(
+        "--campaign-min-fit",
+        type=float,
+        default=0.0,
+        help="Minimum fit for campaign backlog rows. Defaults to 0 so the full campaign remains reviewable.",
+    )
+    backlog.add_argument(
         "--preferred-locations",
         action="store_true",
         help="Only include preferred WA or Remote US roles.",
@@ -19496,6 +19890,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-reports",
         action="store_true",
         help="Include every discovery report from the date. Default uses the latest report to avoid stale failed runs.",
+    )
+    daily_review.add_argument(
+        "--campaign",
+        choices=sorted(SUPPORTED_CAMPAIGNS),
+        help="Add campaign-specific sections to the daily review.",
+    )
+    daily_review.add_argument(
+        "--campaign-min-fit",
+        type=float,
+        default=6.0,
+        help="Minimum fit for priority/strong/stretch campaign sections.",
     )
     daily_review.add_argument("--output", help="Optional Markdown output path. Relative paths are under the private repo.")
     subcommands.add_parser("sync-csv", help="Regenerate applications.csv from applications.json.")

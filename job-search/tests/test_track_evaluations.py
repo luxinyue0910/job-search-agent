@@ -404,6 +404,169 @@ class TrackEvaluationTest(unittest.TestCase):
             compact = job_search.source_for_tracks(source, ["general_sde"])
             self.assertEqual(compact["keywords"], ["Software Engineer"])
 
+    def test_source_for_tracks_adds_early_career_queries_only_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            source = {
+                "company": "QueryCo",
+                "platform": "microsoft_jobs",
+                "keywords": ["Software Engineer"],
+            }
+
+            legacy = job_search.source_for_tracks(source, ["general_sde"])
+            campaign = job_search.source_for_tracks(
+                source,
+                ["general_sde"],
+                [job_search.EARLY_CAREER_CAMPAIGN],
+            )
+
+            self.assertNotIn("campaigns", legacy)
+            self.assertNotIn("New Grad", legacy["keywords"])
+            self.assertEqual(campaign["campaigns"], [job_search.EARLY_CAREER_CAMPAIGN])
+            for query in job_search.EARLY_CAREER_DISCOVERY_QUERIES:
+                self.assertIn(query, campaign["keywords"])
+            self.assertEqual(campaign["keywords"].count("Software Engineer"), 1)
+
+    def test_early_career_campaign_classifies_experience_and_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+
+            priority = base_application()
+            priority["role"] = "Software Engineer, New Grad"
+            priority_result = job_search.early_career_campaign_evaluation(
+                priority,
+                "Bachelor's degree required. No prior professional experience required.",
+            )
+            self.assertEqual(priority_result["early_career_bucket"], "priority")
+            self.assertIn("wa_or_remote_us", priority_result["early_career_signals"])
+
+            relocation = base_application()
+            relocation["location"] = "Austin, TX"
+            strong_result = job_search.early_career_campaign_evaluation(
+                relocation,
+                "Minimum qualifications: 1+ years of software development experience.",
+                assume_candidate=True,
+            )
+            self.assertEqual(strong_result["early_career_bucket"], "strong")
+            self.assertIn("us_relocation", strong_result["early_career_signals"])
+
+            stretch_result = job_search.early_career_campaign_evaluation(
+                relocation,
+                "Minimum qualifications: 2+ years of software development experience.",
+                assume_candidate=True,
+            )
+            self.assertEqual(stretch_result["early_career_bucket"], "stretch")
+
+            rejected_result = job_search.early_career_campaign_evaluation(
+                relocation,
+                "Minimum qualifications: 3+ years of software development experience.",
+                assume_candidate=True,
+            )
+            self.assertEqual(rejected_result["early_career_bucket"], "rejected")
+            self.assertIn("requires_3_plus_years", rejected_result["early_career_signals"])
+
+    def test_early_career_campaign_keeps_unknown_roles_for_manual_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            app = base_application()
+            app["role"] = "Product Systems Engineer"
+            app["location"] = "United States"
+
+            self.assertEqual(job_search.early_career_campaign_evaluation(app), {})
+            result = job_search.early_career_campaign_evaluation(app, assume_candidate=True)
+
+            self.assertEqual(result["early_career_bucket"], "manual_review")
+            self.assertEqual(result["early_career_score"], 4.0)
+
+    def test_early_career_campaign_rows_filter_bucket_and_cap_company(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            apps = []
+            for index in range(3):
+                app = base_application()
+                app.update(
+                    {
+                        "id": f"example-{index}",
+                        "campaigns": [job_search.EARLY_CAREER_CAMPAIGN],
+                        "early_career_bucket": "priority",
+                        "early_career_score": 10.0 - index,
+                        "fit_score": 9.0,
+                        "ats_score": 80,
+                        "status": "scored",
+                    }
+                )
+                apps.append(app)
+            relocation = base_application()
+            relocation.update(
+                {
+                    "id": "relocation-strong",
+                    "company": "OtherCo",
+                    "location": "Austin, TX",
+                    "campaigns": [job_search.EARLY_CAREER_CAMPAIGN],
+                    "early_career_bucket": "strong",
+                    "early_career_score": 8.5,
+                    "fit_score": 8.5,
+                    "ats_score": 75,
+                    "status": "scored",
+                }
+            )
+            apps.append(relocation)
+
+            priority_rows = job_search.early_career_campaign_rows(
+                apps,
+                "priority",
+                min_fit=6.0,
+                limit=0,
+                company_limit=2,
+            )
+            strong_rows = job_search.early_career_campaign_rows(
+                apps,
+                "strong",
+                min_fit=6.0,
+                limit=0,
+                company_limit=2,
+            )
+
+            self.assertEqual(len(priority_rows), 2)
+            self.assertEqual([app["id"] for app in strong_rows], ["relocation-strong"])
+
+    def test_upsert_can_replace_early_career_score_with_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update(
+                {
+                    "campaigns": ["early_career_us"],
+                    "early_career_score": 10.0,
+                    "early_career_bucket": "priority",
+                }
+            )
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+
+            updated, created = job_search.upsert_application(
+                {
+                    "company": app["company"],
+                    "role": app["role"],
+                    "url": app["url"],
+                    "early_career_score": 0.0,
+                    "early_career_bucket": "rejected",
+                    "early_career_signals": ["requires_3_plus_years"],
+                }
+            )
+
+            self.assertFalse(created)
+            self.assertEqual(updated["early_career_score"], 0.0)
+            self.assertEqual(updated["early_career_bucket"], "rejected")
+
     def test_scores_each_track_from_one_cached_jd_and_keeps_higher_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -627,6 +790,54 @@ class TrackEvaluationTest(unittest.TestCase):
                 {call.args[0].track for call in score_job.call_args_list},
                 {"general_sde", "fde_ai_engineer"},
             )
+
+    def test_all_track_processing_adds_early_career_campaign_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            (private_root / "data" / "applications.json").write_text(
+                '{"applications": []}\n',
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+            profiles = {
+                track_id: job_search.profile_for_track(track_id)
+                for track_id in ["general_sde", "fde_ai_engineer", "qa_engineer"]
+            }
+            candidate = {
+                "company": "Example",
+                "role": "Software Engineer, New Grad",
+                "url": "https://example.com/jobs/new-grad",
+                "platform": "custom",
+                "location": "Seattle, WA",
+                "posted_at": "2026-08-11T12:00:00+00:00",
+            }
+            args = argparse.Namespace(
+                campaigns=[job_search.EARLY_CAREER_CAMPAIGN],
+                include_unknown_posted_date=False,
+                include_maybe_backlog=False,
+                maybe_old_posted_date=False,
+                no_role_filter=False,
+                score=False,
+                score_maybe_limit=3,
+            )
+
+            stats = job_search.process_discovered_candidates_all_tracks(
+                [candidate],
+                args,
+                profiles,
+                {"jobs": {}},
+                None,
+                "2026-08-11T12:00:00+00:00",
+            )
+
+            tracker = json.loads((private_root / "data" / "applications.json").read_text(encoding="utf-8"))
+            saved = tracker["applications"][0]
+            self.assertEqual(saved["campaigns"], [job_search.EARLY_CAREER_CAMPAIGN])
+            self.assertEqual(saved["early_career_bucket"], "priority")
+            self.assertEqual(saved["status"], "found")
+            self.assertEqual(stats["early_career_candidates"], 1)
+            self.assertEqual(stats["early_career_priority"], 1)
 
     def test_discover_all_fetches_a_source_once(self):
         with tempfile.TemporaryDirectory() as tmp:

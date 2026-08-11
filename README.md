@@ -323,6 +323,23 @@ python3 job-search/scripts/job_search.py discover-all \
 
 `discover-all` fetches each configured source once. Full-board ATS adapters return their normal board snapshot; query-based adapters receive the union of source keywords, track overrides, and five broad role-family queries. Each candidate is routed to zero or more tracks, its JD is cached once, and matching tracks receive independent evaluations. Repeat `--track` to limit the run to selected tracks.
 
+Seasonal hiring priorities are modeled as campaigns rather than duplicate tracks. The built-in `early_career_us` campaign keeps the same one-fetch discovery architecture, adds New Grad, Early Career, Entry Level, University Graduate, and Engineer I queries only to query-based sources, and then classifies every technical US candidate across its normal tracks:
+
+```bash
+python3 job-search/scripts/job_search.py discover-all \
+  --since-days 7 \
+  --campaign early_career_us \
+  --include-maybe-backlog \
+  --maybe-old-posted-date \
+  --score \
+  --score-all-maybe \
+  --workers 12 \
+  --score-workers 8 \
+  --quiet
+```
+
+The campaign adds `campaigns`, `early_career_score`, `early_career_bucket`, and `early_career_signals` to tracker rows without replacing `status`, `target_track`, or `track_evaluations`. Buckets are `priority` for explicit new-grad/entry-level or 0-1 year roles, `strong` for 1-year roles, `stretch` for hard 2-year requirements, `manual_review` when the level is unclear, and `rejected` for obvious Senior/III, 3+ year, internship, foreign, or clearance/citizenship requirements. Washington and Remote US remain preferred; other US locations stay eligible as relocation roles.
+
 The strict freshness cutoff remains the primary path. A second `local_catchup` path retains a newly seen, still-active Washington or registry-company job when its official date is outside seven days but no more than 45 days old. These jobs are marked `review_bucket=maybe` and `discovery_bucket=local_catchup`; they do not appear as strictly fresh jobs. Set `--local-catchup-days 0` to disable the path or choose a different bounded window.
 
 Local portfolio sources can set `auto_promote_ats_sources: true`. When an aggregator returns a direct Greenhouse, Lever, Ashby, Gem, or Workday URL, discovery adds the official company board to `sources.json` with provenance. The new board is scanned on the next run, avoiding repeated dependence on an aggregator while keeping the current run deterministic.
@@ -468,7 +485,10 @@ python3 job-search/scripts/job_search.py application-backlog --bucket priority -
 python3 job-search/scripts/job_search.py application-backlog --bucket relocation --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --track qa_engineer --bucket priority --preferred-locations --exclude-years 3 --hide-intern
 python3 job-search/scripts/job_search.py application-backlog --bucket maybe --limit 100
+python3 job-search/scripts/job_search.py application-backlog --campaign early_career_us --campaign-bucket priority --limit 0
+python3 job-search/scripts/job_search.py application-backlog --campaign early_career_us --campaign-bucket manual_review --limit 0
 python3 job-search/scripts/job_search.py daily-review
+python3 job-search/scripts/job_search.py daily-review --campaign early_career_us
 ```
 
 Priority recommendation views prefer `new grad`, `0-1`, and `1-2` year roles, then downrank `2+` and `2-5` year roles. They skip obvious `3+`, `Senior`, `III`, `Staff`, `Principal`, PhD-only, and internship roles by default. Priority and promoted-maybe lists cap output to three roles per company unless `--company-limit 0` is passed.
