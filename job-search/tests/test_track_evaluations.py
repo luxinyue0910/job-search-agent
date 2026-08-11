@@ -161,6 +161,37 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertEqual([item[0]["id"] for item in selected], ["recent-found", "recent-scored"])
             self.assertEqual(selected[0][2], "first_seen")
 
+    def test_rescore_backlog_can_select_exact_discovery_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            run_seen_at = job_search.parse_datetime("2026-08-06T22:39:19+00:00")
+            applications = [
+                {
+                    "id": "in-run",
+                    "status": "needs_review",
+                    "posted_at": "2025-01-01",
+                    "last_seen": "2026-08-06T22:39:19+00:00",
+                    "date_applied": "",
+                },
+                {
+                    "id": "other-run",
+                    "status": "needs_review",
+                    "posted_at": "2026-08-06",
+                    "last_seen": "2026-08-06T23:13:04+00:00",
+                    "date_applied": "",
+                },
+            ]
+
+            selected = job_search.select_rescore_backlog_applications(
+                applications,
+                job_search.parse_datetime("2026-08-01T00:00:00+00:00"),
+                set(job_search.DEFAULT_RESCORE_BACKLOG_STATUSES),
+                run_seen_at=run_seen_at,
+            )
+
+            self.assertEqual([item[0]["id"] for item in selected], ["in-run"])
+            self.assertEqual(selected[0][2], "last_seen")
+
     def test_rescore_all_tracks_forces_every_primary_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
@@ -651,10 +682,15 @@ class TrackEvaluationTest(unittest.TestCase):
                 job_search,
                 "source_candidates_subprocess",
                 return_value=([candidate], ""),
-            ) as fetch:
+            ) as fetch, mock.patch.object(
+                job_search,
+                "save_tracker",
+                wraps=job_search.save_tracker,
+            ) as save_tracker:
                 job_search.command_discover_all(args)
 
             fetch.assert_called_once()
+            save_tracker.assert_called_once()
             report_path = next((private_root / "data" / "discovery_runs").glob("*.json"))
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["track"], "all")
@@ -813,12 +849,23 @@ class TrackEvaluationTest(unittest.TestCase):
                 "prefetch_job_description",
                 return_value="/tmp/jd.md",
             ) as prefetch:
-                with mock.patch.object(job_search, "command_score_job") as score_job:
+                with mock.patch.object(job_search, "command_score_job") as score_job, mock.patch.object(
+                    job_search,
+                    "save_tracker",
+                    wraps=job_search.save_tracker,
+                ) as save_tracker:
                     summary = job_search.execute_discovery_score_queue(queue, args)
 
-            prefetch.assert_called_once_with("one-app")
+            prefetch.assert_called_once()
+            self.assertEqual(prefetch.call_args.args, ("one-app",))
+            self.assertIsInstance(prefetch.call_args.kwargs["tracker"], dict)
             self.assertEqual(score_job.call_count, 2)
             self.assertTrue(all(call.args[0].quiet for call in score_job.call_args_list))
+            self.assertTrue(all(call.args[0].save_tracker is False for call in score_job.call_args_list))
+            self.assertTrue(
+                all(call.args[0].tracker is prefetch.call_args.kwargs["tracker"] for call in score_job.call_args_list)
+            )
+            save_tracker.assert_called_once_with(prefetch.call_args.kwargs["tracker"])
             self.assertEqual(summary["unique_apps"], 1)
             self.assertEqual(summary["selected_tasks"], 2)
 

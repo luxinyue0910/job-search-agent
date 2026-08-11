@@ -6243,9 +6243,37 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(job_search.extract_years("Requires 3+ years of software development experience."), [3])
             self.assertEqual(job_search.extract_year_requirements("Requires 2-5 years of software development experience.")[0]["min"], 2)
             self.assertEqual(job_search.extract_years("Requires 1-3 years of IT support experience."), [1])
+            self.assertEqual(job_search.extract_years("Looking for: 5+ years platform engineering."), [5])
+            self.assertEqual(job_search.extract_years("Required Qualifications: Four (4) years of IT experience."), [4])
+            self.assertEqual(job_search.extract_years("Minimum qualification is two years of support experience."), [2])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6) months of software experience."), [6])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6)&nbsp;months of software experience."), [6])
             self.assertEqual(job_search.extract_year_requirements("Employees receive more vacation after 5 years of service."), [])
+
+    def test_required_experience_years_uses_hard_qualification_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            amazon_style = """
+            Basic Qualifications
+            3+ years of professional software development experience.
+            1+ years of experience with Python.
+            Preferred Qualifications
+            5+ years of full software development life cycle experience.
+            """
+            microsoft_style = """
+            Required/Minimum Qualifications: 2+ years of technical engineering experience.
+            Preferred Qualifications: 5+ years of software engineering experience.
+            """
+
+            self.assertEqual(job_search.required_experience_years(amazon_style), 3)
+            self.assertEqual(job_search.required_experience_years(microsoft_style), 2)
+            self.assertEqual(
+                job_search.application_required_experience_years(
+                    {"platform": "amazon_jobs"},
+                    "3+ years of professional development experience; 1+ years of Python experience.",
+                ),
+                3,
+            )
 
     def test_experience_bucket_uses_lowest_viable_requirement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6454,7 +6482,7 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             relocation = job_search.daily_review_app_rows(apps, "relocation", 8, 10)
 
             self.assertEqual([row["id"] for row in priority], ["good"])
-            self.assertEqual({row["id"] for row in relocation}, {"range-years", "dc"})
+            self.assertEqual({row["id"] for row in relocation}, {"three-years", "range-years", "dc"})
 
     def test_daily_review_prioritizes_entry_level_and_caps_company(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6622,7 +6650,7 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
 
             promoted = job_search.daily_review_app_rows(apps, "promoted_maybe", 9, 10)
 
-            self.assertEqual([row["id"] for row in promoted], ["sorce-like"])
+            self.assertEqual([row["id"] for row in promoted], ["sorce-like", "three-years"])
 
     def test_daily_review_retry_omits_obvious_senior_titles(self):
         with tempfile.TemporaryDirectory() as tmp:

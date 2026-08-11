@@ -350,6 +350,20 @@ python3 job-search/scripts/job_search.py rescore-backlog \
   --score-workers 8
 ```
 
+To re-score every unsubmitted maybe job seen in one exact discovery run,
+including rows that the cheap prefilter would normally reject:
+
+```bash
+python3 job-search/scripts/job_search.py rescore-backlog \
+  --run-id 2026-08-06T22-39-19Z \
+  --bucket maybe \
+  --all-tracks \
+  --no-prefilter \
+  --status found --status needs_review --status needs_retry \
+  --status scored --status skipped \
+  --limit 0 --score-workers 8 --quiet
+```
+
 `rescore-backlog` is separate from daily discovery. It skips submitted applications and, by default, only selects `found`, `needs_review`, `needs_retry`, and `scored` jobs. The cutoff uses the most recent available `posted_at`, `first_seen`, or `date_found`, so a newly discovered posting with an older official date can still be refreshed.
 
 Backlog recovery is intentionally a two-stage pipeline:

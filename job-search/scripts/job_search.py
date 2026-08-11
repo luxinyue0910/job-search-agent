@@ -12870,14 +12870,19 @@ def process_discovered_candidates_all_tracks(
     cutoff: dt.datetime | None,
     current_seen_at: str,
     score_queue: list[dict[str, Any]] | None = None,
+    tracker: dict[str, Any] | None = None,
+    tracker_apps_by_url: dict[str, dict[str, Any]] | None = None,
+    defer_tracker_save: bool = False,
 ) -> dict[str, int]:
     stats = empty_discovery_stats()
     seen_jobs = seen.setdefault("jobs", {})
-    tracker_apps_by_url = {
-        normalize_job_url(app.get("url", "")): app
-        for app in load_tracker().get("applications", [])
-        if app.get("url")
-    }
+    tracker = tracker if tracker is not None else load_tracker()
+    if tracker_apps_by_url is None:
+        tracker_apps_by_url = {
+            normalize_job_url(app.get("url", "")): app
+            for app in tracker.get("applications", [])
+            if app.get("url")
+        }
     maybe_score_limit = max(0, int(getattr(args, "score_maybe_limit", 3) or 0))
     score_all_maybe = bool(getattr(args, "score_all_maybe", False))
     for candidate in candidates:
@@ -13015,7 +13020,11 @@ def process_discovered_candidates_all_tracks(
             if local_catchup:
                 stats["local_catchup"] += 1
 
-        app, created = upsert_application(candidate)
+        app, created = upsert_application(
+            candidate,
+            tracker=tracker,
+            save=not defer_tracker_save,
+        )
         tracker_apps_by_url[key] = app
         if created:
             stats["added"] += 1
@@ -13040,6 +13049,8 @@ def process_discovered_candidates_all_tracks(
                     "triage_status": "eligible_for_scoring" if triage_allowed else "quick_rejected",
                     "triage_reasons": triage_reasons or maybe_reasons,
                 },
+                tracker=tracker,
+                save=not defer_tracker_save,
             )
             tracker_apps_by_url[key] = app
 
@@ -13165,8 +13176,12 @@ def select_discovery_score_tasks(
     return strict_tasks + selected_maybe_tasks, len(maybe_apps), len(selected_maybe_apps)
 
 
-def prefetch_job_description(app_id: str) -> str:
-    app = get_application(app_id)
+def prefetch_job_description(
+    app_id: str,
+    *,
+    tracker: dict[str, Any] | None = None,
+) -> str:
+    app = get_application(app_id, tracker=tracker)
     output_dir = app_output_dir(app)
     output_dir.mkdir(parents=True, exist_ok=True)
     jd_path = output_dir / "jd.md"
@@ -13201,13 +13216,14 @@ def execute_discovery_score_queue(
     if not selected_tasks:
         return summary
 
+    tracker = load_tracker()
     score_workers = max(1, int(getattr(args, "score_workers", 4) or 1))
     app_ids = sorted({str(task.get("app_id") or "") for task in selected_tasks})
     jd_paths: dict[str, str] = {}
     if score_workers == 1 or len(app_ids) <= 1:
         for app_id in app_ids:
             try:
-                jd_paths[app_id] = prefetch_job_description(app_id)
+                jd_paths[app_id] = prefetch_job_description(app_id, tracker=tracker)
             except Exception:  # noqa: BLE001 - scoring records the retry state below.
                 jd_paths[app_id] = ""
     else:
@@ -13215,7 +13231,7 @@ def execute_discovery_score_queue(
             max_workers=min(score_workers, len(app_ids))
         ) as executor:
             future_to_app_id = {
-                executor.submit(prefetch_job_description, app_id): app_id
+                executor.submit(prefetch_job_description, app_id, tracker=tracker): app_id
                 for app_id in app_ids
             }
             for future in concurrent.futures.as_completed(future_to_app_id):
@@ -13236,6 +13252,8 @@ def execute_discovery_score_queue(
                     track=task.get("track"),
                     quiet=True,
                     preserve_notes=bool(getattr(args, "preserve_notes", False)),
+                    tracker=tracker,
+                    save_tracker=False,
                 )
             )
             if task.get("maybe"):
@@ -13250,7 +13268,8 @@ def execute_discovery_score_queue(
                     updates["notes"] = f"{existing_notes}\n{failure_note}"
                 elif existing_notes:
                     updates["notes"] = existing_notes
-            update_application(app_id, updates)
+            update_application(app_id, updates, tracker=tracker, save=False)
+    save_tracker(tracker)
     summary["maybe_scored"] = len(maybe_scored_apps)
     return summary
 
@@ -14722,8 +14741,13 @@ def persist_adapter_job_text(app: dict[str, Any], candidate: dict[str, Any]) -> 
     return changed
 
 
-def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    tracker = load_tracker()
+def upsert_application(
+    candidate: dict[str, Any],
+    *,
+    tracker: dict[str, Any] | None = None,
+    save: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    tracker = tracker if tracker is not None else load_tracker()
     apps = tracker.setdefault("applications", [])
     normalized_url = normalize_job_url(candidate["url"])
     for app in apps:
@@ -14759,7 +14783,7 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
                     changed = True
             if persist_adapter_job_text(app, candidate):
                 changed = True
-            if changed:
+            if changed and save:
                 save_tracker(tracker)
             return app, False
 
@@ -14802,24 +14826,36 @@ def upsert_application(candidate: dict[str, Any]) -> tuple[dict[str, Any], bool]
     }
     apps.append(app)
     persist_adapter_job_text(app, candidate)
-    save_tracker(tracker)
+    if save:
+        save_tracker(tracker)
     return app, True
 
 
-def get_application(identifier: str) -> dict[str, Any]:
-    tracker = load_tracker()
+def get_application(
+    identifier: str,
+    *,
+    tracker: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    tracker = tracker if tracker is not None else load_tracker()
     for app in tracker.get("applications", []):
         if app.get("id") == identifier or app.get("url") == identifier:
             return app
     raise SystemExit(f"No application found for {identifier}")
 
 
-def update_application(app_id: str, updates: dict[str, Any]) -> dict[str, Any]:
-    tracker = load_tracker()
+def update_application(
+    app_id: str,
+    updates: dict[str, Any],
+    *,
+    tracker: dict[str, Any] | None = None,
+    save: bool = True,
+) -> dict[str, Any]:
+    tracker = tracker if tracker is not None else load_tracker()
     for app in tracker.get("applications", []):
         if app.get("id") == app_id:
             app.update(updates)
-            save_tracker(tracker)
+            if save:
+                save_tracker(tracker)
             return app
     raise SystemExit(f"No application found for {app_id}")
 
@@ -14938,7 +14974,34 @@ def extract_month_requirements(text: str) -> list[int]:
 
 
 def normalize_experience_text(text: str) -> str:
-    return html.unescape(str(text or "")).replace("\xa0", " ")
+    value = html.unescape(str(text or "")).replace("\xa0", " ")
+    word_numbers = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+    }
+
+    def replace_word_years(match: re.Match[str]) -> str:
+        word = str(match.group("word") or "").lower()
+        number = str(match.group("number") or word_numbers.get(word, ""))
+        return f"{number} {match.group('unit')}"
+
+    return re.sub(
+        r"\b(?P<word>one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+        r"(?:\s*\(\s*(?P<number>\d+)\s*\))?\s*(?P<unit>years?|yrs?)\b",
+        replace_word_years,
+        value,
+        flags=re.I,
+    )
 
 
 def age_year_context(text: str, start: int, end: int) -> bool:
@@ -14983,6 +15046,7 @@ def experience_year_context(text: str, start: int, end: int) -> bool:
         "you have",
         "you bring",
         "you possess",
+        "looking for",
         "candidate has",
         "applicant has",
         "professional background",
@@ -14998,6 +15062,51 @@ def experience_year_context(text: str, start: int, end: int) -> bool:
 def minimum_experience_years(requirements: list[dict[str, Any]]) -> int:
     values = [int(item.get("min") or 0) for item in requirements if int(item.get("min") or 0) > 0]
     return min(values) if values else 0
+
+
+def required_experience_requirements(text: str) -> list[dict[str, Any]]:
+    """Extract experience signals from required/basic qualification sections."""
+    value = normalize_experience_text(text)
+    required_heading = re.compile(
+        r"\b(?:required(?:\s*/\s*minimum)?\s+qualifications?|minimum\s+qualifications?|"
+        r"basic\s+qualifications?|required\s+skills?|what\s+you(?:'|’)?ll\s+(?:need|bring)(?:\s+to\s+the\s+team)?|"
+        r"what\s+you\s+need)\b|(?m:^\s*requirements\b)",
+        flags=re.I,
+    )
+    stop_heading = re.compile(
+        r"\b(?:preferred\s+qualifications?|preferred\s+skills?|nice\s+to\s+have|bonus\s+points?|"
+        r"benefits?|compensation|pay\s+range|about\s+(?:us|the\s+company)|equal\s+opportunity)\b",
+        flags=re.I,
+    )
+    requirements: list[dict[str, Any]] = []
+    for heading in required_heading.finditer(value):
+        stop = stop_heading.search(value, heading.end())
+        section_end = stop.start() if stop else min(len(value), heading.end() + 12000)
+        requirements.extend(extract_year_requirements(value[heading.end() : section_end]))
+        if requirements:
+            break
+    return requirements
+
+
+def required_experience_years(text: str) -> int:
+    """Return the hard experience floor, excluding preferred-only years."""
+    required = required_experience_requirements(text)
+    if required:
+        values = [int(item.get("min") or 0) for item in required if int(item.get("min") or 0) > 0]
+        return max(values) if values else 0
+    return minimum_experience_years(extract_year_requirements(text))
+
+
+def application_required_experience_years(app: dict[str, Any], text: str) -> int:
+    """Return a conservative hard floor for platforms that omit section labels."""
+    if str(app.get("platform") or "") == "amazon_jobs":
+        values = [
+            int(item.get("min") or 0)
+            for item in extract_year_requirements(text)
+            if int(item.get("min") or 0) > 0
+        ]
+        return max(values) if values else 0
+    return required_experience_years(text)
 
 
 def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> dict[str, Any]:
@@ -15036,7 +15145,7 @@ def score_text(app: dict[str, Any], jd_text: str, profile: dict[str, Any]) -> di
     experience_app["dealbreakers"] = []
     experience_app["jd_path"] = ""
     experience_bucket = experience_requirement_bucket(experience_app)
-    required_years = minimum_experience_years(experience_requirements)
+    required_years = application_required_experience_years(app, jd_text)
     dealbreaker_config = profile.get("dealbreakers", {})
     threshold = int(dealbreaker_config.get("minimum_years_over", 5))
     skip_from = dealbreaker_config.get("skip_minimum_years_from")
@@ -16905,6 +17014,16 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
     current_seen_at = now_utc_iso()
     quiet = bool(getattr(args, "quiet", False))
     deferred_score_queue: list[dict[str, Any]] | None = [] if track_ids and bool(args.score) else None
+    shared_tracker = load_tracker() if track_ids else None
+    shared_tracker_apps_by_url = (
+        {
+            normalize_job_url(app.get("url", "")): app
+            for app in shared_tracker.get("applications", [])
+            if app.get("url")
+        }
+        if shared_tracker is not None
+        else None
+    )
     report = {
         "run_id": discovery_run_id(current_seen_at),
         "started_at": current_seen_at,
@@ -17077,6 +17196,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 effective_cutoff,
                 current_seen_at,
                 score_queue=deferred_score_queue,
+                tracker=shared_tracker,
+                tracker_apps_by_url=shared_tracker_apps_by_url,
+                defer_tracker_save=True,
             )
         else:
             source_stats = process_discovered_candidates(
@@ -17119,6 +17241,9 @@ def command_discover_jobs(args: argparse.Namespace) -> None:
                 f"attempts={len(source_report['attempts']) or 1} ({source_report['duration_seconds']}s)",
                 flush=True,
             )
+
+    if shared_tracker is not None:
+        save_tracker(shared_tracker)
 
     if deferred_score_queue is not None:
         scoring_summary = execute_discovery_score_queue(deferred_score_queue, args)
@@ -17210,6 +17335,7 @@ def select_rescore_backlog_applications(
     statuses: set[str],
     limit: int = 0,
     bucket: str | None = None,
+    run_seen_at: dt.datetime | None = None,
 ) -> list[tuple[dict[str, Any], dt.datetime, str]]:
     selected: list[tuple[dict[str, Any], dt.datetime, str]] = []
     for app in applications:
@@ -17218,6 +17344,12 @@ def select_rescore_backlog_applications(
         if str(app.get("status") or "") not in statuses:
             continue
         if not rescore_bucket_matches(app, bucket):
+            continue
+        if run_seen_at is not None:
+            last_seen = parse_datetime(app.get("last_seen"))
+            if last_seen != run_seen_at:
+                continue
+            selected.append((app, last_seen, "last_seen"))
             continue
         reference_at, reference_field = application_rescore_datetime(app)
         if reference_at is None or reference_at < cutoff:
@@ -17345,6 +17477,13 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
     if args.since_hours is None and args.since_days is None:
         args.since_days = 30
     cutoff = discovery_cutoff(args)
+    run_seen_at = None
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    if run_id:
+        run_report = load_json(discovery_run_path(run_id))
+        run_seen_at = parse_datetime(run_report.get("started_at"))
+        if run_seen_at is None:
+            raise SystemExit(f"Discovery run has no valid started_at: {run_id}")
     statuses = set(args.status or DEFAULT_RESCORE_BACKLOG_STATUSES)
     requested_tracks = list(args.tracks or [])
     if args.all_tracks and requested_tracks:
@@ -17368,6 +17507,7 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
         statuses,
         0,
         getattr(args, "bucket", None),
+        run_seen_at,
     )
     score_queue: list[dict[str, Any]] = []
     selected_rows: list[tuple[dict[str, Any], dt.datetime, str, list[str | None]]] = []
@@ -17389,7 +17529,9 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
         location_bucket = location_preference_bucket(str(app.get("location") or ""), base_profile)
         triage_app = dict(app)
         triage_app["location_bucket"] = location_bucket
-        if getattr(args, "bucket", None) == "maybe":
+        if getattr(args, "bucket", None) == "maybe" and not bool(
+            getattr(args, "no_prefilter", False)
+        ):
             triage_allowed, triage_reasons = maybe_scoring_prefilter(triage_app)
             if not args.dry_run:
                 app["triage_status"] = "eligible_for_scoring" if triage_allowed else "quick_rejected"
@@ -17471,6 +17613,7 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
         print(
             "Backlog rescore dry run. "
             f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+            f"Run: {run_id or 'date-window'}. "
             f"Statuses: {', '.join(sorted(statuses))}. "
             f"Bucket: {getattr(args, 'bucket', None) or 'all'}. "
             f"Jobs: {len(selected_rows)}. Track evaluations: {len(score_queue)}. "
@@ -17498,6 +17641,7 @@ def command_rescore_backlog(args: argparse.Namespace) -> None:
     print(
         "Backlog rescore complete. "
         f"Cutoff: {cutoff.replace(microsecond=0).isoformat()}. "
+        f"Run: {run_id or 'date-window'}. "
         f"Bucket: {getattr(args, 'bucket', None) or 'all'}. "
         f"Jobs: {len(selected_rows)}. "
         f"Track evaluations: {summary['selected_tasks']}. "
@@ -17643,7 +17787,9 @@ def command_add_url(args: argparse.Namespace) -> None:
 
 
 def command_score_job(args: argparse.Namespace) -> None:
-    app = get_application(args.id)
+    tracker = getattr(args, "tracker", None)
+    save_immediately = bool(getattr(args, "save_tracker", True))
+    app = get_application(args.id, tracker=tracker)
     requested_track = getattr(args, "track", None) or app.get("target_track")
     profile = profile_for_track(requested_track)
     track = profile.get("_track", {})
@@ -17752,7 +17898,12 @@ def command_score_job(args: argparse.Namespace) -> None:
                 "track_evaluations": evaluations,
                 "last_scored_at": now_utc_iso(),
             }
-        update_application(app["id"], updates)
+        update_application(
+            app["id"],
+            updates,
+            tracker=tracker,
+            save=save_immediately,
+        )
         if not bool(getattr(args, "quiet", False)):
             print(report)
         return
@@ -17812,6 +17963,8 @@ def command_score_job(args: argparse.Namespace) -> None:
             "track_evaluations": evaluations,
             "last_scored_at": now_utc_iso(),
         },
+        tracker=tracker,
+        save=save_immediately,
     )
     if not bool(getattr(args, "quiet", False)):
         print(report)
@@ -17832,6 +17985,12 @@ def job_text_fetch_failure_reason(jd_text: str) -> str:
     ]
     if any(marker in lower for marker in unsupported_browser_markers):
         return "job board returned an unsupported-browser shell instead of a job description"
+    if (
+        len(text) > 100_000
+        and '"candidate questions"' in lower
+        and '"inactiveapplicationstages"' in lower
+    ):
+        return "job board returned an application shell instead of a job description"
     if len(text) <= 300:
         transient_markers = [
             "workday is currently unavailable",
@@ -18360,8 +18519,8 @@ def recommendation_rejection_reasons(app: dict[str, Any]) -> list[str]:
         reasons.append("outside_us")
     if has_seniority_title_signal(app):
         reasons.append("senior_or_level_iii")
-    if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
-        reasons.append("3_plus_years")
+    if has_year_requirement(filter_text, 5):
+        reasons.append("5_plus_years")
     if has_phd_signal(app):
         reasons.append("phd")
     if re.search(r"\b(?:security clearance|active clearance|secret clearance|top secret|u\.s\. citizen|us citizen)\b", filter_text):
@@ -18372,7 +18531,7 @@ def recommendation_rejection_reasons(app: dict[str, Any]) -> list[str]:
 
 
 def has_year_requirement(text: str, minimum: int) -> bool:
-    required_years = minimum_experience_years(extract_year_requirements(text))
+    required_years = required_experience_years(text)
     return bool(required_years and required_years >= minimum)
 
 
@@ -18404,9 +18563,9 @@ def experience_requirement_bucket(app: dict[str, Any]) -> str:
     title_and_tracker_text = f"{role} {tracker_text}".lower()
     if re.search(r"\b(new\s+grad|new\s+college|early\s+career|entry[-\s]?level|apprentice(ship)?|junior)\b", title_and_tracker_text):
         return "new_grad"
-    requirements = extract_year_requirements(filter_text)
+    requirements = required_experience_requirements(filter_text) or extract_year_requirements(filter_text)
     if requirements:
-        minimum_years = minimum_experience_years(requirements)
+        minimum_years = application_required_experience_years(app, filter_text)
         minimum_requirements = [
             requirement
             for requirement in requirements
@@ -18564,8 +18723,6 @@ def daily_review_app_rows(
             if location_bucket != expected_location_bucket:
                 continue
             filter_text = application_filter_text(app)
-            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
-                continue
             if has_seniority_title_signal(app):
                 continue
             if has_phd_signal(app):
@@ -18586,8 +18743,6 @@ def daily_review_app_rows(
             if numeric_score(app.get("ats_score")) < PROMOTED_MAYBE_MIN_ATS:
                 continue
             filter_text = application_filter_text(app)
-            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
-                continue
             if has_seniority_title_signal(app):
                 continue
             if has_phd_signal(app):
@@ -18608,8 +18763,6 @@ def daily_review_app_rows(
             if app.get("status") != "needs_retry":
                 continue
             filter_text = application_filter_text(app)
-            if has_year_requirement(filter_text, 3) or experience_requirement_bucket(app) == "3_plus":
-                continue
             if has_seniority_title_signal(app):
                 continue
             if has_phd_signal(app):
@@ -19200,6 +19353,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-score jobs posted or first found within this many days. Defaults to 30.",
     )
     rescore.add_argument(
+        "--run-id",
+        help="Only re-score jobs whose last_seen matches this discovery run's started_at.",
+    )
+    rescore.add_argument(
         "--status",
         action="append",
         help="Application status to include. Repeatable. Defaults to found, needs_review, needs_retry, and scored.",
@@ -19224,6 +19381,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--missing-tracks-only",
         action="store_true",
         help="Only score track evaluations that are missing or previously ended in needs_retry.",
+    )
+    rescore.add_argument(
+        "--no-prefilter",
+        action="store_true",
+        help="Score every selected maybe job instead of applying the cheap local rejection pass.",
     )
     rescore.add_argument("--limit", type=int, default=0, help="Maximum jobs to re-score. Use 0 for no limit.")
     rescore.add_argument(

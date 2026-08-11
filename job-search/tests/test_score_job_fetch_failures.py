@@ -23,6 +23,21 @@ def load_job_search(private_root: Path):
 
 
 class ScoreJobFetchFailureTest(unittest.TestCase):
+    def test_detects_large_application_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            shell = (
+                '{"title": "Candidate questions", "inactiveApplicationStages": []}'
+                + " application metadata" * 7_000
+            )
+
+            reason = job_search.job_text_fetch_failure_reason(shell)
+
+            self.assertEqual(
+                reason,
+                "job board returned an application shell instead of a job description",
+            )
+
     def test_long_unsupported_browser_shell_is_a_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
