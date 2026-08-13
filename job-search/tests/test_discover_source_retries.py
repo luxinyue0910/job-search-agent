@@ -162,6 +162,84 @@ class DiscoverSourceRetryTest(unittest.TestCase):
             self.assertEqual([attempt["status"] for attempt in source["attempts"]], ["failed", "failed"])
             self.assertIn("second failure", source["error"])
 
+    def test_adapter_fetch_warning_triggers_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            (private_root / "data").mkdir()
+            (private_root / "data" / "sources.json").write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "company": "WarningCo",
+                                "platform": "workday",
+                                "url": "https://example.com/jobs",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                source_retries=1,
+                source_retry_timeout_seconds=90,
+            )
+
+            with mock.patch.object(
+                job_search,
+                "source_candidates_subprocess",
+                side_effect=[
+                    ([], "Could not fetch Workday API: The read operation timed out"),
+                    ([], ""),
+                ],
+            ) as run_source:
+                candidates, warnings, attempts = job_search.discover_source_candidates_with_retries(
+                    0,
+                    args,
+                    30,
+                )
+
+            self.assertEqual(candidates, [])
+            self.assertEqual(warnings, "")
+            self.assertEqual(run_source.call_count, 2)
+            self.assertEqual([attempt["status"] for attempt in attempts], ["failed", "success"])
+
+    def test_adapter_fetch_warning_fails_after_retry_when_no_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            (private_root / "data").mkdir()
+            (private_root / "data" / "sources.json").write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "company": "WarningCo",
+                                "platform": "workday",
+                                "url": "https://example.com/jobs",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job_search = load_job_search(private_root)
+            args = argparse.Namespace(
+                source_retries=1,
+                source_retry_timeout_seconds=90,
+            )
+            warning = "Could not fetch Workday API: The read operation timed out"
+
+            with mock.patch.object(
+                job_search,
+                "source_candidates_subprocess",
+                side_effect=[([], warning), ([], warning)],
+            ):
+                with self.assertRaises(job_search.SourceDiscoveryFailed) as raised:
+                    job_search.discover_source_candidates_with_retries(0, args, 30)
+
+            self.assertEqual([attempt["status"] for attempt in raised.exception.attempts], ["failed", "failed"])
+
 
 if __name__ == "__main__":
     unittest.main()

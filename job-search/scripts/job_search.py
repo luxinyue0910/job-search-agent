@@ -16,6 +16,7 @@ import contextlib
 import csv
 import datetime as dt
 import email.utils
+import functools
 import hashlib
 import html
 import io
@@ -1182,6 +1183,37 @@ DISCOVER_ALL_ROLE_QUERIES = [
     "Data Center Engineer",
 ]
 
+QUERY_EXPANDING_PLATFORMS = {
+    "amazon_jobs",
+    "eightfold",
+    "google_jobs",
+    "microsoft_jobs",
+    "oracle_cx",
+    "successfactors",
+    "talentbrew",
+    "workday",
+}
+
+
+def round_robin_keywords(groups: list[list[str]], limit: int) -> list[str]:
+    selected: list[str] = []
+    index = 0
+    while len(selected) < limit:
+        added = False
+        for group in groups:
+            if index >= len(group):
+                continue
+            added = True
+            keyword = group[index]
+            if keyword and keyword not in selected:
+                selected.append(keyword)
+                if len(selected) >= limit:
+                    break
+        if not added:
+            break
+        index += 1
+    return selected
+
 
 def source_for_tracks(
     source: dict[str, Any],
@@ -1190,19 +1222,28 @@ def source_for_tracks(
 ) -> dict[str, Any]:
     """Build one source request configuration that covers all requested tracks."""
     selected = dict(source)
-    keywords = [str(item) for item in source.get("keywords", []) if str(item).strip()]
+    base_keywords = [str(item) for item in source.get("keywords", []) if str(item).strip()]
+    keywords = list(base_keywords)
     locations = [str(item) for item in source.get("locations", []) if str(item).strip()]
+    track_keyword_groups: list[list[str]] = []
     for track_id in track_ids:
         track_source = source_for_track(source, track_id)
+        track_group = [str(item) for item in track_source.get("keywords", []) if str(item).strip()]
+        track_keyword_groups.append(track_group)
         keywords = merge_unique(
             keywords,
-            [str(item) for item in track_source.get("keywords", []) if str(item).strip()],
+            track_group,
         )
         locations = merge_unique(
             locations,
             [str(item) for item in track_source.get("locations", []) if str(item).strip()],
         )
-    if truthy_source_flag(source.get("include_default_union_queries"), default=True):
+    default_union_keywords = (
+        DISCOVER_ALL_ROLE_QUERIES
+        if truthy_source_flag(source.get("include_default_union_queries"), default=True)
+        else []
+    )
+    if default_union_keywords:
         keywords = merge_unique(keywords, DISCOVER_ALL_ROLE_QUERIES)
     active_campaigns = [
         campaign
@@ -1213,6 +1254,7 @@ def source_for_tracks(
         source.get("include_campaign_queries"),
         default=not truthy_source_flag(source.get("search_all"), default=False),
     )
+    campaign_query_group: list[str] = []
     if EARLY_CAREER_CAMPAIGN in active_campaigns and include_campaign_queries:
         campaign_keywords = source.get("campaign_keywords", {})
         configured_queries = (
@@ -1225,9 +1267,21 @@ def source_for_tracks(
             if isinstance(configured_queries, list) and configured_queries
             else EARLY_CAREER_DISCOVERY_QUERIES
         )
-        keywords = merge_unique(
-            keywords,
-            [str(item) for item in queries if str(item).strip()],
+        campaign_query_group = [str(item) for item in queries if str(item).strip()]
+        keywords = merge_unique(keywords, campaign_query_group)
+    configured_limit = source.get("max_union_keywords")
+    if configured_limit in (None, "") and source_platform(source) in QUERY_EXPANDING_PLATFORMS:
+        configured_limit = 12
+    keyword_limit = max(0, int(configured_limit or 0))
+    if keyword_limit and len(keywords) > keyword_limit:
+        keywords = round_robin_keywords(
+            [
+                campaign_query_group,
+                *track_keyword_groups,
+                base_keywords,
+                list(default_union_keywords),
+            ],
+            keyword_limit,
         )
     selected["keywords"] = keywords
     if active_campaigns:
@@ -12413,8 +12467,9 @@ REMOTE_US_PATTERN = re.compile(
 FOREIGN_LOCATION_PATTERN = re.compile(
     r"(?:\b(?:canada|toronto|montreal|calgary|edmonton|british columbia|ontario|quebec|india|argentina|"
     r"gurugram|gurgaon|new delhi|bengaluru|hyderabad|pune|chennai|noida|colombia|mexico|spain|germany|"
-    r"poland|egypt|japan|france|ireland|netherlands|nl|singapore|australia|"
-    r"new zealand|brazil|vancouver|london|paris|berlin|latam|latin america|emea|apac|europe|"
+    r"poland|egypt|japan|france|ireland|netherlands|nl|singapore|australia|philippines|scotland|"
+    r"new zealand|brazil|vancouver|london|edinburgh|taguig|manila|paris|berlin|munich|tokyo|seoul|beijing|shanghai|"
+    r"latam|latin america|emea|apac|europe|"
     r"european union|united kingdom|uk only|eu only)\b|\bremote\s*\(ca\))",
     flags=re.I,
 )
@@ -13692,12 +13747,44 @@ def source_issue_resolved_later(issue_source: dict[str, Any], issue_report: dict
     return False
 
 
+def unresolved_source_issues(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return only each source's latest unresolved health state across runs."""
+    unresolved: dict[tuple[str, str], dict[str, Any]] = {}
+    ordered_reports = sorted(
+        reports,
+        key=lambda report: str(report.get("started_at") or report.get("run_id") or ""),
+    )
+    for report in ordered_reports:
+        for source in report.get("sources", []):
+            key = source_issue_identity(source)
+            if not key[0]:
+                continue
+            if source_health_is_success(source):
+                unresolved.pop(key, None)
+                continue
+            if source_health_needs_attention(source):
+                item = dict(source)
+                item["_run_id"] = report.get("run_id", "")
+                unresolved[key] = item
+    return sorted(
+        unresolved.values(),
+        key=lambda source: (
+            str(source.get("company") or "").lower(),
+            str(source.get("platform") or "").lower(),
+        ),
+    )
+
+
 def command_source_health(args: argparse.Namespace) -> None:
     require_person_files()
     path = latest_discovery_run_path() if args.latest or not args.run_id else discovery_run_path(args.run_id)
     report = load_json(path)
     ensure_source_health_annotations(report.get("sources", []))
-    sources = [source for source in report.get("sources", []) if source_health_needs_attention(source)]
+    sources = [
+        source
+        for source in report.get("sources", [])
+        if source_health_needs_attention(source) and not source_health_is_success(source)
+    ]
     sources.sort(
         key=lambda source: (
             str(source.get("health") or ""),
@@ -14330,7 +14417,25 @@ def discover_startup_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def discover_builtin_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
-    return discover_static_job_board_jobs(source, "builtin_jobs", "Built In static job board adapter.")
+    candidates = discover_static_job_board_jobs(source, "builtin_jobs", "Built In static job board adapter.")
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        parsed = urllib.parse.urlparse(str(candidate.get("url") or ""))
+        host = parsed.netloc.lower()
+        path = parsed.path.rstrip("/").lower()
+        role = str(candidate.get("role") or "").strip()
+        is_builtin_host = "builtin" in host
+        if is_builtin_host and not re.match(r"^/job/[^/]+/\d+$", path):
+            continue
+        if re.match(r"^best\s+.+\s+jobs\s+in\b", role, flags=re.I):
+            continue
+        if str(candidate.get("company") or "").lower().startswith("built in") and " - " in role:
+            job_title, employer = role.rsplit(" - ", 1)
+            if job_title.strip() and employer.strip():
+                candidate["role"] = job_title.strip()
+                candidate["company"] = employer.strip()
+        filtered.append(candidate)
+    return filtered
 
 
 def discover_getro_jobs(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -14828,6 +14933,12 @@ def upsert_application(
     for app in apps:
         if normalize_job_url(app.get("url", "")) == normalized_url:
             changed = False
+            if not str(app.get("date_applied") or "").strip() and app.get("status") != "applied":
+                for field in ["company", "role", "location"]:
+                    value = str(candidate.get(field) or "").strip()
+                    if value and app.get(field) != value:
+                        app[field] = value
+                        changed = True
             for field in [
                 "posted_at",
                 "updated_at",
@@ -15051,6 +15162,8 @@ def extract_month_requirements(text: str) -> list[int]:
         flags=re.I,
     )
     for match in numeric_or_parenthetical.finditer(value):
+        if not experience_month_context(value, *match.span()):
+            continue
         if match.group("paren"):
             month_value = int(match.group("paren"))
         elif match.group("num"):
@@ -15060,6 +15173,41 @@ def extract_month_requirements(text: str) -> list[int]:
         if 0 < month_value <= 60:
             months.append(month_value)
     return months
+
+
+def experience_month_context(text: str, start: int, end: int) -> bool:
+    """Ignore benefit, leave, and scheduling durations that are not experience floors."""
+    context = text[max(0, start - 140) : min(len(text), end + 180)].lower()
+    near_context = text[max(0, start - 80) : min(len(text), end + 100)].lower()
+    non_experience_markers = (
+        "sabbatical",
+        "parental leave",
+        "paid leave",
+        "paid time off",
+        "vacation",
+        "pto",
+        "contract duration",
+        "temporary assignment",
+        "probation",
+    )
+    if any(marker in near_context for marker in non_experience_markers) and "experience" not in near_context:
+        return False
+    experience_markers = (
+        "experience",
+        "qualification",
+        "required",
+        "requires",
+        "minimum",
+        "must have",
+        "you have",
+        "you bring",
+        "background",
+        "working with",
+        "developing",
+        "building",
+        "supporting",
+    )
+    return any(marker in context for marker in experience_markers)
 
 
 def normalize_experience_text(text: str) -> str:
@@ -15159,7 +15307,7 @@ def required_experience_requirements(text: str) -> list[dict[str, Any]]:
     required_heading = re.compile(
         r"\b(?:required(?:\s*/\s*minimum)?\s+qualifications?|minimum\s+qualifications?|"
         r"basic\s+qualifications?|required\s+skills?|what\s+you(?:'|’)?ll\s+(?:need|bring)(?:\s+to\s+the\s+team)?|"
-        r"what\s+you\s+need)\b|(?m:^\s*requirements\b)",
+        r"what\s+you\s+(?:need|bring))\b|(?m:^\s*(?:requirements|required)\b)",
         flags=re.I,
     )
     stop_heading = re.compile(
@@ -15188,6 +15336,23 @@ def required_experience_years(text: str) -> int:
 
 def application_required_experience_years(app: dict[str, Any], text: str) -> int:
     """Return a conservative hard floor for platforms that omit section labels."""
+    degree = ""
+    if PROFILE_PATH.exists():
+        with contextlib.suppress(Exception):
+            degree = str(load_profile().get("education", {}).get("degree") or "").lower()
+    if "master" in degree or re.search(r"\bm\.?s\.?(?:\s|$)", degree, flags=re.I):
+        normalized = normalize_experience_text(text)
+        masters_years = [
+            int(value)
+            for value in re.findall(
+                r"\b(?:master(?:'s)?(?:\s+degree)?|m\.?s\.?)"
+                r"[^.;]{0,100}?(\d+)\s*\+?\s*years?",
+                normalized,
+                flags=re.I,
+            )
+        ]
+        if masters_years:
+            return max(masters_years)
     if str(app.get("platform") or "") == "amazon_jobs":
         values = [
             int(item.get("min") or 0)
@@ -16936,6 +17101,8 @@ def discover_source_candidates_with_retries(
         float(getattr(args, "source_retry_timeout_seconds", 0) or 0),
     )
     attempts: list[dict[str, Any]] = []
+    sources = load_json(SOURCES_PATH).get("sources", [])
+    source = sources[source_index] if 0 <= source_index < len(sources) else {}
 
     for attempt_index in range(max_retries + 1):
         attempt_number = attempt_index + 1
@@ -16961,6 +17128,28 @@ def discover_source_candidates_with_retries(
             if attempt_index >= max_retries:
                 raise SourceDiscoveryFailed(str(error), attempts) from error
             continue
+
+        effective_warnings = non_benign_discovery_warnings(str(warnings or ""))
+        warning_category = source_failure_category(source, effective_warnings)
+        retryable_warning = bool(effective_warnings) and warning_category in {
+            "fetch_error",
+            "http_5xx",
+            "invalid_json_payload",
+            "ssl_certificate",
+            "timeout",
+            "unknown_failure",
+        }
+        if retryable_warning:
+            attempt_report["status"] = "partial_success" if candidates else "failed"
+            attempt_report["error"] = effective_warnings
+            attempt_report["finished_at"] = now_utc_iso()
+            attempt_report["duration_seconds"] = round(time.time() - attempt_started, 2)
+            attempts.append(attempt_report)
+            if attempt_index < max_retries:
+                continue
+            if not candidates:
+                raise SourceDiscoveryFailed(effective_warnings, attempts)
+            return candidates, warnings, attempts
 
         attempt_report["status"] = "success"
         attempt_report["finished_at"] = now_utc_iso()
@@ -18656,6 +18845,9 @@ def application_filter_text(app: dict[str, Any]) -> str:
             parts.extend(str(item) for item in value)
         else:
             parts.append(str(value))
+    jd_text = recommendation_jd_text(app)
+    if jd_text:
+        parts.append(jd_text)
     return " ".join(parts).lower()
 
 
@@ -18665,9 +18857,82 @@ def matches_preferred_location(text: str) -> bool:
 
 def application_location_bucket(app: dict[str, Any]) -> str:
     stored = str(app.get("location_bucket") or "").strip().lower()
+    computed = location_preference_bucket(str(app.get("location") or ""), {})
+    if computed == "rejected":
+        return "rejected"
     if stored in {"preferred", "relocation", "maybe", "rejected"}:
         return stored
-    return location_preference_bucket(str(app.get("location") or ""), {})
+    return computed
+
+
+AGGREGATOR_PLATFORMS = {
+    "builtin_jobs",
+    "consider_jobs",
+    "getro_jobs",
+    "hn_jobs",
+    "psl_jobs",
+    "startup_jobs",
+    "yc_jobs",
+}
+
+
+def application_company_role_identity(app: dict[str, Any]) -> tuple[str, str]:
+    company = str(app.get("company") or "").strip()
+    role = str(app.get("role") or "").strip()
+    if company.lower().startswith("built in") and " - " in role:
+        role, company = role.rsplit(" - ", 1)
+    return (
+        normalize_company_identity(company),
+        re.sub(r"[^a-z0-9]+", " ", role.lower()).strip(),
+    )
+
+
+def location_identity_tokens(value: Any) -> set[str]:
+    ignored = {
+        "area", "hybrid", "office", "remote", "state", "states", "united", "usa", "us",
+        "wa", "washington", "ca", "california", "ny", "new", "york", "tx", "texas",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z]+", str(value or "").lower())
+        if len(token) >= 4 and token not in ignored
+    }
+
+
+def is_cross_url_applied_duplicate(app: dict[str, Any], applied_apps: list[dict[str, Any]]) -> bool:
+    company_role = application_company_role_identity(app)
+    if not company_role[0]:
+        return False
+    external_ids = {
+        str(app.get(field) or "").strip().lower()
+        for field in ("external_job_id", "job_number")
+        if str(app.get(field) or "").strip()
+    }
+    posted_day = str(app.get("posted_at") or "")[:10]
+    location_tokens = location_identity_tokens(app.get("location"))
+    for applied in applied_apps:
+        applied_identity = application_company_role_identity(applied)
+        if applied_identity[0] != company_role[0]:
+            continue
+        applied_external_ids = {
+            str(applied.get(field) or "").strip().lower()
+            for field in ("external_job_id", "job_number")
+            if str(applied.get(field) or "").strip()
+        }
+        if external_ids and applied_external_ids and external_ids.intersection(applied_external_ids):
+            return True
+        if str(app.get("platform") or "") not in AGGREGATOR_PLATFORMS:
+            continue
+        if applied_identity[1] != company_role[1]:
+            continue
+        applied_day = str(applied.get("posted_at") or "")[:10]
+        if posted_day and applied_day and posted_day != applied_day:
+            continue
+        applied_location_tokens = location_identity_tokens(applied.get("location"))
+        if location_tokens and applied_location_tokens and not location_tokens.intersection(applied_location_tokens):
+            continue
+        return True
+    return False
 
 
 def location_bucket_priority_score(bucket: str) -> int:
@@ -18681,11 +18946,18 @@ def recommendation_rejection_reasons(app: dict[str, Any]) -> list[str]:
         reasons.append("outside_us")
     if has_seniority_title_signal(app):
         reasons.append("senior_or_level_iii")
-    if has_year_requirement(filter_text, 5):
+    if application_required_experience_years(app, filter_text) >= 5:
         reasons.append("5_plus_years")
     if has_phd_signal(app):
         reasons.append("phd")
-    if re.search(r"\b(?:security clearance|active clearance|secret clearance|top secret|u\.s\. citizen|us citizen)\b", filter_text):
+    clearance_or_citizenship = re.search(
+        r"\b(?:security clearance|active clearance|secret clearance|top secret|itar)\b|"
+        r"\b(?:must|required to|need to)\s+(?:be\s+)?(?:a\s+)?u\.?s\.?\s+citizen\b|"
+        r"\bu\.?s\.?\s+citizenship\s+(?:is\s+)?required\b|"
+        r"\bonly\s+u\.?s\.?\s+citizens\b",
+        filter_text,
+    )
+    if clearance_or_citizenship:
         reasons.append("clearance_or_citizenship")
     if app.get("dealbreakers") and not reasons:
         reasons.append("dealbreaker")
@@ -18716,13 +18988,11 @@ def level_two_title_signal(app: dict[str, Any]) -> bool:
 
 
 def experience_requirement_bucket(app: dict[str, Any]) -> str:
-    existing = str(app.get("experience_bucket") or "").strip()
-    if existing:
-        return existing
     role = str(app.get("role") or "")
+    jd_text = recommendation_jd_text(app)
     tracker_text = application_filter_text(app)
-    filter_text = f"{tracker_text} {recommendation_jd_text(app)}"
-    title_and_tracker_text = f"{role} {tracker_text}".lower()
+    filter_text = tracker_text
+    title_and_tracker_text = f"{role} {app.get('source_query', '')}".lower()
     if re.search(r"\b(new\s+grad|new\s+college|early\s+career|entry[-\s]?level|apprentice(ship)?|junior)\b", title_and_tracker_text):
         return "new_grad"
     requirements = required_experience_requirements(filter_text) or extract_year_requirements(filter_text)
@@ -18758,7 +19028,9 @@ def experience_requirement_bucket(app: dict[str, Any]) -> str:
             return "1_2"
     if level_two_title_signal(app):
         return "2_plus"
-    return "unknown"
+    if jd_text:
+        return "unknown"
+    return str(app.get("experience_bucket") or "").strip() or "unknown"
 
 
 def early_career_campaign_evaluation(
@@ -18890,6 +19162,12 @@ def early_career_campaign_evaluation(
     }
 
 
+@functools.lru_cache(maxsize=20000)
+def read_recommendation_jd_file(path_value: str, modified_ns: int, max_chars: int) -> str:
+    del modified_ns  # Included in the cache key so updated JDs are re-read.
+    return Path(path_value).read_text(encoding="utf-8", errors="replace")[:max_chars]
+
+
 def recommendation_jd_text(app: dict[str, Any], max_chars: int = 60000) -> str:
     path_value = str(app.get("jd_path") or "").strip()
     if not path_value:
@@ -18900,7 +19178,7 @@ def recommendation_jd_text(app: dict[str, Any], max_chars: int = 60000) -> str:
     try:
         if not path.exists() or not path.is_file():
             return ""
-        return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        return read_recommendation_jd_file(str(path), path.stat().st_mtime_ns, max_chars)
     except OSError:
         return ""
 
@@ -18930,6 +19208,8 @@ def has_seniority_title_signal(app: dict[str, Any]) -> bool:
     if re.search(rf"\b(?:{role_families})\s*{level_three_plus}\b", role):
         return True
     if re.search(rf"\bengineer\s*{level_three_plus}\b", role):
+        return True
+    if re.search(rf"\blevel\s*{level_three_plus}\b", role):
         return True
     return False
 
@@ -19015,16 +19295,26 @@ def early_career_campaign_rows(
             continue
         if EARLY_CAREER_CAMPAIGN not in (app.get("campaigns") or []):
             continue
-        if str(app.get("early_career_bucket") or "manual_review") != bucket:
+        evaluated_app = dict(app)
+        jd_text = recommendation_jd_text(evaluated_app)
+        if jd_text:
+            refreshed = early_career_campaign_evaluation(
+                evaluated_app,
+                jd_text,
+                assume_candidate=True,
+            )
+            if refreshed:
+                evaluated_app.update(refreshed)
+        if str(evaluated_app.get("early_career_bucket") or "manual_review") != bucket:
             continue
         if bucket not in {"manual_review", "rejected"}:
-            if app.get("status") not in {"found", "prepared", "needs_review", "scored"}:
+            if evaluated_app.get("status") not in {"found", "prepared", "needs_review", "scored"}:
                 continue
-            if numeric_score(app.get("fit_score")) < min_fit:
+            if numeric_score(evaluated_app.get("fit_score")) < min_fit:
                 continue
-            if app.get("dealbreakers"):
+            if evaluated_app.get("dealbreakers") or recommendation_rejection_reasons(evaluated_app):
                 continue
-        rows.append(app)
+        rows.append(evaluated_app)
     rows.sort(key=early_career_campaign_sort_key, reverse=True)
     if company_limit > 0:
         rows = cap_recommendations_by_company(rows, company_limit)
@@ -19053,9 +19343,11 @@ def daily_review_app_rows(
                 continue
             if is_maybe_backlog_app(app):
                 continue
-            if app.get("dealbreakers"):
+            if app.get("dealbreakers") or rejection_reasons:
                 continue
             if numeric_score(app.get("fit_score")) < min_fit:
+                continue
+            if experience_requirement_bucket(app) == "3_plus":
                 continue
             expected_location_bucket = "preferred" if bucket == "priority" else "relocation"
             if location_bucket != expected_location_bucket:
@@ -19064,6 +19356,22 @@ def daily_review_app_rows(
             if has_seniority_title_signal(app):
                 continue
             if has_phd_signal(app):
+                continue
+            if re.search(r"\bintern(ship)?\b", filter_text):
+                continue
+        elif bucket == "experience_stretch":
+            if app.get("status") not in {"prepared", "needs_review", "scored"}:
+                continue
+            if is_maybe_backlog_app(app) or app.get("dealbreakers") or rejection_reasons:
+                continue
+            if numeric_score(app.get("fit_score")) < min_fit:
+                continue
+            if location_bucket not in {"preferred", "relocation"}:
+                continue
+            if experience_requirement_bucket(app) != "3_plus":
+                continue
+            filter_text = application_filter_text(app)
+            if has_seniority_title_signal(app) or has_phd_signal(app):
                 continue
             if re.search(r"\bintern(ship)?\b", filter_text):
                 continue
@@ -19111,7 +19419,7 @@ def daily_review_app_rows(
             continue
         rows.append(app)
     rows.sort(key=recommendation_sort_key, reverse=True)
-    if bucket in {"priority", "relocation", "promoted_maybe"}:
+    if bucket in {"priority", "relocation", "experience_stretch", "promoted_maybe"}:
         rows = cap_recommendations_by_company(rows, company_limit)
     return rows[:limit] if limit > 0 else rows
 
@@ -19189,6 +19497,62 @@ def discovery_reports_for_date(date_value: str, latest_only: bool = True) -> lis
     return reports
 
 
+def applications_for_discovery_window(
+    apps: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return strict posted-date rows and separately tracked unknown-date rows for report windows."""
+    if not reports:
+        return apps, []
+    cutoffs = [parse_datetime(report.get("cutoff")) for report in reports]
+    starts = [parse_datetime(report.get("started_at")) for report in reports]
+    finishes = [parse_datetime(report.get("finished_at")) for report in reports]
+    cutoff_values = [value for value in cutoffs if value]
+    end_values = [value for value in finishes + starts if value]
+    if not cutoff_values or not end_values:
+        return apps, []
+    window_start = min(cutoff_values)
+    window_end = max(end_values)
+    run_started_at = {
+        str(report.get("started_at") or "").strip()
+        for report in reports
+        if str(report.get("started_at") or "").strip()
+    }
+    strict: list[dict[str, Any]] = []
+    unknown: list[dict[str, Any]] = []
+    for app in apps:
+        if str(app.get("date_applied") or "").strip() or app.get("status") == "applied":
+            continue
+        posted_at = parse_datetime(app.get("posted_at"))
+        if posted_at and window_start <= posted_at <= window_end:
+            strict.append(app)
+            continue
+        if posted_at:
+            continue
+        first_seen = parse_datetime(app.get("first_seen"))
+        seen_in_run = str(app.get("last_seen") or "").strip() in run_started_at
+        if seen_in_run or (first_seen and window_start <= first_seen <= window_end):
+            unknown.append(app)
+    return strict, unknown
+
+
+def unknown_freshness_review_rows(
+    apps: list[dict[str, Any]],
+    limit: int,
+    company_limit: int = DEFAULT_RECOMMENDATION_COMPANY_LIMIT,
+) -> list[dict[str, Any]]:
+    rows = [
+        app
+        for app in apps
+        if app.get("status") in {"found", "prepared", "needs_review", "scored", "needs_retry"}
+        and not app.get("dealbreakers")
+        and not recommendation_rejection_reasons(app)
+    ]
+    rows.sort(key=recommendation_sort_key, reverse=True)
+    rows = cap_recommendations_by_company(rows, company_limit)
+    return rows[:limit] if limit > 0 else rows
+
+
 def command_daily_review(args: argparse.Namespace) -> None:
     require_person_files()
     review_date = args.date or today()
@@ -19196,14 +19560,38 @@ def command_daily_review(args: argparse.Namespace) -> None:
     all_reports = bool(getattr(args, "all_reports", False))
     reports = discovery_reports_for_date(review_date, latest_only=not all_reports)
     reports_for_resolution = discovery_reports_for_date(review_date, latest_only=False) if not all_reports else reports
-    priority = daily_review_app_rows(apps, "priority", args.min_fit, args.limit, args.company_limit)
-    relocation = daily_review_app_rows(apps, "relocation", args.min_fit, args.limit, args.company_limit)
-    promoted_maybe = daily_review_app_rows(apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit, args.company_limit)
+    review_apps, unknown_freshness_apps = applications_for_discovery_window(apps, reports)
+    applied_apps = [
+        app
+        for app in apps
+        if str(app.get("date_applied") or "").strip() or app.get("status") == "applied"
+    ]
+    review_apps = [
+        app for app in review_apps if not is_cross_url_applied_duplicate(app, applied_apps)
+    ]
+    unknown_freshness_apps = [
+        app for app in unknown_freshness_apps if not is_cross_url_applied_duplicate(app, applied_apps)
+    ]
+    priority = daily_review_app_rows(review_apps, "priority", args.min_fit, args.limit, args.company_limit)
+    relocation = daily_review_app_rows(review_apps, "relocation", args.min_fit, args.limit, args.company_limit)
+    experience_stretch = daily_review_app_rows(
+        review_apps,
+        "experience_stretch",
+        args.min_fit,
+        args.limit,
+        args.company_limit,
+    )
+    promoted_maybe = daily_review_app_rows(review_apps, "promoted_maybe", max(args.min_fit, 9.0), args.limit, args.company_limit)
     promoted_ids = {str(app.get("id", "")) for app in promoted_maybe}
-    maybe = daily_review_app_rows(apps, "maybe", 0, args.limit)
+    maybe = daily_review_app_rows(review_apps, "maybe", 0, args.limit)
     maybe = [app for app in maybe if str(app.get("id", "")) not in promoted_ids]
-    rejected = daily_review_app_rows(apps, "rejected", 0, args.limit)
-    retry = daily_review_app_rows(apps, "retry", 0, args.limit)
+    rejected = daily_review_app_rows(review_apps, "rejected", 0, args.limit)
+    retry = daily_review_app_rows(review_apps, "retry", 0, args.limit)
+    unknown_freshness = unknown_freshness_review_rows(
+        unknown_freshness_apps,
+        args.limit,
+        args.company_limit,
+    )
     requested_campaign = str(getattr(args, "campaign", "") or "").strip()
     campaign_sections: dict[str, list[dict[str, Any]]] = {}
     if requested_campaign == EARLY_CAREER_CAMPAIGN:
@@ -19214,28 +19602,23 @@ def command_daily_review(args: argparse.Namespace) -> None:
                 else float(getattr(args, "campaign_min_fit", 6.0) or 0)
             )
             campaign_sections[campaign_bucket] = early_career_campaign_rows(
-                apps,
+                review_apps,
                 campaign_bucket,
                 campaign_min_fit,
                 args.limit,
                 args.company_limit,
             )
-    source_issues: list[dict[str, Any]] = []
-    for report in reports:
-        for source in report.get("sources", []):
-            if source_health_needs_attention(source):
-                if not all_reports and source_issue_resolved_later(source, report, reports_for_resolution):
-                    continue
-                item = dict(source)
-                item["_run_id"] = report.get("run_id", "")
-                source_issues.append(item)
+    source_issues = unresolved_source_issues(reports_for_resolution)
 
     lines = [
         f"# Daily Job Review - {review_date}",
         "",
         f"- Discovery reports: {len(reports)}",
+        f"- Strict posted-date window candidates: {len(review_apps)}",
+        f"- Unknown-date candidates seen in window: {len(unknown_freshness_apps)}",
         f"- Priority candidates: {len(priority)}",
         f"- Relocation candidates: {len(relocation)}",
+        f"- Experience stretch (3-4 years): {len(experience_stretch)}",
         f"- Promoted maybe: {len(promoted_maybe)}",
         f"- Maybe backlog: {len(maybe)}",
         f"- Rejected candidates: {len(rejected)}",
@@ -19253,10 +19636,12 @@ def command_daily_review(args: argparse.Namespace) -> None:
         lines.extend(render_daily_review_app_section("Early Career Rejected", campaign_sections["rejected"]))
     lines.extend(render_daily_review_app_section("Priority", priority))
     lines.extend(render_daily_review_app_section("Relocation", relocation))
+    lines.extend(render_daily_review_app_section("Experience Stretch (3-4 Years)", experience_stretch))
     lines.extend(render_daily_review_app_section("Promoted Maybe", promoted_maybe))
     lines.extend(render_daily_review_app_section("Maybe Backlog", maybe))
     lines.extend(render_daily_review_app_section("Rejected", rejected))
     lines.extend(render_daily_review_app_section("Retry Needed", retry))
+    lines.extend(render_daily_review_app_section("Unknown Freshness", unknown_freshness))
     lines.extend(["## Source Health Issues", ""])
     if not source_issues:
         lines.extend(["- None", ""])

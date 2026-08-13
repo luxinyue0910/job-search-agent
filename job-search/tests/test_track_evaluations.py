@@ -429,6 +429,38 @@ class TrackEvaluationTest(unittest.TestCase):
                 self.assertIn(query, campaign["keywords"])
             self.assertEqual(campaign["keywords"].count("Software Engineer"), 1)
 
+    def test_query_expanding_source_caps_union_keywords_without_dropping_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            source = {
+                "company": "Large Workday",
+                "platform": "workday",
+                "keywords": [f"Base {index}" for index in range(10)],
+                "track_keywords": {
+                    "general_sde": ["General One", "General Two"],
+                    "qa_engineer": ["QA One", "QA Two"],
+                    "fde_ai_engineer": ["FDE One", "FDE Two"],
+                },
+                "campaign_keywords": {
+                    "early_career_us": ["New Grad One", "New Grad Two"],
+                },
+                "max_union_keywords": 8,
+            }
+
+            selected = job_search.source_for_tracks(
+                source,
+                ["general_sde", "qa_engineer", "fde_ai_engineer"],
+                [job_search.EARLY_CAREER_CAMPAIGN],
+            )
+
+            self.assertEqual(len(selected["keywords"]), 8)
+            self.assertIn("New Grad One", selected["keywords"])
+            self.assertIn("General One", selected["keywords"])
+            self.assertIn("QA One", selected["keywords"])
+            self.assertIn("FDE One", selected["keywords"])
+
     def test_early_career_campaign_classifies_experience_and_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -538,6 +570,34 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertEqual(len(priority_rows), 2)
             self.assertEqual([app["id"] for app in strong_rows], ["relocation-strong"])
 
+    def test_early_career_campaign_rows_reject_level_three_even_with_stale_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            write_workspace(private_root, base_application())
+            job_search = load_job_search(private_root)
+            app = base_application()
+            app.update(
+                {
+                    "id": "level-three",
+                    "role": "Software Engineer, Backend, Level 3",
+                    "campaigns": [job_search.EARLY_CAREER_CAMPAIGN],
+                    "early_career_bucket": "priority",
+                    "early_career_score": 10.0,
+                    "fit_score": 10.0,
+                    "ats_score": 90,
+                    "status": "scored",
+                }
+            )
+
+            rows = job_search.early_career_campaign_rows(
+                [app],
+                "priority",
+                min_fit=6.0,
+                limit=0,
+            )
+
+            self.assertEqual(rows, [])
+
     def test_upsert_can_replace_early_career_score_with_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             private_root = Path(tmp)
@@ -554,7 +614,7 @@ class TrackEvaluationTest(unittest.TestCase):
 
             updated, created = job_search.upsert_application(
                 {
-                    "company": app["company"],
+                    "company": "Renamed Company",
                     "role": app["role"],
                     "url": app["url"],
                     "early_career_score": 0.0,
@@ -566,6 +626,57 @@ class TrackEvaluationTest(unittest.TestCase):
             self.assertFalse(created)
             self.assertEqual(updated["early_career_score"], 0.0)
             self.assertEqual(updated["early_career_bucket"], "rejected")
+
+    def test_upsert_refreshes_role_and_location_before_application(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update({"role": "Software Engineer II", "location": "Boston, MA"})
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+
+            updated, created = job_search.upsert_application(
+                {
+                    "company": "Renamed Company",
+                    "role": "Software Engineer III",
+                    "location": "Bellevue, WA",
+                    "url": app["url"],
+                }
+            )
+
+            self.assertFalse(created)
+            self.assertEqual(updated["company"], "Renamed Company")
+            self.assertEqual(updated["role"], "Software Engineer III")
+            self.assertEqual(updated["location"], "Bellevue, WA")
+
+    def test_upsert_does_not_rewrite_applied_role_and_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private_root = Path(tmp)
+            app = base_application()
+            app.update(
+                {
+                    "role": "Software Engineer II",
+                    "location": "Boston, MA",
+                    "status": "applied",
+                    "date_applied": "2026-08-01",
+                }
+            )
+            write_workspace(private_root, app)
+            job_search = load_job_search(private_root)
+
+            updated, created = job_search.upsert_application(
+                {
+                    "company": "Renamed Company",
+                    "role": "Software Engineer III",
+                    "location": "Bellevue, WA",
+                    "url": app["url"],
+                }
+            )
+
+            self.assertFalse(created)
+            self.assertEqual(updated["company"], app["company"])
+            self.assertEqual(updated["role"], "Software Engineer II")
+            self.assertEqual(updated["location"], "Boston, MA")
 
     def test_scores_each_track_from_one_cached_jd_and_keeps_higher_track(self):
         with tempfile.TemporaryDirectory() as tmp:

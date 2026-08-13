@@ -42,6 +42,7 @@ def write_private_workspace(private_root: Path, sources: list[dict]):
                 },
                 "dealbreakers": {},
                 "work_authorization": {"requires_sponsorship": False},
+                "education": {"degree": "Master of Science"},
             }
         ),
         encoding="utf-8",
@@ -5429,6 +5430,15 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(report["result_status"], "failed")
             self.assertEqual(report["health"], "config_broken")
             self.assertEqual(report["failure_category"], "greenhouse_404")
+            self.assertTrue(job_search.source_health_needs_attention(report))
+            self.assertFalse(job_search.source_health_is_success(report))
+
+            recovered = {
+                "status": "retry_success",
+                "health": "new_jobs_found",
+                "failure_category": "timeout",
+            }
+            self.assertTrue(job_search.source_health_is_success(recovered))
 
             self.assertEqual(
                 job_search.source_failure_category(
@@ -6269,11 +6279,37 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertEqual(job_search.extract_years("Minimum qualification is two years of support experience."), [2])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6) months of software experience."), [6])
             self.assertEqual(job_search.extract_month_requirements("Requires six (6)&nbsp;months of software experience."), [6])
+            self.assertEqual(job_search.extract_month_requirements("Benefits include a 1 month paid sabbatical."), [])
             self.assertEqual(job_search.extract_year_requirements("Employees receive more vacation after 5 years of service."), [])
+
+    def test_builtin_adapter_excludes_category_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            candidates = [
+                {
+                    "company": "Built In Seattle",
+                    "role": "Best Software Engineer Jobs in Seattle 2026",
+                    "url": "https://www.builtinseattle.com/jobs/dev-engineering/software-engineering",
+                },
+                {
+                    "company": "Built In Seattle",
+                    "role": "Software Engineer I - Rocket Companies",
+                    "url": "https://www.builtinseattle.com/job/software-engineer-i/12345",
+                },
+            ]
+            with mock.patch.object(job_search, "discover_static_job_board_jobs", return_value=candidates):
+                rows = job_search.discover_builtin_jobs(
+                    {"company": "Built In Seattle", "url": "https://www.builtinseattle.com/jobs"}
+                )
+
+            self.assertEqual([row["role"] for row in rows], ["Software Engineer I"])
+            self.assertEqual([row["company"] for row in rows], ["Rocket Companies"])
 
     def test_required_experience_years_uses_hard_qualification_section(self):
         with tempfile.TemporaryDirectory() as tmp:
-            job_search = load_job_search(Path(tmp))
+            private_root = Path(tmp)
+            write_private_workspace(private_root, [])
+            job_search = load_job_search(private_root)
             amazon_style = """
             Basic Qualifications
             3+ years of professional software development experience.
@@ -6285,9 +6321,22 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             Required/Minimum Qualifications: 2+ years of technical engineering experience.
             Preferred Qualifications: 5+ years of software engineering experience.
             """
+            what_you_bring = """
+            What You Bring
+            5+ years of experience as a data engineer.
+            2+ years in a customer-facing role.
+            """
+            required_label = """
+            Required
+            3+ years of software development experience, with 2+ years in backend systems.
+            Nice to Have
+            Kubernetes experience.
+            """
 
             self.assertEqual(job_search.required_experience_years(amazon_style), 3)
             self.assertEqual(job_search.required_experience_years(microsoft_style), 2)
+            self.assertEqual(job_search.required_experience_years(what_you_bring), 5)
+            self.assertEqual(job_search.required_experience_years(required_label), 3)
             self.assertEqual(
                 job_search.application_required_experience_years(
                     {"platform": "amazon_jobs"},
@@ -6295,6 +6344,18 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                 ),
                 3,
             )
+            degree_alternatives = """
+            Required Qualifications
+            Bachelor's degree and 5+ years of relevant experience, Master's degree
+            and 3+ years of relevant experience, or PhD and 1+ years of experience.
+            """
+            self.assertEqual(
+                job_search.application_required_experience_years({}, degree_alternatives),
+                3,
+            )
+            degree_app = {"role": "Machine Learning Systems Engineer", "notes": degree_alternatives}
+            self.assertEqual(job_search.experience_requirement_bucket(degree_app), "3_plus")
+            self.assertNotIn("5_plus_years", job_search.recommendation_rejection_reasons(degree_app))
 
     def test_experience_bucket_uses_lowest_viable_requirement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6306,6 +6367,13 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
 
             self.assertEqual(job_search.experience_requirement_bucket(app), "2_plus")
             self.assertFalse(job_search.has_year_requirement(job_search.application_filter_text(app), 3))
+
+    def test_foreign_cities_are_not_treated_as_ambiguous_us_locations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+
+            self.assertEqual(job_search.location_preference_bucket("Taguig City"), "rejected")
+            self.assertEqual(job_search.location_preference_bucket("Edinburgh, UK"), "rejected")
 
     def test_score_text_recomputes_stale_experience_bucket(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6400,6 +6468,9 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             rejected = job_search.score_text(
                 {"company": "EU", "role": "Software Engineer", "location": "Berlin, Germany"}, jd, profile
             )
+            munich = job_search.score_text(
+                {"company": "EU", "role": "Software Engineer", "location": "Munich"}, jd, profile
+            )
 
             self.assertEqual(preferred["location_bucket"], "preferred")
             self.assertEqual(relocation["location_bucket"], "relocation")
@@ -6409,6 +6480,7 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertGreater(relocation["fit_score"], unknown["fit_score"])
             self.assertNotEqual(relocation["status"], "skipped")
             self.assertEqual(rejected["status"], "skipped")
+            self.assertEqual(munich["location_bucket"], "rejected")
 
     def test_daily_review_priority_uses_strict_recommendation_filters(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6497,13 +6569,25 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                     "fit_score": 10,
                     "ats_score": 90,
                 },
+                {
+                    "id": "itar",
+                    "status": "scored",
+                    "company": "ExportCo",
+                    "role": "Software Engineer",
+                    "location": "Seattle, WA",
+                    "notes": "This position is subject to ITAR export regulations.",
+                    "fit_score": 10,
+                    "ats_score": 90,
+                },
             ]
 
             priority = job_search.daily_review_app_rows(apps, "priority", 8, 10)
             relocation = job_search.daily_review_app_rows(apps, "relocation", 8, 10)
+            experience_stretch = job_search.daily_review_app_rows(apps, "experience_stretch", 8, 10)
 
             self.assertEqual([row["id"] for row in priority], ["good"])
-            self.assertEqual({row["id"] for row in relocation}, {"three-years", "range-years", "dc"})
+            self.assertEqual({row["id"] for row in relocation}, {"range-years", "dc"})
+            self.assertEqual([row["id"] for row in experience_stretch], ["three-years"])
 
     def test_daily_review_prioritizes_entry_level_and_caps_company(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6571,6 +6655,9 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             self.assertLess(rows.index(next(row for row in rows if row["id"] == "one-two")), rows.index(next(row for row in rows if row["id"] == "two-plus")))
             self.assertEqual(sum(1 for row in rows if row["company"] == "BigCo"), 3)
 
+            stretch = job_search.daily_review_app_rows(apps, "experience_stretch", 8, 20)
+            self.assertTrue(all(job_search.experience_requirement_bucket(row) == "3_plus" for row in stretch))
+
     def test_experience_bucket_can_use_existing_jd_path_without_rescoring(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))
@@ -6588,6 +6675,39 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             }
 
             self.assertEqual(job_search.experience_requirement_bucket(app), "2_plus")
+
+    def test_experience_bucket_refreshes_stale_tracker_value_from_cached_jd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            jd_path = Path(tmp) / "jd.md"
+            jd_path.write_text(
+                "Required Qualifications: 5+ years of software development experience.",
+                encoding="utf-8",
+            )
+            app = {
+                "role": "Software Engineer II",
+                "experience_bucket": "new_grad",
+                "jd_path": str(jd_path),
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "3_plus")
+            self.assertIn("5_plus_years", job_search.recommendation_rejection_reasons(app))
+
+    def test_experience_bucket_does_not_reuse_stale_value_when_cached_jd_has_no_years(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            jd_path = Path(tmp) / "jd.md"
+            jd_path.write_text(
+                "Required Qualifications: Experience building reliable Python services and APIs.",
+                encoding="utf-8",
+            )
+            app = {
+                "role": "Software Engineer",
+                "experience_bucket": "0_1",
+                "jd_path": str(jd_path),
+            }
+
+            self.assertEqual(job_search.experience_requirement_bucket(app), "unknown")
 
     def test_experience_bucket_treats_month_requirements_as_entry_level(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6627,6 +6747,67 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             }
 
             self.assertEqual(job_search.experience_requirement_bucket(app), "2_range")
+
+    def test_builtin_duplicate_matches_applied_official_posting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            builtin = {
+                "company": "Built In Seattle",
+                "role": "Software Developer I - Rocket Companies",
+                "platform": "builtin_jobs",
+                "location": "Seattle",
+                "posted_at": "2026-08-11T00:00:00+00:00",
+            }
+            applied = {
+                "company": "Rocket Companies",
+                "role": "Software Developer I",
+                "platform": "workday",
+                "location": "Seattle, Washington",
+                "posted_at": "2026-08-11T00:00:00+00:00",
+                "status": "applied",
+                "date_applied": "2026-08-11",
+            }
+
+            self.assertTrue(job_search.is_cross_url_applied_duplicate(builtin, [applied]))
+
+            workday_duplicate = {
+                "company": "Cohesity",
+                "role": "Software Engineer (New Grad 2026)",
+                "platform": "workday",
+                "external_job_id": "R01282",
+            }
+            applied_workday = {
+                "company": "Cohesity",
+                "role": "Software Engineer",
+                "platform": "workday",
+                "job_number": "R01282",
+                "status": "applied",
+                "date_applied": "2026-08-12",
+            }
+            self.assertTrue(
+                job_search.is_cross_url_applied_duplicate(workday_duplicate, [applied_workday])
+            )
+
+    def test_recommendation_citizenship_filter_does_not_reject_work_authorization_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            authorized = {
+                "role": "Backend Software Engineer",
+                "notes": "Authorized to work in the United States (US citizen or valid US work visa).",
+            }
+            itar = {
+                "role": "Software Engineer",
+                "notes": "This position is subject to ITAR export regulations.",
+            }
+
+            self.assertNotIn(
+                "clearance_or_citizenship",
+                job_search.recommendation_rejection_reasons(authorized),
+            )
+            self.assertIn(
+                "clearance_or_citizenship",
+                job_search.recommendation_rejection_reasons(itar),
+            )
 
     def test_daily_review_promotes_high_scoring_maybe_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6696,6 +6877,61 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
             retry = job_search.daily_review_app_rows(apps, "retry", 0, 10)
 
             self.assertEqual([row["id"] for row in retry], ["retry-good"])
+
+    def test_level_three_and_four_titles_are_seniority_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            self.assertTrue(
+                job_search.has_seniority_title_signal(
+                    {"role": "Software Engineer, Backend, Level 3"}
+                )
+            )
+            self.assertTrue(
+                job_search.has_seniority_title_signal(
+                    {"role": "Software Engineer, ML Infrastructure, Level 4"}
+                )
+            )
+
+    def test_discovery_window_includes_recent_existing_and_separates_unknown_dates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            reports = [
+                {
+                    "cutoff": "2026-08-06T18:00:00+00:00",
+                    "started_at": "2026-08-13T18:00:00+00:00",
+                    "finished_at": "2026-08-13T18:30:00+00:00",
+                }
+            ]
+            apps = [
+                {
+                    "id": "recent-existing",
+                    "status": "scored",
+                    "posted_at": "2026-08-07T12:00:00+00:00",
+                    "last_seen": "2026-08-11T12:00:00+00:00",
+                },
+                {
+                    "id": "old",
+                    "status": "scored",
+                    "posted_at": "2026-07-20T12:00:00+00:00",
+                },
+                {
+                    "id": "unknown-current-run",
+                    "status": "needs_review",
+                    "posted_at": "",
+                    "last_seen": "2026-08-13T18:00:00+00:00",
+                },
+                {
+                    "id": "already-applied",
+                    "status": "applied",
+                    "date_applied": "2026-08-12",
+                    "posted_at": "2026-08-08T12:00:00+00:00",
+                },
+            ]
+
+            strict, unknown = job_search.applications_for_discovery_window(apps, reports)
+
+            self.assertEqual([app["id"] for app in strict], ["recent-existing"])
+            self.assertEqual([app["id"] for app in unknown], ["unknown-current-run"])
 
     def test_discovery_reports_for_date_defaults_to_latest_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6833,6 +7069,35 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                     [failed_report, retry_report],
                 )
             )
+            self.assertEqual(
+                job_search.unresolved_source_issues([failed_report, retry_report]),
+                [],
+            )
+
+    def test_source_health_keeps_only_latest_unresolved_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            reports = [
+                {
+                    "run_id": "2026-07-06T18-00-36Z",
+                    "started_at": "2026-07-06T18:00:36+00:00",
+                    "sources": [
+                        {"company": "Airbnb", "platform": "greenhouse", "status": "failed", "health": "fetch_failed"}
+                    ],
+                },
+                {
+                    "run_id": "2026-07-06T18-33-22Z",
+                    "started_at": "2026-07-06T18:33:22+00:00",
+                    "sources": [
+                        {"company": "Airbnb", "platform": "greenhouse", "status": "failed_after_retries", "health": "fetch_failed"}
+                    ],
+                },
+            ]
+
+            issues = job_search.unresolved_source_issues(reports)
+
+            self.assertEqual(len(issues), 1)
+            self.assertEqual(issues[0]["_run_id"], "2026-07-06T18-33-22Z")
 
 
 if __name__ == "__main__":
