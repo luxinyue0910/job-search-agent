@@ -6233,6 +6233,27 @@ class DiscoveryCompatibilityTest(unittest.TestCase):
                         )
                     )
 
+    def test_software_development_engineer_matches_general_sde_track_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_search = load_job_search(Path(tmp))
+            profile = {
+                "targets": {"roles": ["Software Engineer"], "levels": []},
+                "_track": {
+                    "id": "general_sde",
+                    "discovery_title_keywords": ["software engineer"],
+                },
+            }
+
+            self.assertTrue(
+                job_search.discovery_title_matches(
+                    {
+                        "role": "Software Development Engineer I, ML Infra Services",
+                        "url": "https://www.amazon.jobs/en/jobs/10464043/example",
+                    },
+                    profile,
+                )
+            )
+
     def test_extract_years_ignores_age_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_search = load_job_search(Path(tmp))

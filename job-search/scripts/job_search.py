@@ -12210,6 +12210,10 @@ def discovery_title_matches(candidate: dict[str, Any], profile: dict[str, Any]) 
         for item in profile.get("_track", {}).get("discovery_title_keywords", [])
         if str(item).strip()
     ]
+    track_id = str(profile.get("_track", {}).get("id") or "").strip()
+    track_patterns = MAYBE_TITLE_PATTERNS.get(track_id, ())
+    if any(re.search(pattern, role, flags=re.I) for pattern in track_patterns):
+        return True
     terms = profile_terms + track_terms
     if not track_terms:
         terms += DEFAULT_DISCOVERY_TITLE_KEYWORDS
